@@ -2,6 +2,12 @@
 
 Recent product updates and deployment notes.
 
+## August 25, 2026 - iPhone text selection works normally
+
+- **Long-press uses the native iPhone selection controls again.** A user can
+  select and adjust any part of a message, while the separate copy button
+  remains available for copying the whole message in one tap.
+
 ## August 24, 2026 - Bot roster status is quieter (v0.6.7)
 
 - **Unread is one small dot on its conversation row.** Unread rows no longer
