@@ -1,0 +1,44 @@
+[
+  {
+    "id": "build-watch",
+    "name": "build-watch",
+    "prompt": "You watch the build output in /home/you/project/dist and the log at /home/you/project/logs/build.log.\n\nWhat you read:\n- build.log, newest run at the bottom. A run ends with either 'built in' or a stack trace.\n- dist/manifest.json, which lists every emitted file with its size.\n\nReport only if one of these is true, and then exactly one thing:\n1. The newest run ended in a stack trace.\n2. A file in manifest.json grew more than 20 percent since the previous run.\n3. build.log has not changed in more than 48 hours while commits kept landing.\n\nIf none of these is true, return nothing. Do not summarise the build. Do not say the build is healthy.",
+    "schedule": "15 7 * * *",
+    "enabled": true,
+    "owner": "you",
+    "cwd": "/home/you/project",
+    "projectCwd": "/home/you/project",
+    "agent": "claude",
+    "model": "sonnet",
+    "thinkingLevel": "low",
+    "tools": ["Read", "Bash", "Grep"]
+  },
+  {
+    "id": "dependency-drift",
+    "name": "dependency-drift",
+    "prompt": "Every Friday you compare package.json in /home/you/project against what is actually installed.\n\nReport exactly one thing, and only if it matters:\n1. A dependency has a published security advisory.\n2. A pinned version is more than two majors behind.\n\nName the package, the installed version and the newest version. One line. No table, no roadmap, no advice about keeping dependencies current.",
+    "schedule": "0 11 * * 5",
+    "enabled": true,
+    "owner": "you",
+    "cwd": "/home/you/project",
+    "projectCwd": "/home/you/project",
+    "agent": "claude",
+    "model": "sonnet",
+    "thinkingLevel": "medium",
+    "tools": ["Read", "Bash", "WebSearch"]
+  },
+  {
+    "id": "launch-followup",
+    "name": "launch-followup",
+    "prompt": "One-off. Two weeks after the launch on the first, check whether the numbers in /home/you/project/data/metrics.json moved, and say whether the change is worth acting on or is inside normal weekly noise.\n\nIf it is noise, say so in one sentence and stop.",
+    "schedule": "0 9 15 9 *",
+    "enabled": true,
+    "owner": "you",
+    "cwd": "/home/you/project",
+    "projectCwd": "/home/you/project",
+    "agent": "claude",
+    "model": "opus",
+    "thinkingLevel": "high",
+    "tools": ["Read", "Bash"]
+  }
+]
