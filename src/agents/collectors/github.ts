@@ -67,7 +67,7 @@ export async function collectGithubPrs(spec: {
     "--limit",
     String(limit),
     "--json",
-    "number,title,state,labels,author,createdAt,updatedAt,url,isDraft",
+    "number,title,state,labels,author,createdAt,updatedAt,url,isDraft,reviews",
   ]);
   if (!r.ok) {
     return {

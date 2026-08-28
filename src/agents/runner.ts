@@ -27,6 +27,13 @@ export type RunResult = {
   collectorWarnings: { kind: string; warning: string }[];
 };
 
+export function collectorBlocker(warnings: { kind: string; warning: string }[]): string | null {
+  if (!warnings.length) return null;
+  return warnings
+    .map((w) => `${w.kind}: ${w.warning.replace(/\s+/g, " ").trim().slice(0, 500)}`)
+    .join("; ");
+}
+
 function todayUtc(): string {
   return new Date().toISOString().slice(0, 10);
 }
@@ -375,6 +382,7 @@ export async function runAgent(
   await mkdir(reportDir(name), { recursive: true });
 
   const { prompt, warnings } = await buildPrompt(agent, date, log);
+  const blocker = collectorBlocker(warnings);
 
   if (opts.dryRun) {
     const path = join(reportDir(name), `${date}.prompt.md`);
@@ -386,7 +394,7 @@ export async function runAgent(
       reportPath: path,
       actionsPath: actionsPathFor(name, date),
       bytes: prompt.length,
-      ok: true,
+      ok: blocker === null,
       collectorWarnings: warnings,
     };
   }
@@ -406,7 +414,7 @@ export async function runAgent(
     reportPath: rPath,
     actionsPath: actionsPathFor(name, date),
     bytes: report.length,
-    ok: true,
+    ok: blocker === null,
     collectorWarnings: warnings,
   };
 }
