@@ -117,15 +117,16 @@ describe("roster_hidden (issue 521 follow-up)", () => {
   });
 });
 
-// Direct SQL proof that the shipped migration is idempotent-by-version: a
-// database already at user_version 7 must not need (or re-run) migration 007.
-describe("migration 007 file", () => {
+// Direct SQL proof that the shipped migration is additive and version-stamped.
+// Since the 0.6.24 port the fork migration is number 8: upstream claimed 7 for
+// fast_mode, and the wiring guards on the actual schema, not the counter.
+describe("migration 008 file", () => {
   test("is a single additive column with default 0", () => {
     const sql = readFileSync(
-      new URL("./migrations/resume-cache/007_roster_hidden.sql", import.meta.url),
+      new URL("./migrations/resume-cache/008_roster_hidden.sql", import.meta.url),
       "utf8",
     );
     expect(sql).toContain("ALTER TABLE resumable_sessions ADD COLUMN roster_hidden INTEGER NOT NULL DEFAULT 0");
-    expect(sql).toContain("PRAGMA user_version = 7");
+    expect(sql).toContain("PRAGMA user_version = 8");
   });
 });
