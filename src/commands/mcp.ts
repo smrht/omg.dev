@@ -17,6 +17,7 @@ import {
 } from "../omg-capabilities.ts";
 import { BOT_COLORWAYS, BOT_SHAPES } from "../bots/store.ts";
 import { BOT_PEER_MESSAGE_MAX_CHARS } from "../bots/messaging.ts";
+import { registerSamTools } from "../sam-tools.ts";
 
 type Repo = { name: string; cwd: string; project?: string };
 type SessionRow = {
@@ -1437,10 +1438,13 @@ export function buildOmgMcpServer(): McpServer {
       },
     },
     async (input) => {
+      const { cwd, ...rest } = input;
       const data = await api<{ agent: { id?: string } }>("/api/auto/agents", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(input),
+        // Browser cwd is the logical Repo picker. Preserve the MCP contract:
+        // cwd here remains the directory the run executes in.
+        body: JSON.stringify({ ...rest, executionCwd: cwd }),
       });
       return result({ agent: data.agent, updated: !!input.id });
     },
@@ -1610,6 +1614,10 @@ export function buildOmgMcpServer(): McpServer {
       return result({ finding: data.finding });
     },
   );
+
+  // Sam's own portfolio tools live in their own module so upstream merges of
+  // this file stay clean.
+  registerSamTools(server);
 
   return server;
 }
