@@ -7,7 +7,6 @@ import { marked } from "marked";
 import {
   AgentAdmissionController,
   NO_AGENT_LIMIT,
-  admissionResidentPool,
   agentLaunchMemoryBudget,
   computerAgentAdmissionContext,
 } from "../agent-admission.ts";
@@ -64,7 +63,6 @@ import {
   isRunning,
   listFindings,
   updateFinding,
-  dismissAllFindings,
   logFindingAction,
   type AutoAgent,
   type AutoAgentOwner,
@@ -253,7 +251,7 @@ import {
   noteListSessionsClientActivity,
 } from "../session-cache.ts";
 import { buildSessionUsageReport, findSessionDevServerPids } from "../session-usage.ts";
-import { capReclaimCandidate, memoryReclaimCandidates } from "../idle-archive.ts";
+import { memoryReclaimCandidates } from "../idle-archive.ts";
 import { CODING_AGENT_ADAPTERS, resolveActiveSessionAgent, usesCommandFileRuntime } from "../coding-agent-adapters.ts";
 import { launchCodingAgentSession } from "../coding-agent-provider.ts";
 import {
@@ -329,7 +327,6 @@ import {
 import {
   browserClick,
   browserNavigate,
-  browserPaste,
   browserPress,
   browserReadText,
   browserScreenshot,
@@ -470,9 +467,6 @@ import {
 } from "../model-discovery.ts";
 import {
   BOT_SCHEDULE_LIMIT,
-  CUSTOM_INSTRUCTIONS_MAX_LENGTH,
-  DEFAULT_AGENT_KEY_MAX_LENGTH,
-  DEFAULT_MODEL_MAX_LENGTH,
   DEFAULT_TIME_ZONE,
   getGlobalSettings,
   getGlobalSettingsSync,
@@ -790,14 +784,12 @@ async function activationGate(
 ): Promise<Response | { release: () => void; reclaimed?: number }> {
   const settings = getGlobalSettingsSync();
   const computer = computerAgentAdmissionContext();
-  // Schedule admission keeps its own resident pool everywhere (issue 521).
-  // On a Computer the plan's scheduleLimit bounds it; on a self-hosted box
-  // the same maxLiveAgents preference bounds the schedule pool SEPARATELY,
-  // so a full interactive roster can no longer starve cron work.
-  const kind = options?.kind === "schedule" ? "schedule" : "interactive";
+  // Schedule admission is a Computer-plan rule. A self-hosted box has no plan
+  // file, so spawnedBy=schedule is just another session under maxLiveAgents.
+  const kind = computer && options?.kind === "schedule" ? "schedule" : "interactive";
   const limit =
-    kind === "schedule"
-      ? (computer?.scheduleLimit ?? settings.maxLiveAgents)
+    kind === "schedule" && computer
+      ? computer.scheduleLimit
       : (computer?.limit ?? settings.maxLiveAgents);
   if (limit === 0) return { release: () => {} };
   const overLimit = !computer && options?.overLimit === true;
@@ -807,10 +799,12 @@ async function activationGate(
     async () => {
       const available = hostAvailableMemory();
       const sessions = await listSessions().catch(() => []);
-      // Disjoint pools for Computer AND self-hosted boxes (issue 521):
-      // interactive launches count only interactive residents, schedule
-      // launches only schedule residents; persistent bots hold no slot.
-      const pool = admissionResidentPool(kind, sessions);
+      const pool = (!computer
+        ? sessions
+        : kind === "schedule"
+          ? sessions.filter((session) => session.spawnedBy === "schedule")
+          : sessions.filter((session) => session.spawnedBy !== "schedule"))
+        .filter((session) => !session.persistent);
       return {
         sessions: pool,
         // Always measured, so every launch books its share of memory even on
@@ -827,16 +821,7 @@ async function activationGate(
         enforceMemory: computer !== null || (overLimit && available.trusted),
       };
     },
-    computer
-      ? archiveIdleDurableAgentsForMemory
-      : kind === "interactive"
-        ? reclaimIdleDurableAgentForInteractiveCap
-        : undefined,
-    // A self-hosted interactive launch at its own live cap may trade the
-    // oldest safe idle durable ordinary session for the slot instead of
-    // refusing the owner (issue 521). Computer plans keep reclaim
-    // memory-pressure-only.
-    computer ? undefined : { reclaimOnLimit: kind === "interactive" },
+    computer ? archiveIdleDurableAgentsForMemory : undefined,
   );
   if (reservation.ok) return reservation;
   // Tagged `plan_limit` ONLY on a hosted Computer. An ordinary LFG install that
@@ -2062,27 +2047,6 @@ async function archiveIdleDurableAgentsForMemory(): Promise<number> {
     if (memory.availableBytes >= memory.reserveBytes + memory.launchBytes) break;
   }
   return archived;
-}
-
-// The self-hosted twin of the cap story (issue 521): the limit is the
-// owner's own preference, so an interactive launch that hits it trades the
-// OLDEST safe idle durable ordinary session for the slot instead of
-// returning a 429 the owner would first have to edit a number to avoid.
-// Safety is exactly memoryReclaimCandidates (never busy, launching,
-// persistent, unmanaged or non-resumable work) plus one addition in
-// capReclaimCandidate: schedule-spawned residents belong to the separate
-// schedule pool. closeLiveSession persists the resume record first, so
-// the closed chat reopens with its transcript and session context. One
-// close per admission: the retry then either fits or refuses.
-async function reclaimIdleDurableAgentForInteractiveCap(): Promise<number> {
-  const candidate = capReclaimCandidate(await listSessions());
-  if (!candidate) return 0;
-  const sessionId = candidate.sessionId as string;
-  const outcome = await closeLiveSession(candidate, sessionId, {
-    sessionId,
-    source: "selfhosted_cap_reclaim",
-  });
-  return outcome.ok ? 1 : 0;
 }
 
 const BOT_COMPACTION_SWEEP_MS = 15_000;
@@ -4104,11 +4068,6 @@ export async function cmdServe() {
               await browserType(body.text);
               return json({ ok: true });
             }
-            case "paste": {
-              if (!body.text) return err(400, "text is required");
-              await browserPaste(body.text);
-              return json({ ok: true });
-            }
             case "press": {
               if (!body.key) return err(400, "key is required");
               await browserPress(body.key);
@@ -4751,69 +4710,6 @@ a{color:#60a5fa}
             if (typeof b.skippedUpdateVersion !== "string" || b.skippedUpdateVersion.length > 100)
               return err(400, "skippedUpdateVersion must be a string of 100 characters or fewer");
             patch.skippedUpdateVersion = b.skippedUpdateVersion;
-          }
-          if (b?.defaultAgent !== undefined) {
-            if (
-              typeof b.defaultAgent !== "string" ||
-              b.defaultAgent.length > DEFAULT_AGENT_KEY_MAX_LENGTH ||
-              !/^[a-z0-9-]*$/i.test(b.defaultAgent)
-            ) {
-              return err(400, "defaultAgent must be an agent key (letters, digits, dashes) or empty");
-            }
-            patch.defaultAgent = b.defaultAgent;
-          }
-          if (b?.defaultModel !== undefined) {
-            if (typeof b.defaultModel !== "string" || b.defaultModel.length > DEFAULT_MODEL_MAX_LENGTH)
-              return err(400, `defaultModel must be a string of ${DEFAULT_MODEL_MAX_LENGTH} characters or fewer`);
-            patch.defaultModel = b.defaultModel;
-          }
-          // One explicit branch per switch: settings-validation.test.ts reads
-          // this handler for a `patch.<field> =` per GlobalSettings key.
-          if (b?.showSidebarAgentIcons !== undefined) {
-            if (typeof b.showSidebarAgentIcons !== "boolean")
-              return err(400, "showSidebarAgentIcons must be a boolean");
-            patch.showSidebarAgentIcons = b.showSidebarAgentIcons;
-          }
-          if (b?.showSessionAgentIcons !== undefined) {
-            if (typeof b.showSessionAgentIcons !== "boolean")
-              return err(400, "showSessionAgentIcons must be a boolean");
-            patch.showSessionAgentIcons = b.showSessionAgentIcons;
-          }
-          if (b?.showComposerModels !== undefined) {
-            if (typeof b.showComposerModels !== "boolean")
-              return err(400, "showComposerModels must be a boolean");
-            patch.showComposerModels = b.showComposerModels;
-          }
-          if (b?.showComposerAgents !== undefined) {
-            if (typeof b.showComposerAgents !== "boolean")
-              return err(400, "showComposerAgents must be a boolean");
-            patch.showComposerAgents = b.showComposerAgents;
-          }
-          if (b?.showBots !== undefined) {
-            if (typeof b.showBots !== "boolean") return err(400, "showBots must be a boolean");
-            patch.showBots = b.showBots;
-          }
-          if (b?.showSchedules !== undefined) {
-            if (typeof b.showSchedules !== "boolean")
-              return err(400, "showSchedules must be a boolean");
-            patch.showSchedules = b.showSchedules;
-          }
-          if (b?.showSessionDiffBar !== undefined) {
-            if (typeof b.showSessionDiffBar !== "boolean")
-              return err(400, "showSessionDiffBar must be a boolean");
-            patch.showSessionDiffBar = b.showSessionDiffBar;
-          }
-          if (b?.customInstructions !== undefined) {
-            if (
-              typeof b.customInstructions !== "string" ||
-              b.customInstructions.length > CUSTOM_INSTRUCTIONS_MAX_LENGTH
-            ) {
-              return err(
-                400,
-                `customInstructions must be a string of ${CUSTOM_INSTRUCTIONS_MAX_LENGTH} characters or fewer`,
-              );
-            }
-            patch.customInstructions = b.customInstructions;
           }
           const settings = await setGlobalSettings(patch);
           return json({ settings });
@@ -6944,27 +6840,6 @@ a{color:#60a5fa}
           return json({ question: q });
         }
       }
-      // Empty the feed in one action. The per-finding route below is the
-      // single-row equivalent; this is not a loop over it on purpose. Each
-      // updateFinding call re-reads and rewrites the whole JSONL file, so a
-      // client-side fan-out over N findings is N full rewrites that interleave
-      // and drop each other's writes. One batched write in the store instead.
-      //
-      // Literal path, and it cannot collide with the /:id route below: that
-      // regex is [0-9a-f]+ and "clear" contains l and r.
-      if (path === "/api/auto/findings/clear" && req.method === "POST") {
-        // Optional { ids }: the caller clears exactly the findings it showed.
-        // The rail is project-scoped, so an unscoped clear would dismiss rows
-        // the button never offered to. No body = every open finding.
-        const b = (await req.json().catch(() => null)) as { ids?: unknown } | null;
-        let ids: string[] | undefined;
-        if (b?.ids !== undefined) {
-          if (!Array.isArray(b.ids) || b.ids.some((i) => typeof i !== "string"))
-            return err(400, "expected { ids?: string[] }");
-          ids = b.ids as string[];
-        }
-        return json({ cleared: await dismissAllFindings(ids) });
-      }
       {
         const m = path.match(/^\/api\/auto\/findings\/([0-9a-f]+)$/);
         if (m && req.method === "POST") {
@@ -8300,6 +8175,7 @@ a{color:#60a5fa}
         if (gate instanceof Response) return gate;
         try {
         const tmuxName = `lfg-${randomBytes(3).toString("hex")}`;
+        const isSubagent = spawnedBy === "subagent";
         const cwdResolved = await resolveSessionCwd(repo.cwd, tmuxName, {
           worktree: body?.worktree,
           selfRepo: SELF_REPO,
@@ -8381,10 +8257,7 @@ a{color:#60a5fa}
           fastMode,
           sessionId: launchId,
           omgUser: assignedUser,
-          // Issue 521: parents run contained too — their own
-          // lfg-agent-*.service, so omg.service restarts stop
-          // accumulating orphaned children.
-          containInAgentSlice: true,
+          containInAgentSlice: isSubagent,
           claudeAccountId,
         });
         if (!r.ok) {

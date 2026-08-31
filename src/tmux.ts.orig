@@ -5,7 +5,6 @@ import { readFileSync, writeFileSync, existsSync, realpathSync, mkdirSync } from
 import { homedir } from "node:os";
 import { reposRoot } from "./projects";
 import { OMG_CAPABILITY_VERSION, withOmgRuntimeContract } from "./omg-capabilities.ts";
-import { getGlobalSettingsSync } from "./settings.ts";
 import {
   CLAUDE_ENV_TOKEN_KEY,
   CLAUDE_PLATFORM_ENV_KEYS,
@@ -21,20 +20,6 @@ import {
   codexServiceTierArgs,
   type CodexServiceTier,
 } from "./service-tier.ts";
-
-/**
- * The first prompt for a managed session, with omg.dev's launch envelope on it.
- *
- * Every adapter below goes through this instead of calling
- * withOmgRuntimeContract directly, so the owner's standing instructions
- * (GlobalSettings.customInstructions) are read in exactly one place and no
- * adapter can be added later that quietly skips them. The read is synchronous
- * and happens per launch, so editing the setting takes effect on the next
- * session with no restart.
- */
-function launchEnvelope(prompt: string | undefined): string | undefined {
-  return withOmgRuntimeContract(prompt, getGlobalSettingsSync().customInstructions);
-}
 
 // Known-good Claude model alias to launch with when a caller doesn't specify
 // one. Never launch a managed `claude` bare — see spawnManagedSession. Opus is
@@ -142,8 +127,8 @@ function addSessionEnv(
   // chain isn't resolvable at create time (headless/cron callers).
   if (user) env.push("-e", `LFG_USER=${user}`);
   // Parent and subagent managed sessions both need a named browser session +
-  // idle timeout. Since issue 521 systemd containment covers parents too;
-  // these env vars stay universal.
+  // idle timeout. systemd containment (containInAgentSlice) is still subagent-
+  // only for cgroup/OOM reasons; these env vars are universal.
   if (managedName) {
     const browser = agentBrowserEnv(managedName);
     env.push("-e", `AGENT_BROWSER_SESSION=${browser.AGENT_BROWSER_SESSION}`);
@@ -165,8 +150,7 @@ type AgentContainment = {
 };
 
 /**
- * Run a managed agent (parent or subagent, issue 521) as a transient user
- * service in the aggregate agent slice.
+ * Run a subagent as a transient user service in the aggregate agent slice.
  * A service (rather than a scope) gives systemd a main process: when it exits,
  * KillMode=control-group reaps helper daemons such as agent-browser. Blocking
  * the service's session bus also prevents Chromium from moving itself into an
@@ -212,9 +196,7 @@ function containTmuxCommand(
   enabled: boolean | undefined,
   opts: AgentContainment,
 ): void {
-  // Containment is the default for every managed launch (issue 521);
-  // only an explicit false opts out.
-  if (enabled === false) return;
+  if (!enabled) return;
   const commandIndex = argv.indexOf(executable);
   if (commandIndex < 0) throw new Error(`agent executable not found in tmux argv: ${executable}`);
   argv.splice(commandIndex, argv.length - commandIndex, ...containedAgentCommand(argv.slice(commandIndex), opts));
@@ -223,10 +205,9 @@ function containTmuxCommand(
 export type ManagedHarnessSpawnResult = { ok: boolean; error?: string; pid?: number };
 
 // Headless SDK harnesses have their own durable command-file control plane, so
-// tmux adds no transport value. Launch them as transient user services in the
-// agent slice (issue 521): KillMode=control-group reaps helper daemons when
-// the harness exits, and the units survive a serve restart as siblings of
-// omg.service rather than piling up as its children; a host reboot is handled
+// tmux adds no transport value. Launch them as ordinary detached children. The
+// lfg systemd unit uses KillMode=process, which lets these children survive a
+// serve restart exactly as the old tmux wrapper did; a host reboot is handled
 // separately by the boot reconciliation journal in session-recovery.ts.
 function spawnManagedHarness(
   command: string[],
@@ -238,17 +219,13 @@ function spawnManagedHarness(
   env.OMG_CAPABILITY_VERSION = OMG_CAPABILITY_VERSION;
   if (opts.omgUser) env.LFG_USER = opts.omgUser;
   else delete env.LFG_USER;
-  // Always name + idle-timeout the browser, including contained harness
-  // spawns. Since issue 521 parents run contained too: their own transient
-  // lfg-agent-*.service reaps the whole group (agent-browser included) when
-  // the harness exits, and survives an omg.service restart as a sibling
-  // unit. Browser profile/login state lives on disk under the
-  // session-named profile, so containment does not cost it.
+  // Always name + idle-timeout the browser, including parent (non-slice) harness
+  // spawns. containInAgentSlice still only wraps subagents in systemd-run.
   Object.assign(env, agentBrowserEnv(opts.name));
   Object.assign(env, agentTmpEnv());
-  const cmd = opts.containInAgentSlice === false
-    ? command
-    : containedAgentCommand(command, opts, { pty: false });
+  const cmd = opts.containInAgentSlice
+    ? containedAgentCommand(command, opts, { pty: false })
+    : command;
 
   // Process-isolated integration tests capture the launch contract without
   // starting a real provider harness.
@@ -671,7 +648,7 @@ export function spawnManagedSession(opts: {
   // `--` terminates option parsing so the variadic --add-dir can't swallow the
   // positional prompt as a second directory (which strands the new session at
   // an empty composer — the first message never gets submitted).
-  const prompt = launchEnvelope(opts.prompt);
+  const prompt = withOmgRuntimeContract(opts.prompt);
   if (prompt?.trim()) claudeArgv.push("--", prompt);
   const argv = [
     "tmux",
@@ -756,7 +733,7 @@ export function managedCodexSessionArgv(opts: ManagedCodexSessionOptions): strin
   if (opts.model) argv.push("--model", opts.model);
   if (opts.thinkingLevel) argv.push("-c", `reasoning_effort=${JSON.stringify(opts.thinkingLevel)}`);
   argv.push(...codexServiceTierArgs(opts.serviceTier));
-  const prompt = launchEnvelope(opts.prompt);
+  const prompt = withOmgRuntimeContract(opts.prompt);
   if (prompt?.trim()) argv.push("--", prompt);
   addSessionEnv(argv, opts.omgSessionId, opts.omgUser, opts.name);
   containTmuxCommand(argv, codexBin(), opts.containInAgentSlice, opts);
@@ -806,7 +783,7 @@ export function managedGrokSessionArgv(opts: ManagedGrokSessionOptions): string[
   // xhigh/max carried over from another agent would stop the session launching.
   const effort = grokEffortFor(opts.thinkingLevel);
   if (effort) argv.push("--effort", effort);
-  const prompt = launchEnvelope(opts.prompt);
+  const prompt = withOmgRuntimeContract(opts.prompt);
   if (prompt?.trim()) argv.push("--", prompt);
   addSessionEnv(argv, opts.omgSessionId, opts.omgUser, opts.name);
   return argv;
@@ -854,7 +831,7 @@ export function managedCopilotSessionArgv(opts: ManagedCopilotSessionOptions): s
   ];
   if (process.env.LFG_COPILOT_ALLOW_ALL_TOOLS === "1") argv.push("--allow-all-tools");
   if (opts.model) argv.push("--model", opts.model);
-  const prompt = launchEnvelope(opts.prompt);
+  const prompt = withOmgRuntimeContract(opts.prompt);
   if (prompt?.trim()) argv.push("-i", prompt);
   addSessionEnv(argv, opts.omgSessionId, opts.omgUser, opts.name);
   return argv;
@@ -939,7 +916,7 @@ export function spawnManagedJcodeSession(opts: ManagedJcodeSessionOptions): { ok
   if (create.exitCode !== 0) {
     return { ok: false, error: dec.decode(create.stderr) || "new-session failed" };
   }
-  const prompt = jcodeReplPrompt(launchEnvelope(opts.prompt));
+  const prompt = jcodeReplPrompt(withOmgRuntimeContract(opts.prompt));
   if (prompt?.trim()) {
     if (!tmuxType(opts.name, prompt) || !tmuxEnter(opts.name)) {
       return { ok: false, error: "failed to send the initial Jcode prompt" };
@@ -975,7 +952,7 @@ export function managedCursorSessionArgv(opts: ManagedCursorSessionOptions): str
   ];
   if (opts.nativeSessionId) argv.push("--resume", opts.nativeSessionId);
   if (opts.model && opts.model !== "auto") argv.push("--model", opts.model);
-  const prompt = launchEnvelope(opts.prompt);
+  const prompt = withOmgRuntimeContract(opts.prompt);
   if (prompt?.trim()) argv.push(prompt);
   addSessionEnv(argv, opts.omgSessionId, opts.omgUser, opts.name);
   return argv;
@@ -1148,7 +1125,7 @@ export function managedAisdkSessionArgv(opts: ManagedAisdkSessionOptions): strin
   if (opts.fastMode) argv.push("--fast-mode");
   if (opts.claudeAccountId) argv.push("--claude-account", opts.claudeAccountId);
   if (opts.recoveredAt) argv.push("--recovered-at", String(opts.recoveredAt));
-  const prompt = launchEnvelope(opts.prompt);
+  const prompt = withOmgRuntimeContract(opts.prompt);
   if (prompt?.trim()) argv.push("--", prompt);
   return argv;
 }
@@ -1205,7 +1182,7 @@ export function managedCodexAisdkSessionArgv(opts: ManagedCodexAisdkSessionOptio
   if (opts.serviceTier) argv.push("--service-tier", opts.serviceTier);
   if (opts.resume) argv.push("--resume", opts.resume);
   if (opts.recoveredAt) argv.push("--recovered-at", String(opts.recoveredAt));
-  const prompt = launchEnvelope(opts.prompt);
+  const prompt = withOmgRuntimeContract(opts.prompt);
   if (prompt?.trim()) argv.push("--", prompt);
   return argv;
 }
@@ -1311,7 +1288,7 @@ export function spawnManagedOpencodeAisdkSession(opts: {
   if (opts.thinkingLevel) argv.push("--thinking-level", opts.thinkingLevel);
   if (opts.resume) argv.push("--resume", opts.resume);
   if (opts.recoveredAt) argv.push("--recovered-at", String(opts.recoveredAt));
-  const prompt = launchEnvelope(opts.prompt);
+  const prompt = withOmgRuntimeContract(opts.prompt);
   if (prompt?.trim()) argv.push("--", prompt);
   return spawnManagedHarness(argv, {
     name: opts.name,
@@ -1336,26 +1313,10 @@ type ManagedStructuredSessionOptions = {
   recoveredAt?: number;
 };
 
-export type ManagedStructuredModule =
-  | "grok-acp-session"
-  | "cursor-acp-session"
-  | "fx-acp-session"
-  | "deepseek-acp-session"
-  | "copilot-sdk-session"
-  | "jcode-sdk-session";
-
-/**
- * The argv for one structured (ACP/SDK) harness.
- *
- * Split out of the spawn so the launch envelope is assertable without starting
- * a process. Every module here parses `--` the same way (see
- * cmdDeepseekAcpSession and its siblings: `argv.slice(separator + 1)` into
- * runManagedSdkSession), so none of them is a special case.
- */
-export function managedStructuredSessionArgv(
-  moduleName: ManagedStructuredModule,
+function spawnManagedStructuredSession(
+  moduleName: "grok-acp-session" | "cursor-acp-session" | "fx-acp-session" | "deepseek-acp-session" | "copilot-sdk-session" | "jcode-sdk-session",
   opts: ManagedStructuredSessionOptions,
-): string[] {
+): ManagedHarnessSpawnResult {
   const harnessPath = `${import.meta.dir}/agents/backends/${moduleName}.ts`;
   const argv = [
     process.execPath,
@@ -1368,16 +1329,10 @@ export function managedStructuredSessionArgv(
   if (opts.thinkingLevel) argv.push("--thinking-level", opts.thinkingLevel);
   if (opts.resume) argv.push("--resume", opts.resume);
   if (opts.recoveredAt) argv.push("--recovered-at", String(opts.recoveredAt));
-  const prompt = launchEnvelope(opts.prompt);
+  const prompt = moduleName === "deepseek-acp-session"
+    ? opts.prompt
+    : withOmgRuntimeContract(opts.prompt);
   if (prompt?.trim()) argv.push("--", prompt);
-  return argv;
-}
-
-function spawnManagedStructuredSession(
-  moduleName: ManagedStructuredModule,
-  opts: ManagedStructuredSessionOptions,
-): ManagedHarnessSpawnResult {
-  const argv = managedStructuredSessionArgv(moduleName, opts);
   return spawnManagedHarness(argv, {
     name: opts.name,
     cwd: opts.cwd,
