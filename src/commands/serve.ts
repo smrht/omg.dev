@@ -329,12 +329,16 @@ import {
 } from "../computer/desktop.ts";
 import {
   browserClick,
+  browserInspectElement,
+  browserInspectionStatus,
   browserNavigate,
   browserPaste,
   browserPress,
   browserReadText,
   browserScreenshot,
   browserType,
+  cancelBrowserInspection,
+  closeAgentView,
 } from "../computer/browser.ts";
 import { capturePaneScroll, capturePaneEscaped, paneWidth } from "../tmux.ts";
 import { detectUrls } from "../links.ts";
@@ -1036,8 +1040,18 @@ type RepoEntry = Awaited<ReturnType<typeof listRepos>>[number];
 // still group them under the owning repo's project. projectName() collapses
 // worktree cwds back to the main checkout, so compute it server-side — the
 // browser cannot read .git files to do this itself.
-function withAutoAgentMeta<T extends { id: string; cwd?: string }>(a: T) {
-  return { ...a, project: projectName(a.cwd || SELF_REPO), running: isRunning(a.id) };
+function withAutoAgentMeta<T extends { id: string; cwd?: string; projectCwd?: string }>(a: T) {
+  const executionCwd = a.cwd;
+  const logicalCwd = a.projectCwd || executionCwd;
+  return {
+    ...a,
+    // The schedule editor Repo picker is a logical project assignment. Keep
+    // the actual runner cwd separate so saving cannot load a large repo.
+    cwd: logicalCwd,
+    executionCwd,
+    project: projectName(logicalCwd || SELF_REPO),
+    running: isRunning(a.id),
+  };
 }
 
 /**
@@ -1072,7 +1086,7 @@ export function truncateAutoAgentPrompt(prompt: string): {
 }
 
 /** List-shaped agent: same as withAutoAgentMeta, minus the prompt tail. */
-function withAutoAgentListMeta<T extends { id: string; cwd?: string; prompt?: string }>(a: T) {
+function withAutoAgentListMeta<T extends { id: string; cwd?: string; projectCwd?: string; prompt?: string }>(a: T) {
   const meta = withAutoAgentMeta(a);
   // An agent with no prompt at all keeps that shape rather than gaining an
   // empty string, so the editor's "is this a preview?" check stays honest.
@@ -4047,7 +4061,7 @@ export async function cmdServe() {
         // kept running, and reporting "stopped" for a live screen is worse
         // than the extra probe costs.
         await ensureDesktopAdopted();
-        return json(desktopStatus());
+        return json({ ...desktopStatus(), inspection: browserInspectionStatus() });
       }
 
       if (path === "/api/computer/start" && req.method === "POST") {
@@ -4064,15 +4078,23 @@ export async function cmdServe() {
             // empty string means direct egress and must override that default.
             ...("proxy" in body ? { proxy: body.proxy || undefined } : {}),
           });
-          return json(status);
+          return json({ ...status, inspection: browserInspectionStatus() });
         } catch (e) {
           return err(500, e instanceof Error ? e.message : "failed to start the computer");
         }
       }
 
       if (path === "/api/computer/stop" && req.method === "POST") {
+        await cancelBrowserInspection("desktop stopped");
+        closeAgentView();
         await stopDesktop();
-        return json(desktopStatus());
+        return json({ ...desktopStatus(), inspection: browserInspectionStatus() });
+      }
+
+      if (path === "/api/computer/browser/inspect/cancel" && req.method === "POST") {
+        return json({
+          cancelled: await cancelBrowserInspection("cancelled from the Computer"),
+        });
       }
 
       // Agent control of the browser on that desktop, via Bun.WebView attached
@@ -4089,6 +4111,7 @@ export async function cmdServe() {
             y?: number;
             text?: string;
             key?: string;
+            timeoutMs?: number;
           };
           switch (action) {
             case "navigate": {
@@ -4119,6 +4142,14 @@ export async function cmdServe() {
             }
             case "text": {
               return json({ text: await browserReadText() });
+            }
+            case "inspect": {
+              return json(
+                await browserInspectElement({
+                  ...(body.timeoutMs ? { timeoutMs: body.timeoutMs } : {}),
+                  signal: req.signal,
+                }),
+              );
             }
             case "screenshot": {
               const blob = await browserScreenshot();
@@ -6102,6 +6133,7 @@ a{color:#60a5fa}
             schedule?: string;
             enabled?: boolean;
             cwd?: string;
+            executionCwd?: string;
             agent?: string;
             claudeAccountId?: string | null;
             model?: string;
@@ -6182,7 +6214,17 @@ a{color:#60a5fa}
             schedule: b.schedule,
             enabled: b.enabled !== false,
             owner,
-            cwd: b.cwd,
+            // Browser cwd is the logical Repo picker; MCP callers send
+            // executionCwd when they intentionally move the runner.
+            cwd:
+              (typeof b.executionCwd === "string" ? b.executionCwd.trim() : "") ||
+              existingForEdit?.cwd ||
+              b.cwd,
+            projectCwd:
+              (typeof b.cwd === "string" ? b.cwd.trim() : "") ||
+              existingForEdit?.projectCwd ||
+              existingForEdit?.cwd ||
+              b.executionCwd,
             agent: autoAgent as any,
             claudeAccountId,
             model,
@@ -7428,6 +7470,30 @@ a{color:#60a5fa}
           if (selfUpdateRunning) return err(409, "An omg.dev update is already running.");
           selfUpdateRunning = true;
           try {
+            // Fork-gate (27-08-2026): op deze box hangt een lokale patchlaag
+            // aan elke release. De UI-knop deed vroeger een kale bundleswap,
+            // en die swap naar 0.6.16 gooide de fork er stil af. Bestaat de
+            // veilige route, dan draait de knop díe: snapshot, update, apply.sh
+            // en health-gate met automatische rollback. Als eigen transient
+            // unit, want de herstart die erop volgt mag hem niet meenemen.
+            // Ontbreekt het script, dan blijft upstream-gedrag staan — een
+            // fork-gate mag updaten nooit onmogelijk maken.
+            const safeUpdate = process.env.OMG_SAFE_UPDATE_BIN ?? "/home/agent/bin/omg-safe-update";
+            if (install.channel === "release" && existsSync(safeUpdate)) {
+              const unit = `omg-safe-update-${Date.now()}`;
+              Bun.spawn({
+                cmd: ["systemd-run", "--user", "--collect", `--unit=${unit}`, safeUpdate, "--apply"],
+                stdin: "ignore",
+                stdout: "ignore",
+                stderr: "ignore",
+              }).unref();
+              return json({
+                install,
+                update: { state: "running", message: `Safe update started as ${unit}.` },
+                restarting: true,
+                bootId: SERVER_INSTANCE_ID,
+              });
+            }
             const result = install.channel === "source"
               ? await applySourceUpdate(PATHS.root)
               : await applyReleaseUpdate(PATHS.root, install);

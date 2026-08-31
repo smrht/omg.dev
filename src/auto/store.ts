@@ -42,6 +42,9 @@ export type AutoAgent = {
   // headless — see src/auto/bot-routine.ts and the scheduler's dispatch.
   owner: AutoAgentOwner;
   cwd?: string; // where the Claude session runs; defaults to repo root
+  // Logical repo this schedule belongs to in the UI. This may differ from cwd
+  // for small wrapper-only control-plane jobs that must not load a large repo.
+  projectCwd?: string;
   agent?: AutoAgentBackend; // omitted for old rows = "aisdk" (Claude AI SDK)
   // Which Claude account a scheduled run bills to. Only the "aisdk" backend has
   // accounts; unset = whichever account the box is currently signed in as.
@@ -309,6 +312,7 @@ export async function saveAutoAgent(input: {
    */
   owner?: AutoAgentOwner;
   cwd?: string;
+  projectCwd?: string;
   agent?: AutoAgentBackend;
   /** undefined = leave the stored pin alone; null/"" = clear it. */
   claudeAccountId?: string | null;
@@ -333,6 +337,7 @@ export async function saveAutoAgent(input: {
       enabled: autoAgentEnabledForBackend(input.enabled, backend),
       owner: input.owner ?? existing?.owner ?? { kind: "user" },
       cwd: input.cwd ?? existing?.cwd,
+      projectCwd: input.projectCwd ?? existing?.projectCwd,
       agent: backend,
       claudeAccountId: claudeAccountForBackend(
         input.claudeAccountId,
