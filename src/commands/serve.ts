@@ -71,6 +71,7 @@ import * as pwaBootLog from "../pwa-boot-log.ts";
 import { botRuntimeContract, shortSessionId } from "../omg-capabilities.ts";
 import {
   getCachedResumableSession,
+  setRosterHidden,
   updateResumableUser,
   upsertResumableRows,
   type ResumableCacheRow,
@@ -7947,6 +7948,26 @@ a{color:#60a5fa}
         }
       }
 
+      // Remove a finished session from the Live workspace's history roster
+      // (issue 521 follow-up). This is a list decision, not archiving: the
+      // durable row keeps its transcript and stays in the Resume > Sessions
+      // picker, which queries without ?roster=1. Live sessions are refused —
+      // a running process must go through the normal close/archive route.
+      {
+        const m = path.match(/^\/api\/sessions\/([0-9a-fA-F-]{36})\/roster-hide$/);
+        if (m && req.method === "POST") {
+          const sessionId = m[1];
+          const liveIds = await liveSessionIdsCached();
+          if (liveIds.has(sessionId)) {
+            return err(409, "session is live — archive it instead of hiding it");
+          }
+          const cached = getCachedResumableSession(sessionId);
+          if (!cached) return err(404, "session not found in the resumable cache");
+          if (!setRosterHidden(sessionId, true)) return err(404, "session not found");
+          return json({ ok: true });
+        }
+      }
+
       // Start a new lfg-managed session. Native interactive agents use a tmux
       // pane; command-file SDK agents launch as direct processes. The durable
       // managed name identifies either lifecycle boundary end-to-end.
@@ -7964,6 +7985,10 @@ a{color:#60a5fa}
           ? agentParam
           : undefined;
         const project = url.searchParams.get("project")?.trim() || undefined;
+        // ?roster=1 serves the Live workspace's merged history list, which
+        // drops rows removed from that list (roster_hidden). The Resume >
+        // Sessions picker omits the param and keeps seeing every row.
+        const roster = url.searchParams.get("roster") === "1";
         const { sessions, total, facets } = await queryResumable({
           limit,
           offset,
@@ -7971,6 +7996,7 @@ a{color:#60a5fa}
           agent,
           project,
           excludeIds: liveIds,
+          roster,
         });
         return json({ sessions, total, facets });
       }
