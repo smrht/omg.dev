@@ -297,6 +297,7 @@ import {
 } from "./lib/folder-browser-recovery";
 import { setThemePreference, THEME_CHANGE_EVENT } from "./lib/theme";
 import { startsInBottomSystemGestureZone } from "./lib/touch-gestures";
+import { recentSessionRoster } from "./lib/recent-session-roster";
 import {
   clearLegacyPinnedSessions,
   readLegacyPinnedSessions,
@@ -6708,6 +6709,56 @@ export function App() {
     };
   }, [loadCore]);
 
+  // Recent finished sessions (the same resume cache the picker lists), merged
+  // into the Live workspace below so history is browsable without opening a
+  // sheet. Fetched once after the initial load and again when a session is
+  // archived — never on the 5s poll: the roster changes rarely and each fetch
+  // is a throttled cache read on the box, not a cheap list.
+  const [recentResumable, setRecentResumable] = useState<ResumableSession[]>([]);
+  const refreshRecentResumable = useCallback(async () => {
+    try {
+      const payload = await api<{ sessions: ResumableSession[] }>(
+        "/api/sessions/resumable?limit=50&roster=1",
+      );
+      // Same malformed-body guard as the resume picker: never store a
+      // non-array, or the roster below renders garbage instead of nothing.
+      setRecentResumable(Array.isArray(payload.sessions) ? payload.sessions : []);
+    } catch {
+      /* keep the previous roster — stale history beats an error banner */
+    }
+  }, []);
+  const didLoadRecent = useRef(false);
+  useEffect(() => {
+    if (loading || didLoadRecent.current) return;
+    didLoadRecent.current = true;
+    void refreshRecentResumable();
+  }, [loading, refreshRecentResumable]);
+  // Archive reshuffles both sides of the merge: the live list loses the row
+  // and the recent list gains it, so the post-archive refresh reconciles both.
+  const refreshSessionsWithRecent = useCallback(async () => {
+    await Promise.all([refreshSessions(), refreshRecentResumable()]);
+  }, [refreshSessions, refreshRecentResumable]);
+  // This is deliberately a roster operation, not archival. The durable
+  // transcript remains in Resume, while the completed row disappears from the
+  // everyday Live list immediately and after the next reload.
+  const hideFromLiveRoster = useCallback(
+    async (sid: string) => {
+      if (!sid) return;
+      setRecentResumable((rows) => rows.filter((row) => row.sessionId !== sid));
+      try {
+        await api(`/api/sessions/${encodeURIComponent(sid)}/roster-hide`, {
+          method: "POST",
+        });
+      } catch (error) {
+        // Re-read the cache after a failed write so the optimistic removal
+        // cannot accidentally hide a row the server refused to change.
+        await refreshRecentResumable().catch(() => {});
+        toast.error(error instanceof Error ? error.message : "Couldn’t remove the chat from this list");
+      }
+    },
+    [refreshRecentResumable],
+  );
+
   useEffect(() => {
     // These checks boot each installed agent CLI. They belong exclusively to
     // the Coding agents page; probing them after every app load made a normal
@@ -6883,16 +6934,29 @@ export function App() {
     [allLiveSessions, userFilter],
   );
 
+  // The Live workspace's merged roster: live rows plus deduped finished rows
+  // from the resume cache (see recentSessionRoster). Live-only derivatives
+  // above (allLiveSessions, userScopedSessions) stay untouched — streams,
+  // status ids and deep-link resolution must keep seeing only real processes.
+  const rosterSessions = useMemo(
+    () => recentSessionRoster(allLiveSessions, recentResumable),
+    [allLiveSessions, recentResumable],
+  );
+  const userScopedRoster = useMemo(
+    () => rosterSessions.filter((session) => sessionMatchesUserFilter(session, userFilter)),
+    [rosterSessions, userFilter],
+  );
+
   const projectOptions = useMemo(
     () =>
       Array.from(
         new Set([
           ...repos.map((repo) => repoProject(repo)),
           ...autoAgents.map((agent) => autoAgentProject(agent, repos)),
-          ...userScopedSessions.map((s) => s.project).filter((p): p is string => !!p),
+          ...userScopedRoster.map((s) => s.project).filter((p): p is string => !!p),
         ]),
       ).sort((a, b) => shortProject(a).localeCompare(shortProject(b))),
-    [autoAgents, repos, userScopedSessions],
+    [autoAgents, repos, userScopedRoster],
   );
   const mobileProjectOptions = useMemo(
     () => projectOptions,
@@ -6912,6 +6976,14 @@ export function App() {
     if (projectFilter === "__all") return userScopedSessions;
     return userScopedSessions.filter((session) => session.project === projectFilter);
   }, [userScopedSessions, projectFilter]);
+
+  // Same scope as liveSessions, but over the merged roster — this is what the
+  // Live workspace renders. History rows join the list without joining the
+  // fleet: streams and expanded-id tracking below still key on liveSessions.
+  const roster = useMemo(() => {
+    if (projectFilter === "__all") return userScopedRoster;
+    return userScopedRoster.filter((session) => session.project === projectFilter);
+  }, [userScopedRoster, projectFilter]);
 
   // Resolve a pending `/?session=<id>` deep link. This lives at the app level
   // (it used to be buried in the wide rail, so mobile ignored deep links
@@ -6947,6 +7019,14 @@ export function App() {
   const liveStatusIds = useMemo(
     () => allLiveSessions.map((s) => s.sessionId).filter((id): id is string => !!id),
     [allLiveSessions],
+  );
+  // Retention set for LiveView's open-page guard: live ids plus the historical
+  // roster, so a `/sessions/<id>` route onto a finished session is not bounced
+  // back to the list. The /api/live/status stream above still keys on
+  // liveStatusIds only — a dead id has no status to ask for.
+  const rosterStatusIds = useMemo(
+    () => rosterSessions.map((s) => s.sessionId).filter((id): id is string => !!id),
+    [rosterSessions],
   );
   const openHistoricalSession = useCallback(
     (source: {
@@ -8933,9 +9013,9 @@ export function App() {
               openSessionId={openSessionId}
               onOpenSessionPage={openSessionPage}
               onCloseSessionPage={closeSessionPage}
-              sessions={liveSessions}
+              sessions={roster}
               shippedReview={shippedReview}
-              liveSessionIds={liveStatusIds}
+              liveSessionIds={rosterStatusIds}
               topPinned={topPinned}
               onToggleTopPin={toggleTopPin}
               users={users}
@@ -8992,7 +9072,8 @@ export function App() {
               typingBySid={othersTypingBySid}
               onTyping={liveStream.sendTyping}
               onSubscribeTranscript={useWsLive ? wsLiveStream.subscribeTranscript : undefined}
-              onRefresh={refreshSessions}
+              onRefresh={refreshSessionsWithRecent}
+              onHideFromRoster={hideFromLiveRoster}
               onRenameSession={renameSession}
               onRemove={removeSession}
               onNew={() =>
@@ -11248,6 +11329,7 @@ function LiveView({
   onRefresh,
   onRenameSession,
   onRemove,
+  onHideFromRoster,
   onNew,
   findings = [],
   autoAgents = [],
@@ -11325,6 +11407,8 @@ function LiveView({
   onRefresh: () => Promise<void>;
   onRenameSession: RenameSession;
   onRemove: (sid: string) => void;
+  /** Remove a completed session from the Live roster, keeping Resume intact. */
+  onHideFromRoster?: (sid: string) => void;
   onNew: () => void;
   findings: AutoFinding[];
   autoAgents: AutoAgent[];
@@ -11415,9 +11499,20 @@ function LiveView({
   // makes: drop it from the list now so the gesture feels immediate, then let
   // the refresh reconcile. A session that already ended 404s, which is not an
   // error the person swiping needs to hear about.
+  const appDialog = useAppDialog();
+  // A swipe is not consent on its own: the stop-and-archive confirm runs here
+  // before the row disappears. The session menus confirm in-place instead
+  // (DoubleConfirmAction), so they never route through this callback.
   const archiveSession = useCallback(
     async (sid: string) => {
       if (!sid) return;
+      const confirmed = await appDialog.confirm({
+        title: "Stop and archive this chat?",
+        description: "This stops the agent and frees its slot. You can resume the chat later.",
+        confirmLabel: "Stop and archive",
+        destructive: true,
+      });
+      if (!confirmed) return;
       haptic("selection");
       onRemove(sid);
       try {
@@ -11428,7 +11523,7 @@ function LiveView({
         await onRefresh().catch(() => {});
       }
     },
-    [onRemove, onRefresh],
+    [appDialog, onRemove, onRefresh],
   );
 
   // Opening a session from the list navigates; the view below follows the URL.
@@ -11550,6 +11645,9 @@ function LiveView({
           onRefresh={onRefresh}
           onRenameSession={onRenameSession}
           onRemove={onRemove}
+          onHideFromRoster={
+            session.shippedReview ? () => onHideFromRoster?.(session.sessionId ?? "") : undefined
+          }
           onOpenSheet={(sid, origin) => {
             setSheetOrigin(origin);
             onOpenSessionPage?.(sid);
@@ -11630,6 +11728,7 @@ function LiveView({
         onRefresh={onRefresh}
         onRenameSession={onRenameSession}
         onRemove={onRemove}
+        onHideFromRoster={onHideFromRoster}
         findings={findings}
         nameFor={nameFor}
         onOpenReport={onOpenReport}
@@ -11682,6 +11781,9 @@ function LiveView({
         users={users}
         onRefresh={onRefresh}
         onRemove={onRemove}
+        onHideFromRoster={
+          session.shippedReview ? () => onHideFromRoster?.(sid) : undefined
+        }
         topPinned={pinnedSet.has(sid)}
         onToggleTopPin={toggleTopPin}
         // Stage pinning is a desktop idea: it means "keep this as a column".
@@ -11703,7 +11805,13 @@ function LiveView({
           collapsed={false}
           onActivate={() => openSessionPage(sid)}
           onTogglePin={() => toggleTopPin(sid)}
-          onArchive={() => void archiveSession(sid)}
+          onArchive={
+            !session.shippedReview &&
+            !isBotConversation(session) &&
+            session.spawnedBy !== "schedule"
+              ? () => void archiveSession(sid)
+              : undefined
+          }
         />
       </RailSessionContextMenu>
     );
@@ -11793,6 +11901,9 @@ function LiveView({
         onRefresh={onRefresh}
         onRenameSession={onRenameSession}
         onRemove={onRemove}
+        onHideFromRoster={
+          sheetSession.shippedReview ? () => onHideFromRoster?.(openSessionId) : undefined
+        }
         pinned={pinnedSet.has(openSessionId)}
         onTogglePin={sheetSession.shippedReview ? undefined : toggleTopPin}
         onClose={() => onCloseSessionPage?.()}
@@ -11821,6 +11932,7 @@ function RailStage({
   onRefresh,
   onRenameSession,
   onRemove,
+  onHideFromRoster,
   findings = [],
   nameFor,
   onOpenReport,
@@ -11896,6 +12008,7 @@ function RailStage({
   onRefresh: () => Promise<void>;
   onRenameSession: RenameSession;
   onRemove: (sid: string) => void;
+  onHideFromRoster?: (sid: string) => void;
   findings: AutoFinding[];
   nameFor: (id: string) => string;
   /** Open the report sheet for one agent's open findings. */
@@ -12755,6 +12868,9 @@ function RailStage({
         users={users}
         onRefresh={onRefresh}
         onRemove={onRemove}
+        onHideFromRoster={
+          session.shippedReview ? () => onHideFromRoster?.(sid) : undefined
+        }
         topPinned={topPinnedSet.has(sid)}
         onToggleTopPin={onToggleTopPin}
         stagePinned={validPinned.includes(sid)}
@@ -12779,6 +12895,13 @@ function RailStage({
           collapsed={railCollapsed}
           onActivate={(shift) => activate(sid, shift)}
           onTogglePin={() => togglePin(sid)}
+          onArchive={
+            !session.shippedReview &&
+            !isBotConversation(session) &&
+            session.spawnedBy !== "schedule"
+              ? () => void closeSession(sid)
+              : undefined
+          }
         />
       </RailSessionContextMenu>
     );
@@ -12846,6 +12969,9 @@ function RailStage({
             onRefresh={onRefresh}
             onRenameSession={onRenameSession}
             onRemove={onRemove}
+            onHideFromRoster={
+              session.shippedReview ? () => onHideFromRoster?.(sid) : undefined
+            }
             variant="stage"
             onClose={onCloseColumn}
             entering={recentlyCreatedSids.has(sid)}
@@ -14074,6 +14200,9 @@ const RailItem = memo(function RailItem({
       trailingHover={
         // A committed pin becomes a small corner badge. The timestamp remains
         // readable because it is identity, not hover UI.
+        // Stop-and-archive deliberately does NOT live here: a visible
+        // control in this slot overlaps the row content; the action is a
+        // guarded DoubleConfirm entry in RailSessionContextMenu instead.
         <button
           type="button"
           onClick={(e) => {
@@ -16181,6 +16310,7 @@ function SessionActionsMenu({
   onRemove,
   onError,
   onRename,
+  onHideFromRoster,
   triggerClassName,
   pinned,
   onTogglePin,
@@ -16192,6 +16322,8 @@ function SessionActionsMenu({
   onRemove: (sid: string) => void;
   onError: (error: string | null) => void;
   onRename?: () => void;
+  /** List-only cleanup for a finished, resumable session. */
+  onHideFromRoster?: () => void;
   triggerClassName?: string;
   pinned?: boolean;
   onTogglePin?: (sid: string) => void;
@@ -16392,16 +16524,26 @@ function SessionActionsMenu({
                   Stop
                 </DropdownMenuItem>
               ) : null}
-              <DoubleConfirmAction
-                render={<DropdownMenuItem variant="destructive" />}
-                label="Archive session"
-                confirmLabel="Confirm archive"
-                pendingLabel="Archiving…"
-                icon={<Archive className="size-4" />}
-                onConfirm={close}
-                resetKey={sid}
-              />
             </>
+          ) : null}
+          {canDriveSession(session) &&
+          !isBotConversation(session) &&
+          session.spawnedBy !== "schedule" ? (
+            <DoubleConfirmAction
+              render={<DropdownMenuItem variant="destructive" />}
+              label="Stop and archive"
+              confirmLabel="Confirm stop and archive"
+              pendingLabel="Stopping…"
+              icon={<Archive className="size-4" />}
+              onConfirm={close}
+              resetKey={sid}
+            />
+          ) : null}
+          {session.shippedReview && onHideFromRoster ? (
+            <DropdownMenuItem disabled={!sid} onClick={onHideFromRoster}>
+              <EyeOff className="size-4" />
+              Remove from list
+            </DropdownMenuItem>
           ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
@@ -16423,6 +16565,7 @@ function RailSessionContextMenu({
   onToggleStagePin,
   onOpen,
   onCloseColumn,
+  onHideFromRoster,
   children,
 }: {
   session: Session;
@@ -16436,6 +16579,7 @@ function RailSessionContextMenu({
   onToggleStagePin: () => void;
   onOpen: () => void;
   onCloseColumn?: () => void;
+  onHideFromRoster?: () => void;
   children: ReactNode;
 }) {
   const {
@@ -16607,16 +16751,26 @@ function RailSessionContextMenu({
                   Stop
                 </ContextMenuItem>
               ) : null}
-              <DoubleConfirmAction
-                render={<ContextMenuItem variant="destructive" />}
-                label="Archive session"
-                confirmLabel="Confirm archive"
-                pendingLabel="Archiving…"
-                icon={<Archive className="size-4" />}
-                onConfirm={close}
-                resetKey={sid}
-              />
             </>
+          ) : null}
+          {canDriveSession(session) &&
+          !isBotConversation(session) &&
+          session.spawnedBy !== "schedule" ? (
+            <DoubleConfirmAction
+              render={<ContextMenuItem variant="destructive" />}
+              label="Stop and archive"
+              confirmLabel="Confirm stop and archive"
+              pendingLabel="Stopping…"
+              icon={<Archive className="size-4" />}
+              onConfirm={close}
+              resetKey={sid}
+            />
+          ) : null}
+          {session.shippedReview && onHideFromRoster ? (
+            <ContextMenuItem disabled={!sid} onClick={onHideFromRoster}>
+              <EyeOff className="size-4" />
+              Remove from list
+            </ContextMenuItem>
           ) : null}
         </ContextMenuContent>
       </ContextMenu>
@@ -16726,6 +16880,7 @@ function SessionTitleSheet({
   onRefresh,
   onRenameSession,
   onRemove,
+  onHideFromRoster,
   pinned,
   onTogglePin,
   onClose,
@@ -16748,6 +16903,7 @@ function SessionTitleSheet({
   onRefresh: () => Promise<void>;
   onRenameSession: RenameSession;
   onRemove: (sid: string) => void;
+  onHideFromRoster?: () => void;
   pinned: boolean;
   onTogglePin?: (sid: string) => void;
   onClose: () => void;
@@ -17269,6 +17425,7 @@ function SessionTitleSheet({
             onRename={
               session.shippedReview ? undefined : () => setRenamingInline(true)
             }
+            onHideFromRoster={onHideFromRoster}
             triggerClassName="size-9"
             pinned={pinned}
             onTogglePin={onTogglePin}
@@ -17596,6 +17753,7 @@ const SessionCard = memo(function SessionCard({
   onRefresh,
   onRenameSession,
   onRemove,
+  onHideFromRoster,
   onOpenSheet,
   variant = "grid",
   onClose,
@@ -17618,6 +17776,7 @@ const SessionCard = memo(function SessionCard({
   onRefresh: () => Promise<void>;
   onRenameSession: RenameSession;
   onRemove: (sid: string) => void;
+  onHideFromRoster?: () => void;
   // Tapping the title asks the parent to open the full-height detail sheet
   // for this sid, anchored to the title's rect. The sheet lives at the parent so
   // it can switch between sessions; undefined → the gesture is disabled.
@@ -18152,6 +18311,7 @@ const onTouchStart = (e: ReactTouchEvent) => {
             onRemove={onRemove}
             onError={setError}
             onRename={session.shippedReview ? undefined : startRename}
+            onHideFromRoster={onHideFromRoster}
             pinned={pinned}
             onTogglePin={session.shippedReview ? undefined : onTogglePin}
           />
@@ -20780,6 +20940,9 @@ export type ResumableSession = {
   lastUserText: string | null;
   agent: "claude" | "codex" | "opencode" | "grok" | "cursor" | "fx" | "muse";
   model?: string | null;
+  // Roster email the session was attributed to (mirrors the server type), so
+  // historical rows can respect the owner filter like live ones do.
+  assignedUser?: string | null;
 };
 
 // Facet counts + total returned alongside the resumable roster so the picker can
