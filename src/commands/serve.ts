@@ -366,16 +366,12 @@ import {
 } from "../computer/desktop.ts";
 import {
   browserClick,
-  browserInspectElement,
-  browserInspectionStatus,
   browserNavigate,
   browserPaste,
   browserPress,
   browserReadText,
   browserScreenshot,
   browserType,
-  cancelBrowserInspection,
-  closeAgentView,
 } from "../computer/browser.ts";
 import { capturePaneScroll, capturePaneEscaped, paneWidth } from "../tmux.ts";
 import { detectUrls } from "../links.ts";
@@ -4226,7 +4222,7 @@ export async function cmdServe() {
         // kept running, and reporting "stopped" for a live screen is worse
         // than the extra probe costs.
         await ensureDesktopAdopted();
-        return json({ ...desktopStatus(), inspection: browserInspectionStatus() });
+        return json(desktopStatus());
       }
 
       if (path === "/api/computer/start" && req.method === "POST") {
@@ -4243,23 +4239,15 @@ export async function cmdServe() {
             // empty string means direct egress and must override that default.
             ...("proxy" in body ? { proxy: body.proxy || undefined } : {}),
           });
-          return json({ ...status, inspection: browserInspectionStatus() });
+          return json(status);
         } catch (e) {
           return err(500, e instanceof Error ? e.message : "failed to start the computer");
         }
       }
 
       if (path === "/api/computer/stop" && req.method === "POST") {
-        await cancelBrowserInspection("desktop stopped");
-        closeAgentView();
         await stopDesktop();
-        return json({ ...desktopStatus(), inspection: browserInspectionStatus() });
-      }
-
-      if (path === "/api/computer/browser/inspect/cancel" && req.method === "POST") {
-        return json({
-          cancelled: await cancelBrowserInspection("cancelled from the Computer"),
-        });
+        return json(desktopStatus());
       }
 
 
@@ -4482,18 +4470,6 @@ export async function cmdServe() {
       // Agent control of the browser on that desktop, via Bun.WebView attached
       // over DevTools. These are what the MCP tools call; they act on the one
       // visible tab, so whatever the agent does shows up on the streamed screen.
-      // Every action the dispatcher serves, as full route literals: the
-      // startsWith prefix below is invisible to the route scanner in
-      // client-api-route-coverage.test.ts, and the 404 names them for humans.
-      const browserActionRoutes = [
-        "/api/computer/browser/navigate",
-        "/api/computer/browser/click",
-        "/api/computer/browser/type",
-        "/api/computer/browser/press",
-        "/api/computer/browser/text",
-        "/api/computer/browser/inspect",
-        "/api/computer/browser/screenshot",
-      ];
       if (path.startsWith("/api/computer/browser/") && req.method === "POST") {
         if (!desktopStatus().running) return err(409, "the computer is not running");
         const action = path.slice("/api/computer/browser/".length);
@@ -4505,7 +4481,6 @@ export async function cmdServe() {
             y?: number;
             text?: string;
             key?: string;
-            timeoutMs?: number;
           };
           switch (action) {
             case "navigate": {
@@ -4537,25 +4512,12 @@ export async function cmdServe() {
             case "text": {
               return json({ text: await browserReadText() });
             }
-            case "inspect": {
-              return json(
-                await browserInspectElement({
-                  ...(body.timeoutMs ? { timeoutMs: body.timeoutMs } : {}),
-                  signal: req.signal,
-                }),
-              );
-            }
             case "screenshot": {
               const blob = await browserScreenshot();
               return new Response(blob, { headers: { "content-type": "image/png" } });
             }
             default:
-              return err(
-                404,
-                `unknown browser action: ${action} (known: ${browserActionRoutes
-                  .map((route) => route.slice("/api/computer/browser/".length))
-                  .join(", ")})`,
-              );
+              return err(404, `unknown browser action: ${action}`);
           }
         } catch (e) {
           return err(500, e instanceof Error ? e.message : "browser action failed");
@@ -7879,30 +7841,6 @@ a{color:#60a5fa}
           if (selfUpdateRunning) return err(409, "An omg.dev update is already running.");
           selfUpdateRunning = true;
           try {
-            // Fork-gate (27-08-2026): op deze box hangt een lokale patchlaag
-            // aan elke release. De UI-knop deed vroeger een kale bundleswap,
-            // en die swap naar 0.6.16 gooide de fork er stil af. Bestaat de
-            // veilige route, dan draait de knop díe: snapshot, update, apply.sh
-            // en health-gate met automatische rollback. Als eigen transient
-            // unit, want de herstart die erop volgt mag hem niet meenemen.
-            // Ontbreekt het script, dan blijft upstream-gedrag staan — een
-            // fork-gate mag updaten nooit onmogelijk maken.
-            const safeUpdate = process.env.OMG_SAFE_UPDATE_BIN ?? "/home/agent/bin/omg-safe-update";
-            if (install.channel === "release" && existsSync(safeUpdate)) {
-              const unit = `omg-safe-update-${Date.now()}`;
-              Bun.spawn({
-                cmd: ["systemd-run", "--user", "--collect", `--unit=${unit}`, safeUpdate, "--apply"],
-                stdin: "ignore",
-                stdout: "ignore",
-                stderr: "ignore",
-              }).unref();
-              return json({
-                install,
-                update: { state: "running", message: `Safe update started as ${unit}.` },
-                restarting: true,
-                bootId: SERVER_INSTANCE_ID,
-              });
-            }
             const result = install.channel === "source"
               ? await applySourceUpdate(PATHS.root)
               : await applyReleaseUpdate(PATHS.root, install);
