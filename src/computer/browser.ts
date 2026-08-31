@@ -44,6 +44,13 @@ interface WebViewLike {
 
 let view: WebViewLike | null = null;
 let viewTargetId: string | null = null;
+/**
+ * The `startedAt` of the desktop this view was attached to. A view outlives the
+ * Chrome it points at: the idle janitor stops the desktop, `computer_start`
+ * brings up a new one, and the cached view still refers to the dead target.
+ * Comparing generations is what makes a restart heal itself.
+ */
+let viewStartedAt: number | null = null;
 
 function webViewCtor(): (new (opts: unknown) => WebViewLike) | null {
   const ctor = (Bun as unknown as { WebView?: new (opts: unknown) => WebViewLike }).WebView;
@@ -61,14 +68,25 @@ export function browserControlAvailable(): boolean {
  * littering the window with a new tab per call.
  */
 export async function agentView(): Promise<WebViewLike> {
+  const status = desktopStatus();
+  if (!status.running) throw new Error("the computer is not running; start it first");
+
+  // A cached view can outlive the Chrome it was attached to. computer-idle-janitor
+  // stops the desktop after 30 idle minutes and the next computer_start spawns a
+  // FRESH Chrome, so a view from the previous generation points at a dead target
+  // and throws "view is closed" on every call -- status stays green while the
+  // screen is unreachable. Drop it and rebuild rather than hand back a corpse.
+  if (view && viewStartedAt !== status.startedAt) closeAgentView();
+  // Same Chrome, but the tab itself may be gone (a person watching closed it, a
+  // renderer crashed). One CDP roundtrip over loopback is cheaper than a failed
+  // tool call the agent has to interpret.
+  if (view && !(await viewResponds(view))) closeAgentView();
   if (view) return view;
 
   const Ctor = webViewCtor();
   if (!Ctor) {
     throw new Error("this Bun build has no Bun.WebView (needs Bun 1.3.12 or later)");
   }
-  const status = desktopStatus();
-  if (!status.running) throw new Error("the computer is not running; start it first");
 
   const url = await cdpWebSocketUrl();
   if (!url) throw new Error("cannot reach the desktop browser's DevTools endpoint");
@@ -79,6 +97,7 @@ export async function agentView(): Promise<WebViewLike> {
     height: status.height - 40,
   });
   view = v;
+  viewStartedAt = status.startedAt;
   return v;
 }
 
@@ -102,6 +121,20 @@ async function captureViewTarget(v: WebViewLike): Promise<string | null> {
     // Activation is a nicety; a working view without it still drives the page.
   }
   return viewTargetId;
+}
+
+/**
+ * Does this view still have a live CDP target behind it? Any throw counts as
+ * dead: a closed view raises "Invalid state" before the call leaves the process,
+ * and a vanished target raises from the other end. Both mean rebuild.
+ */
+async function viewResponds(v: WebViewLike): Promise<boolean> {
+  try {
+    await v.cdp("Target.getTargetInfo");
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Bring the agent's tab back to the front (a person may have switched tabs). */
@@ -301,4 +334,5 @@ export function closeAgentView(): void {
   } catch {}
   view = null;
   viewTargetId = null;
+  viewStartedAt = null;
 }

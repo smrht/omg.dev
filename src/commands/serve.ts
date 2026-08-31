@@ -4225,7 +4225,9 @@ export async function cmdServe() {
           const status = await startDesktop({
             ...(body.width ? { width: body.width } : {}),
             ...(body.height ? { height: body.height } : {}),
-            ...(body.proxy ? { proxy: body.proxy } : {}),
+            // Issue 710: omitted means the configured default; an explicit
+            // empty string means direct egress and must override that default.
+            ...("proxy" in body ? { proxy: body.proxy || undefined } : {}),
           });
           return json(status);
         } catch (e) {
