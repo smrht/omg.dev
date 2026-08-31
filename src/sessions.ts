@@ -19,10 +19,17 @@ import { homedir } from "node:os";
 import { projectName } from "./projects";
 import { usesCommandFileRuntime } from "./coding-agent-adapters";
 import type { CodingAgentKind } from "./coding-agents";
-import { OMG_CAPABILITY_VERSION, stripOmgRuntimeContract } from "./omg-capabilities.ts";
 import {
+  OMG_CAPABILITY_VERSION,
+  hasOmgRuntimeContract,
+  stripOmgRuntimeContract,
+} from "./omg-capabilities.ts";
+import {
+  backfillConfirmedInternalRows,
   cachedFingerprints,
   getCachedTranscriptPath,
+  hideInternalRosterRows,
+  hideManagedAliasRows,
   upsertResumableRows,
   pruneResumableExcept,
   queryHistoricalCache,
@@ -928,6 +935,105 @@ export async function setSessionTitle(
   if (t) updateCachedSessionTitle(sessionId, all[sessionId]);
 }
 
+// The controlled first prompt of the scheduled-task launcher (cron `claude -p`
+// on agentbox2, skill body under /home/agent/.claude/scheduled-tasks/). The
+// signature is the FULL three-part shape — the text must OPEN with the fixed
+// Dutch routine start, and carry both the skill-read instruction naming the
+// scheduled-tasks path and the headless agentbox2 line. All parts, never a
+// keyword: a human chat that merely mentions "Voer de geplande routine" (or an
+// older routine variant without the headless line) lacks part of the shape and
+// stays listed. Exported for the issue-552 regression test.
+const ROUTINE_LAUNCH_PROMPT_PREFIX = "Voer de geplande routine";
+const ROUTINE_LAUNCH_PROMPT_PARTS: readonly string[] = [
+  "Lees eerst",
+  "/home/agent/.claude/scheduled-tasks/",
+  "Je draait headless op dedicated agentbox2",
+];
+
+export function isRoutineLaunchPrompt(text: string): boolean {
+  if (!text.startsWith(ROUTINE_LAUNCH_PROMPT_PREFIX)) return false;
+  return ROUTINE_LAUNCH_PROMPT_PARTS.every((part) => text.includes(part));
+}
+
+// Launch signals for a claude transcript's FIRST user message (issue 552) —
+// both classifications read that one message in a single pass:
+//
+// 1. launchContract: omg wraps the first prompt of every claude it spawns in
+//    the runtime contract (the tmux launchers and the AI-SDK backends), while
+//    an interactive CLI session opens with what the human typed and
+//    aisdk-managed chats keep the contract out of the user turn entirely. The
+//    envelope recognises all three brand spellings forever
+//    (omg-capabilities.ts), so its presence is the strongest durable
+//    "launched by omg" signal a claude transcript carries. The BOT contract
+//    header never matches CONTRACT_HEADERS, so bot transcripts stay out.
+// 2. sourceKind "routine": the controlled scheduled-task signature above. A
+//    cron `claude -p` routine carries NO omg envelope, so the routine family
+//    needs its own marker — this is what makes future legacy run-routine
+//    transcripts (like cba6e1e7) auto-hide instead of depending on the
+//    one-time id backfill in resume-cache.ts.
+//
+// Both are source signals, not title guesses. Exported for the issue-552
+// regression test.
+export function hasClaudeLaunchClassification(originator: string | null | undefined): boolean {
+  return (
+    originator === "claude_sdk_ts" ||
+    originator === "claude_sdk_cli" ||
+    originator === "claude_other"
+  );
+}
+
+export async function transcriptLaunchSignals(
+  path: string,
+): Promise<{ launchContract: boolean; sourceKind: string | null; originator: string | null }> {
+  try {
+    const text = await Bun.file(path).slice(0, 256 * 1024).text();
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      let x: {
+        type?: string;
+        isMeta?: boolean;
+        parentUuid?: string | null;
+        promptSource?: unknown;
+        entrypoint?: unknown;
+        message?: { content?: unknown };
+      };
+      try {
+        x = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (x.type !== "user" || x.isMeta || x.parentUuid != null) continue;
+      const c = x.message?.content;
+      const t =
+        typeof c === "string"
+          ? c
+          : Array.isArray(c)
+            ? (c as Array<{ type?: string; text?: string }>).find(
+                (e) => e?.type === "text" && typeof e.text === "string",
+              )?.text ?? null
+            : null;
+      return {
+        launchContract: t ? hasOmgRuntimeContract(t) : false,
+        sourceKind: t && isRoutineLaunchPrompt(t) ? "routine" : null,
+        // Every headless launch carries promptSource "sdk"; the entrypoint
+        // only says WHICH headless door was used. "sdk-ts" is the Agent SDK,
+        // "sdk-cli" a `claude -p` from a cron or script — both are automation,
+        // neither is a chat. Pinning this to one entrypoint is what let the
+        // daily `claude -p` routines back into the roster; the prefix covers
+        // the doors that do not exist yet, and an interactive session (which
+        // never sets promptSource "sdk") still classifies as claude_other.
+        originator:
+          x.promptSource === "sdk" && typeof x.entrypoint === "string" && x.entrypoint.startsWith("sdk-")
+            ? x.entrypoint === "sdk-ts"
+              ? "claude_sdk_ts"
+              : "claude_sdk_cli"
+            : "claude_other",
+      };
+    }
+  } catch {}
+  return { launchContract: false, sourceKind: null, originator: null };
+}
+
 // Claude's /resume picker titles a session by its first real user prompt; mirror
 // that. Scan from the top, skipping meta rows and command/caveat wrappers
 // (which start with "<"), and return the first prose line, truncated.
@@ -1452,6 +1558,8 @@ type CodexThread = {
   createdAt: number | null;
   updatedAt: number | null;
   firstUserText: string | null;
+  originator: string | null;
+  sourceKind: string | null;
 };
 
 // A rollout's header (session_meta line + first user prompt) is written once at
@@ -1459,7 +1567,20 @@ type CodexThread = {
 // a pure function of the path: cache it permanently and re-read only the cheap
 // mtime each poll. Without this, every listSessions() re-read+parsed ~384KB of
 // EVERY historical codex rollout (O(all codex sessions ever)) every 5 seconds.
-type CodexHead = { id: string; cwd: string | null; createdAt: number | null; firstUserText: string | null };
+// Issue 552: the head also carries the rollout's launch provenance from the
+// same session_meta line — originator (who drove the SDK: "codex_sdk_ts" for
+// programmatic launches, "codex_exec" for a shell, "t3code_desktop" for the
+// old T3 app) and sourceKind ("exec"/"vscode" for direct launches, the
+// "subagent" marker when a parent thread spawned this one). Immutable like
+// the rest of the header, so it caches with it.
+type CodexHead = {
+  id: string;
+  cwd: string | null;
+  createdAt: number | null;
+  firstUserText: string | null;
+  originator: string | null;
+  sourceKind: string | null;
+};
 const codexHeadCache = new Map<string, CodexHead | null>();
 
 // ...and because it is immutable, it survives a restart too.
@@ -1486,7 +1607,7 @@ const codexHeadCache = new Map<string, CodexHead | null>();
 // corrupt or foreign-version file just fails to load and we rebuild from
 // scratch, which is only as slow as before.
 const CODEX_LIVE_ROLLOUT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
-const CODEX_HEAD_CACHE_VERSION = 1;
+const CODEX_HEAD_CACHE_VERSION = 2;
 const codexHeadCachePath = () => join(PATHS.data, "codex-heads.json");
 let codexHeadCacheLoaded = false;
 let codexHeadCacheDirty = 0;
@@ -1534,15 +1655,33 @@ async function parseCodexHead(path: string): Promise<CodexHead | null> {
     if (!first) return null;
     const row = JSON.parse(first) as {
       type?: string;
-      payload?: { id?: string; cwd?: string; timestamp?: string };
+      payload?: {
+        id?: string;
+        cwd?: string;
+        timestamp?: string;
+        originator?: unknown;
+        source?: unknown;
+      };
     };
     const id = row.payload?.id ?? path.match(UUID)?.[0] ?? null;
     if (row.type !== "session_meta" || !id) return null;
+    // session_meta.source is a plain string ("exec", "vscode") for direct
+    // launches, or an object when a parent thread spawned this rollout
+    // ({subagent: {thread_spawn: {parent_thread_id, …}}} / {subagent: {other}}).
+    // The parent id inside is codex-native, not an LFG session id, so the kind
+    // — not the id — is the roster-relevant lineage signal.
+    let sourceKind: string | null = null;
+    const src = row.payload?.source;
+    if (typeof src === "string") sourceKind = src;
+    else if (src && typeof src === "object" && "subagent" in (src as Record<string, unknown>))
+      sourceKind = "subagent";
     return {
       id,
       cwd: row.payload?.cwd ?? null,
       createdAt: row.payload?.timestamp ? Date.parse(row.payload.timestamp) : null,
       firstUserText: await firstUserTextFromTop(path),
+      originator: typeof row.payload?.originator === "string" ? row.payload.originator : null,
+      sourceKind,
     };
   } catch {
     return null;
@@ -1597,7 +1736,16 @@ async function codexThreads(opts?: { sinceMs?: number }): Promise<CodexThread[]>
     try {
       updatedAt = statSync(path).mtimeMs;
     } catch {}
-    out.push({ id: head.id, path, cwd: head.cwd, createdAt: head.createdAt, updatedAt, firstUserText: head.firstUserText });
+    out.push({
+      id: head.id,
+      path,
+      cwd: head.cwd,
+      createdAt: head.createdAt,
+      updatedAt,
+      firstUserText: head.firstUserText,
+      originator: head.originator ?? null,
+      sourceKind: head.sourceKind ?? null,
+    });
   }
   scheduleCodexHeadFlush();
   return out;
@@ -3552,7 +3700,12 @@ async function refreshResumableCacheOnce(focusSessionId?: string): Promise<void>
   let budget = RESUMABLE_ENRICH_BUDGET;
   for (const c of candidates) {
     const prev = fingerprints.get(c.id);
-    if (prev && prev.mtimeMs === c.mtime) continue; // unchanged -> keep cached row
+    if (
+      prev &&
+      prev.mtimeMs === c.mtime &&
+      hasClaudeLaunchClassification(prev.originator)
+    )
+      continue; // unchanged and launch-classified -> keep cached row
     if (budget-- <= 0) break; // remainder backfills on the next refresh
     const cwd = await cwdForTranscript(c.path).catch(() => null);
     const managedRec = managedById.get(c.id) ?? (cwd ? managedByCwd.get(cwd) : undefined);
@@ -3570,6 +3723,13 @@ async function refreshResumableCacheOnce(focusSessionId?: string): Promise<void>
       path: c.path,
       mtimeMs: c.mtime,
       assignedUser: managedRec ? assignments[managedRec.tmuxName] ?? null : null,
+      // One read of the first user message classifies both launch signals
+      // (issue 552): the omg envelope and the controlled routine signature.
+      ...(await transcriptLaunchSignals(c.path).catch(() => ({
+        launchContract: false,
+        sourceKind: null as string | null,
+        originator: null as string | null,
+      }))),
     });
   }
 
@@ -3599,6 +3759,8 @@ async function refreshResumableCacheOnce(focusSessionId?: string): Promise<void>
       path: t.path,
       mtimeMs: mtime,
       assignedUser: managedRec ? assignments[managedRec.tmuxName] ?? null : null,
+      originator: t.originator ?? null,
+      sourceKind: t.sourceKind ?? null,
     });
   }
 
@@ -3789,11 +3951,34 @@ async function refreshResumableCacheOnce(focusSessionId?: string): Promise<void>
       model: sdkEntry?.model || m.model || null,
       assignedUser: assignments[m.tmuxName] || null,
       managed: true,
+      // Lineage for the internal-roster repair (issue 552): either parent id
+      // shape proves "somebody's child" — subagents spawned from a native
+      // codex parent only carry parentNativeSessionId.
+      parentSessionId: m.parentSessionId ?? m.parentNativeSessionId ?? null,
+      spawnedBy: m.spawnedBy ?? null,
+      botId: m.botId ?? null,
     });
   }
 
   upsertResumableRows(changed);
   pruneResumableExcept(seen);
+  // Managed/native alias repair (issue 547). Runs after EVERY refresh over the
+  // whole table, not just this pass's `changed` rows: the native rollout row
+  // and its managed catalog row can land in different refresh moments, so only
+  // a table-wide pass guarantees the pair is closed whichever refresh
+  // completes it.
+  hideManagedAliasRows();
+  // Internal-roster repair (issue 552), same table-wide contract: managed
+  // lineage hides child/review workers (bots exempt, forks listed), codex
+  // session_meta provenance hides SDK/subagent rollouts, the claude
+  // launch-envelope flag hides omg-launched transcripts, and sourceKind
+  // "routine" hides the controlled scheduled-task launcher's transcripts —
+  // including future legacy ones, not just the backfilled ids. Whichever
+  // refresh first classifies a row is the one that hides it; the
+  // confirmed-screenshot backfill runs exactly once per database behind a
+  // durable marker.
+  hideInternalRosterRows();
+  backfillConfirmedInternalRows();
 }
 
 // Refresh at most once per throttle window (unless forced); concurrent callers
