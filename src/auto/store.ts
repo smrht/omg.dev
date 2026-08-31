@@ -5,7 +5,7 @@
 // session). Dismissed findings are fed back into the prompt so the agent stops
 // resurfacing the same thing — that's the anti-noise loop.
 
-import { mkdir } from "node:fs/promises";
+import { mkdir, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { PATHS } from "../config.ts";
@@ -148,6 +148,7 @@ export type Finding = {
 
 const dir = () => join(PATHS.data, "auto");
 const agentsPath = () => join(dir(), "agents.json");
+const agentsLockPath = () => join(dir(), "agents.lock");
 const findingsPath = () => join(dir(), "findings.jsonl");
 
 async function ensure() {
@@ -166,6 +167,76 @@ function slug(s: string): string {
 }
 
 // ---------- agents ----------
+
+const AGENTS_LOCK_STALE_MS = 30_000;
+const AGENTS_LOCK_TIMEOUT_MS = 10_000;
+let agentMutationTail: Promise<void> = Promise.resolve();
+
+async function readAutoAgentsForMutation(): Promise<AutoAgent[]> {
+  const f = Bun.file(agentsPath());
+  if (!(await f.exists())) return [];
+  return normalizeStoredAutoAgents(JSON.parse(await f.text()) as AutoAgent[]);
+}
+
+async function acquireAgentsLock(): Promise<() => Promise<void>> {
+  const startedAt = Date.now();
+  while (true) {
+    try {
+      await mkdir(agentsLockPath());
+      return async () => {
+        await rm(agentsLockPath(), { recursive: true, force: true });
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      try {
+        const age = Date.now() - (await stat(agentsLockPath())).mtimeMs;
+        if (age > AGENTS_LOCK_STALE_MS) {
+          await rm(agentsLockPath(), { recursive: true, force: true });
+          continue;
+        }
+      } catch (lockError) {
+        if ((lockError as NodeJS.ErrnoException).code !== "ENOENT") throw lockError;
+      }
+      if (Date.now() - startedAt > AGENTS_LOCK_TIMEOUT_MS) {
+        throw new Error("timed out waiting for auto-agent store lock");
+      }
+      await Bun.sleep(10);
+    }
+  }
+}
+
+async function writeAutoAgentsAtomically(rows: AutoAgent[]): Promise<void> {
+  const target = agentsPath();
+  const temporary = `${target}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  try {
+    await Bun.write(temporary, JSON.stringify(rows, null, 2));
+    await rename(temporary, target);
+  } finally {
+    await rm(temporary, { force: true }).catch(() => {});
+  }
+}
+
+async function mutateAutoAgents<T>(
+  mutate: (rows: AutoAgent[]) => { rows: AutoAgent[]; result: T; changed?: boolean },
+): Promise<T> {
+  const operation = agentMutationTail.then(async () => {
+    await ensure();
+    const release = await acquireAgentsLock();
+    try {
+      const current = await readAutoAgentsForMutation();
+      const next = mutate(current);
+      if (next.changed !== false) await writeAutoAgentsAtomically(next.rows);
+      return next.result;
+    } finally {
+      await release();
+    }
+  });
+  agentMutationTail = operation.then(
+    () => undefined,
+    () => undefined,
+  );
+  return operation;
+}
 
 export async function listAutoAgents(): Promise<AutoAgent[]> {
   const f = Bun.file(agentsPath());
@@ -245,75 +316,63 @@ export async function saveAutoAgent(input: {
   thinkingLevel?: string;
   tools?: string[];
 }): Promise<AutoAgent> {
-  await ensure();
-  const list = await listAutoAgents();
-  let id = input.id;
-  if (!id) {
-    id = slug(input.name);
-    let n = 2;
-    while (list.some((a) => a.id === id)) id = `${slug(input.name)}-${n++}`;
-  }
-  const existing = list.find((a) => a.id === id);
-  const backend = input.agent ?? existing?.agent;
-  const agent: AutoAgent = {
-    id,
-    name: input.name,
-    prompt: input.prompt,
-    schedule: input.schedule,
-    enabled: autoAgentEnabledForBackend(input.enabled, backend),
-    owner: input.owner ?? existing?.owner ?? { kind: "user" },
-    cwd: input.cwd ?? existing?.cwd,
-    agent: backend,
-    claudeAccountId: claudeAccountForBackend(
-      input.claudeAccountId,
-      existing?.claudeAccountId,
-      backend,
-    ),
-    model: input.model ?? existing?.model,
-    // Carry the level forward on a plain edit, but never past a backend
-    // switch that can't take it. The editor already omits thinkingLevel for a
-    // backend with no reasoning knob (opencode), so a bare `??` merge resurrected
-    // the level the agent held as claude — writing a record that no longer
-    // validates. Nothing re-checks a stored row, so the break only surfaced
-    // later, at launch, as a 400 from POST /api/sessions/new.
-    thinkingLevel: sanitizeThinkingLevel(
-      input.thinkingLevel ?? existing?.thinkingLevel,
-      backend,
-      input.model ?? existing?.model,
-    ),
-    tools: input.tools ?? existing?.tools,
-    lastRunAt: existing?.lastRunAt,
-  };
-  const next = existing
-    ? list.map((a) => (a.id === id ? agent : a))
-    : [...list, agent];
-  await Bun.write(agentsPath(), JSON.stringify(next, null, 2));
+  const agent = await mutateAutoAgents((list) => {
+    let id = input.id;
+    if (!id) {
+      id = slug(input.name);
+      let n = 2;
+      while (list.some((a) => a.id === id)) id = `${slug(input.name)}-${n++}`;
+    }
+    const existing = list.find((a) => a.id === id);
+    const backend = input.agent ?? existing?.agent;
+    const saved: AutoAgent = {
+      id,
+      name: input.name,
+      prompt: input.prompt,
+      schedule: input.schedule,
+      enabled: autoAgentEnabledForBackend(input.enabled, backend),
+      owner: input.owner ?? existing?.owner ?? { kind: "user" },
+      cwd: input.cwd ?? existing?.cwd,
+      agent: backend,
+      claudeAccountId: claudeAccountForBackend(
+        input.claudeAccountId,
+        existing?.claudeAccountId,
+        backend,
+      ),
+      model: input.model ?? existing?.model,
+      thinkingLevel: sanitizeThinkingLevel(
+        input.thinkingLevel ?? existing?.thinkingLevel,
+        backend,
+        input.model ?? existing?.model,
+      ),
+      tools: input.tools ?? existing?.tools,
+      lastRunAt: existing?.lastRunAt,
+    };
+    return {
+      rows: existing ? list.map((row) => (row.id === id ? saved : row)) : [...list, saved],
+      result: saved,
+    };
+  });
   scheduleWakeHooksPush();
   return agent;
 }
 
 export async function deleteAutoAgent(id: string): Promise<void> {
-  await ensure();
-  const list = await listAutoAgents();
-  await Bun.write(
-    agentsPath(),
-    JSON.stringify(
-      list.filter((a) => a.id !== id),
-      null,
-      2,
-    ),
-  );
+  await mutateAutoAgents((list) => ({
+    rows: list.filter((a) => a.id !== id),
+    result: undefined,
+  }));
   scheduleWakeHooksPush();
 }
 
 /** Everything a bot owns, permanently gone. Called when the bot itself is deleted. */
 export async function deleteAutoAgentsOwnedByBot(botId: string): Promise<number> {
-  await ensure();
-  const list = await listAutoAgents();
-  const keep = list.filter((a) => !(a.owner.kind === "bot" && a.owner.botId === botId));
-  await Bun.write(agentsPath(), JSON.stringify(keep, null, 2));
+  const removed = await mutateAutoAgents((list) => {
+    const keep = list.filter((a) => !(a.owner.kind === "bot" && a.owner.botId === botId));
+    return { rows: keep, result: list.length - keep.length };
+  });
   scheduleWakeHooksPush();
-  return list.length - keep.length;
+  return removed;
 }
 
 /** How many routines a given bot currently owns — the input to the per-bot cap. */
@@ -324,16 +383,14 @@ export async function countAutoAgentsOwnedByBot(botId: string): Promise<number> 
 }
 
 export async function setLastRun(id: string, ts: number): Promise<void> {
-  const list = await listAutoAgents();
-  if (!list.some((a) => a.id === id)) return;
-  await Bun.write(
-    agentsPath(),
-    JSON.stringify(
-      list.map((a) => (a.id === id ? { ...a, lastRunAt: ts } : a)),
-      null,
-      2,
-    ),
-  );
+  await mutateAutoAgents((list) => {
+    const exists = list.some((a) => a.id === id);
+    return {
+      rows: exists ? list.map((a) => (a.id === id ? { ...a, lastRunAt: ts } : a)) : list,
+      result: undefined,
+      changed: exists,
+    };
+  });
 }
 
 // ---------- in-flight runs (in-memory; serve process only) ----------
