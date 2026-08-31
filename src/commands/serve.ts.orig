@@ -7,11 +7,10 @@ import { marked } from "marked";
 import {
   AgentAdmissionController,
   NO_AGENT_LIMIT,
-  admissionResidentPool,
   agentLaunchMemoryBudget,
   computerAgentAdmissionContext,
 } from "../agent-admission.ts";
-import { PATHS, appVersion, installInfo, localServeBaseUrl } from "../config.ts";
+import { PATHS, appVersion, installInfo } from "../config.ts";
 import { desktopRuntimeReadyPayload } from "../desktop-parent.ts";
 import { handleServerAccessRequest } from "../server-access.ts";
 import {
@@ -32,41 +31,6 @@ import {
 } from "../self-update.ts";
 import { compressedAssetResponse, maybeCompressResponse } from "../http-compress.ts";
 import { serveOmgMcpRequest, serveComputerMcpRequest } from "../mcp-http.ts";
-import { resolveCaller } from "../policy/caller.ts";
-import {
-  configureConnectors,
-  serveConnectorsMcpRequest,
-  type ApprovalGate as ConnectorApprovalGate,
-  createConnector,
-  deleteConnector,
-  getConnector,
-  deleteConnectorsForOwner,
-  listConnectors,
-  ownerForUser,
-  roleOwner,
-  publicView,
-  updateConnector,
-  probeConnector,
-  resetConnector,
-  loadCatalog,
-  searchCatalog,
-  startConnectorOAuth,
-  completeConnectorOAuth,
-  hasTokens as hasOAuthTokens,
-  APPROVE as CONNECTOR_APPROVE,
-  DENY as CONNECTOR_DENY,
-  clearPendingConnectorApproval,
-  connectorApprovalQuestion,
-  heldText as connectorHeldText,
-  isApproveAnswer as isConnectorApprove,
-  pendingConnectorApprovalByAsk,
-  registerPendingConnectorApproval,
-  resolveConnectorApproval,
-} from "@omg-dev/connectors";
-import { enforceRole } from "../policy/mcp-filter.ts";
-import { createRole, deleteRole, getRole, listRoles, roleEgress, roleForUser, roleSandbox, updateRole, OWNER_ROLE_ID, VIEW_TOGGLE_KEYS } from "../policy/roles.ts";
-import { DEFAULT_ALLOW_HOSTS, startEgressProxy, type EgressProxy } from "../sandbox/egress-proxy.ts";
-import { sessionToken, verifySessionToken, boxSecretMaterial } from "../policy/session-token.ts";
 import * as pwaBootLog from "../pwa-boot-log.ts";
 import { botRuntimeContract, shortSessionId } from "../omg-capabilities.ts";
 import {
@@ -99,7 +63,6 @@ import {
   isRunning,
   listFindings,
   updateFinding,
-  dismissAllFindings,
   logFindingAction,
   type AutoAgent,
   type AutoAgentOwner,
@@ -234,10 +197,8 @@ import {
   getAllUsage,
   getProviderUsage,
   getUsageSummary,
-  invalidateProviderUsage,
   listUsageProviders,
 } from "../usage.ts";
-import { consumeCodexRateLimitResetCredit } from "../codex-rate-limits.ts";
 import { sessionTokenUsage } from "../session-token-usage.ts";
 import {
   vapidPublicKey,
@@ -290,7 +251,7 @@ import {
   noteListSessionsClientActivity,
 } from "../session-cache.ts";
 import { buildSessionUsageReport, findSessionDevServerPids } from "../session-usage.ts";
-import { capReclaimCandidate, memoryReclaimCandidates } from "../idle-archive.ts";
+import { memoryReclaimCandidates } from "../idle-archive.ts";
 import { CODING_AGENT_ADAPTERS, resolveActiveSessionAgent, usesCommandFileRuntime } from "../coding-agent-adapters.ts";
 import { launchCodingAgentSession } from "../coding-agent-provider.ts";
 import {
@@ -366,7 +327,6 @@ import {
 import {
   browserClick,
   browserNavigate,
-  browserPaste,
   browserPress,
   browserReadText,
   browserScreenshot,
@@ -507,9 +467,6 @@ import {
 } from "../model-discovery.ts";
 import {
   BOT_SCHEDULE_LIMIT,
-  CUSTOM_INSTRUCTIONS_MAX_LENGTH,
-  DEFAULT_AGENT_KEY_MAX_LENGTH,
-  DEFAULT_MODEL_MAX_LENGTH,
   DEFAULT_TIME_ZONE,
   getGlobalSettings,
   getGlobalSettingsSync,
@@ -520,10 +477,8 @@ import {
   type GlobalSettings,
 } from "../settings.ts";
 import { listSkillCatalog, searchSkillCatalog, withoutSkillKeywords } from "../skills-catalog.ts";
-import { contentDisposition } from "../artifact-headers.ts";
 import {
   collapseArtifactRetryMessages,
-  createFileArtifact,
   createImageArtifact,
   createVideoArtifact,
   deleteArtifact,
@@ -766,71 +721,6 @@ const PORT = Number(process.env.LFG_PORT ?? process.env.PORT ?? 8766);
 /** Ceiling on any single request body. See the Bun.serve options for why. */
 const MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024;
 
-// The base URL the OAuth redirect_uri is built from. A managed UI passes its
-// hosted relay base explicitly; otherwise the browser's own origin (so a
-// Tailscale user redirects back to the Tailscale URL) is used, falling back to
-// the loopback base for a purely local flow.
-function oauthRedirectBase(req: Request, explicit?: string): string {
-  if (explicit && /^https?:\/\//.test(explicit)) return explicit;
-  const relay = oauthRelayConfig();
-  if (relay) return relay.base;
-  const host = req.headers.get("x-forwarded-host") || req.headers.get("host");
-  if (host) {
-    const proto = req.headers.get("x-forwarded-proto") || (host.includes(".ts.net") || host.endsWith(":443") ? "https" : "http");
-    return `${proto}://${host}`;
-  }
-  return localServeBaseUrl();
-}
-
-// A box that cannot receive the provider redirect directly (a hosted sandbox,
-// or a self-hosted box behind NAT) is told at launch to route OAuth through a
-// hosted relay: OMG_OAUTH_RELAY_BASE is the relay origin, and the box's own
-// id (OMG_OAUTH_RELAY_PROJECT, else RUN_ID) is encoded into the state as
-// `omgc.<id>.<random>` so the relay can forward the callback back to this box
-// (see docs/team-tooling-design.md and the vibes relay). Unset on a directly
-// reachable box, which uses its own request origin instead.
-function oauthRelayConfig(): { base: string; project: string } | null {
-  const base = process.env.OMG_OAUTH_RELAY_BASE?.trim();
-  const project = (process.env.OMG_OAUTH_RELAY_PROJECT || process.env.RUN_ID)?.trim();
-  if (base && /^https?:\/\//.test(base) && project) return { base: base.replace(/\/+$/, ""), project };
-  return null;
-}
-
-/** The relay-routable OAuth state for this box, or undefined when not relaying. */
-function oauthRelayState(): string | undefined {
-  const relay = oauthRelayConfig();
-  if (!relay) return undefined;
-  return `omgc.${relay.project}.${randomBytes(24).toString("base64url")}`;
-}
-
-// The tiny page a browser lands on after the provider redirect: it reports the
-// outcome and closes the popup.
-function oauthClosePage(message: string, ok: boolean): Response {
-  const html = `<!doctype html><meta charset="utf-8"><title>omg connector</title>
-<body style="font:14px system-ui;margin:3rem;text-align:center;color:${ok ? "#111" : "#b00"}">
-<p>${message.replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" })[c]!)}</p>
-<script>try{window.opener&&window.opener.postMessage({omgOauth:${ok}},"*")}catch(e){}setTimeout(()=>window.close(),1500)</script>
-</body>`;
-  return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
-}
-
-// The connector owner (member) a session runs as: its assigned user, or the
-// box owner bucket when unassigned. All of a member's sessions therefore share
-// that member's connectors (src/connectors/store.ts).
-function connectorOwnerForSession(sessionId: string | undefined): string {
-  if (!sessionId) return ownerForUser(null);
-  const row = listManaged().find((s) => s.sessionId === sessionId || s.nativeSessionId === sessionId);
-  const user = row ? userAssignments()[row.tmuxName] : null;
-  return ownerForUser(user);
-}
-
-// The egress proxy for restricted-role sessions (src/sandbox/egress-proxy.ts).
-// One per box, started at boot. Null until then, and on any host where the
-// listener fails to bind — a restricted session then launches without a proxy
-// URL and is logged, rather than failing to start.
-let egressProxy: EgressProxy | null = null;
-
-
 /** Root URL this box's web UI is reachable at (e.g. `http://box.tailnet.ts.net:8766`
  * over Tailscale). Optional — when unset, no session URLs are advertised and
  * external surfaces simply omit their "open session" affordance. */
@@ -894,14 +784,12 @@ async function activationGate(
 ): Promise<Response | { release: () => void; reclaimed?: number }> {
   const settings = getGlobalSettingsSync();
   const computer = computerAgentAdmissionContext();
-  // Schedule admission keeps its own resident pool everywhere (issue 521).
-  // On a Computer the plan's scheduleLimit bounds it; on a self-hosted box
-  // the same maxLiveAgents preference bounds the schedule pool SEPARATELY,
-  // so a full interactive roster can no longer starve cron work.
-  const kind = options?.kind === "schedule" ? "schedule" : "interactive";
+  // Schedule admission is a Computer-plan rule. A self-hosted box has no plan
+  // file, so spawnedBy=schedule is just another session under maxLiveAgents.
+  const kind = computer && options?.kind === "schedule" ? "schedule" : "interactive";
   const limit =
-    kind === "schedule"
-      ? (computer?.scheduleLimit ?? settings.maxLiveAgents)
+    kind === "schedule" && computer
+      ? computer.scheduleLimit
       : (computer?.limit ?? settings.maxLiveAgents);
   if (limit === 0) return { release: () => {} };
   const overLimit = !computer && options?.overLimit === true;
@@ -911,10 +799,12 @@ async function activationGate(
     async () => {
       const available = hostAvailableMemory();
       const sessions = await listSessions().catch(() => []);
-      // Disjoint pools for Computer AND self-hosted boxes (issue 521):
-      // interactive launches count only interactive residents, schedule
-      // launches only schedule residents; persistent bots hold no slot.
-      const pool = admissionResidentPool(kind, sessions);
+      const pool = (!computer
+        ? sessions
+        : kind === "schedule"
+          ? sessions.filter((session) => session.spawnedBy === "schedule")
+          : sessions.filter((session) => session.spawnedBy !== "schedule"))
+        .filter((session) => !session.persistent);
       return {
         sessions: pool,
         // Always measured, so every launch books its share of memory even on
@@ -931,16 +821,7 @@ async function activationGate(
         enforceMemory: computer !== null || (overLimit && available.trusted),
       };
     },
-    computer
-      ? archiveIdleDurableAgentsForMemory
-      : kind === "interactive"
-        ? reclaimIdleDurableAgentForInteractiveCap
-        : undefined,
-    // A self-hosted interactive launch at its own live cap may trade the
-    // oldest safe idle durable ordinary session for the slot instead of
-    // refusing the owner (issue 521). Computer plans keep reclaim
-    // memory-pressure-only.
-    computer ? undefined : { reclaimOnLimit: kind === "interactive" },
+    computer ? archiveIdleDurableAgentsForMemory : undefined,
   );
   if (reservation.ok) return reservation;
   // Tagged `plan_limit` ONLY on a hosted Computer. An ordinary LFG install that
@@ -1309,7 +1190,7 @@ function persistManagedResume(session: Session): void {
         : session.agent === "pi"
           ? "pi"
           : session.runtime === "command-file" &&
-              (session.agent === "grok" || session.agent === "cursor" || session.agent === "fx" || session.agent === "muse" || session.agent === "copilot" || session.agent === "jcode")
+              (session.agent === "grok" || session.agent === "cursor" || session.agent === "fx" || session.agent === "copilot" || session.agent === "jcode")
             ? session.agent
           : null;
   if (!backend && !session.transcriptPath) return;
@@ -1336,7 +1217,7 @@ function persistManagedResume(session: Session): void {
         ? "opencode"
         : backend === "pi"
           ? "pi"
-          : backend === "grok" || backend === "cursor" || backend === "fx" || backend === "muse" || backend === "copilot" || backend === "jcode"
+          : backend === "grok" || backend === "cursor" || backend === "fx" || backend === "copilot" || backend === "jcode"
             ? backend
           : session.agent === "grok"
             ? "grok"
@@ -1677,7 +1558,6 @@ const STATIC_FILES: Record<string, { path: string; type: string }> = {
   "/agent-codex.svg": { path: join(WEB_DIR, "agent-codex.svg"), type: "image/svg+xml" },
   "/agent-cursor.svg": { path: join(WEB_DIR, "agent-cursor.svg"), type: "image/svg+xml" },
   "/agent-fx.svg": { path: join(WEB_DIR, "agent-fx.svg"), type: "image/svg+xml" },
-  "/agent-muse.svg": { path: join(WEB_DIR, "agent-muse.svg"), type: "image/svg+xml" },
   "/agent-deepseek.svg": { path: join(WEB_DIR, "agent-deepseek.svg"), type: "image/svg+xml" },
   "/agent-opencode.svg": { path: join(WEB_DIR, "agent-opencode.svg"), type: "image/svg+xml" },
   "/agent-jcode.svg": { path: join(WEB_DIR, "agent-jcode.svg"), type: "image/svg+xml" },
@@ -2169,27 +2049,6 @@ async function archiveIdleDurableAgentsForMemory(): Promise<number> {
   return archived;
 }
 
-// The self-hosted twin of the cap story (issue 521): the limit is the
-// owner's own preference, so an interactive launch that hits it trades the
-// OLDEST safe idle durable ordinary session for the slot instead of
-// returning a 429 the owner would first have to edit a number to avoid.
-// Safety is exactly memoryReclaimCandidates (never busy, launching,
-// persistent, unmanaged or non-resumable work) plus one addition in
-// capReclaimCandidate: schedule-spawned residents belong to the separate
-// schedule pool. closeLiveSession persists the resume record first, so
-// the closed chat reopens with its transcript and session context. One
-// close per admission: the retry then either fits or refuses.
-async function reclaimIdleDurableAgentForInteractiveCap(): Promise<number> {
-  const candidate = capReclaimCandidate(await listSessions());
-  if (!candidate) return 0;
-  const sessionId = candidate.sessionId as string;
-  const outcome = await closeLiveSession(candidate, sessionId, {
-    sessionId,
-    source: "selfhosted_cap_reclaim",
-  });
-  return outcome.ok ? 1 : 0;
-}
-
 const BOT_COMPACTION_SWEEP_MS = 15_000;
 let botCompactionTimer: ReturnType<typeof setInterval> | null = null;
 let botCompactionRunning = false;
@@ -2605,7 +2464,7 @@ function validateBotAgent(
   }
   if (agent === "codex-aisdk" && model && !/^[A-Za-z0-9_.:-]{1,80}$/.test(model))
     return { error: "invalid codex model name" };
-  if ((agent === "cursor" || agent === "opencode" || agent === "fx" || agent === "muse") && model && !/^[A-Za-z0-9_.:\/-]{1,120}$/.test(model))
+  if ((agent === "cursor" || agent === "opencode" || agent === "fx") && model && !/^[A-Za-z0-9_.:\/-]{1,120}$/.test(model))
     return { error: `invalid ${agent} model name` };
   if (agent === "jcode" && model && !/^[A-Za-z0-9_.:\/\-[\],=]{1,160}$/.test(model))
     return { error: "invalid jcode model name" };
@@ -2750,8 +2609,8 @@ async function launchBotSession(
       ? resolvedModel ?? GROK_DEFAULT_MODEL()
       : agent === "cursor" || agent === "jcode" || agent === "copilot" || agent === "fx"
         ? resolvedModel ?? "auto"
-        : agent === "opencode" || agent === "muse"
-          ? resolvedModel ?? defaultModelForAgent(agent)
+        : agent === "opencode"
+          ? resolvedModel ?? defaultModelForAgent("opencode")
           : agent === "codex-aisdk"
             ? resolvedModel ?? "gpt-5.5"
             : agent === "aisdk"
@@ -3516,8 +3375,6 @@ export function resolveAutoAgentRuntime(
     return { ok: false, status: 400, error: "invalid cursor model name" };
   if (autoBackend === "fx" && model && !/^[A-Za-z0-9_.:\/-]{1,120}$/.test(model))
     return { ok: false, status: 400, error: "invalid fx model name" };
-  if (autoBackend === "muse" && model && !/^[A-Za-z0-9_.:\/-]{1,120}$/.test(model))
-    return { ok: false, status: 400, error: "invalid muse model name" };
   if (autoBackend === "opencode" && model && !/^[A-Za-z0-9_.:\/-]{1,80}$/.test(model))
     return { ok: false, status: 400, error: "invalid opencode model name" };
   const thinkingLevel = b.thinkingLevel?.trim() || undefined;
@@ -4053,13 +3910,7 @@ export async function cmdServe() {
       // POST (requests), GET (server-initiated stream) and DELETE (teardown),
       // so the transport owns method handling rather than this router.
       if (path === "/mcp") {
-        // Who is calling, verified once here (src/policy/caller.ts), then the
-        // role filter (src/policy/mcp-filter.ts) and the server itself both
-        // work from that answer. The owner role passes straight through.
-        const caller = resolveCaller(req);
-        return await enforceRole(req, caller.role, { namespace: "omg", strip: "omg_" }, (r) =>
-          serveOmgMcpRequest(r, caller.sessionId),
-        );
+        return await serveOmgMcpRequest(req);
       }
 
       if (path === "/api/connect/reconcile" && req.method === "POST") {
@@ -4114,59 +3965,7 @@ export async function cmdServe() {
       if (path === "/mcp/computer") {
         const { computerMcpEnabled } = await getGlobalSettings();
         if (!computerMcpEnabled) return err(404, "the computer MCP is disabled");
-        const caller = resolveCaller(req);
-        return await enforceRole(req, caller.role, { namespace: "computer", strip: "computer_" }, (r) =>
-          serveComputerMcpRequest(r, caller.sessionId),
-        );
-      }
-
-
-      // The native connector surface. Exposes the calling session member's
-      // connectors (own + org-shared) as MCP tools, scoped and role-filtered,
-      // with owner approval for a connector marked requireApproval. Tool names
-      // are `<slug>__<tool>`, so the role id is `connectors.<slug>.<tool>` and
-      // a rule can block one connector (`connectors.gmail.*`) or one tool.
-      if (path === "/mcp/connectors") {
-        const caller = resolveCaller(req);
-        const owner = connectorOwnerForSession(caller.sessionId);
-        const gate: ConnectorApprovalGate = async (connector, tool, args) => {
-          if (!connector.requireApproval || !caller.sessionId) return { held: false };
-          const question = connectorApprovalQuestion(connector, tool, args);
-          const askUser = userAssignments()[
-            listManaged().find((s) => s.sessionId === caller.sessionId || s.nativeSessionId === caller.sessionId)?.tmuxName ?? ""
-          ] ?? null;
-          try {
-            const askRes = await fetch(`http://127.0.0.1:${PORT}/api/ask`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                question,
-                options: [CONNECTOR_APPROVE, CONNECTOR_DENY],
-                sessionId: caller.sessionId,
-                user: askUser,
-                pushback: true,
-                wait: false,
-              }),
-            });
-            if (!askRes.ok) throw new Error(`ask create failed (${askRes.status})`);
-            const { id } = (await askRes.json()) as { id: string };
-            registerPendingConnectorApproval({
-              askId: id,
-              sessionId: caller.sessionId,
-              connectorId: connector.id,
-              connectorName: connector.name,
-              tool,
-              args,
-            });
-            return { held: true, text: connectorHeldText(connector, tool) };
-          } catch {
-            // If the ask cannot be posted, run inline rather than hang the agent.
-            return { held: false };
-          }
-        };
-        return await enforceRole(req, caller.role, { namespace: "connectors", split: "__" }, (r) =>
-          serveConnectorsMcpRequest(r, owner, gate, caller.role.id),
-        );
+        return await serveComputerMcpRequest(req);
       }
 
       if (path === "/api/live/ws") {
@@ -4237,223 +4036,6 @@ export async function cmdServe() {
         return json(desktopStatus());
       }
 
-
-      // ---- connectors (native, per-member) ----
-      // The UI scopes by ?user=<member>; the store returns that member's own,
-      // their role's, and the team-shared connectors. Secrets are stripped
-      // from every response.
-      if (path === "/api/connectors" && req.method === "GET") {
-        const user = url.searchParams.get("user");
-        const owner = ownerForUser(user);
-        const roleId = roleForUser(user).id;
-        return json({
-          connectors: listConnectors(owner, roleId).map((c) => ({ ...publicView(c), oauthConnected: hasOAuthTokens(c.id) })),
-        });
-      }
-
-      // ---- connector OAuth ----
-      // omg owns the MCP OAuth flow (src/connectors/oauth-provider.ts). start
-      // returns an authorize URL for the browser; the callback (browser GET) or
-      // complete (POST, for a hosted relay) exchanges the code and stores the
-      // tokens. redirectBase lets a managed UI point the redirect at its relay.
-      {
-        const m = path.match(/^\/api\/connectors\/([0-9a-f]+)\/oauth\/start$/);
-        if (m && req.method === "POST") {
-          const connector = getConnector(m[1]!);
-          if (!connector) return err(404, "connector not found");
-          const body = (await req.json().catch(() => null)) as { redirectBase?: string; state?: string } | null;
-          const base = oauthRedirectBase(req, body?.redirectBase);
-          // State that routes the redirect back to this box through a relay: a
-          // caller may supply it, else the box mints one from its relay env.
-          const state =
-            (typeof body?.state === "string" && body.state.length >= 16 ? body.state : undefined) ??
-            oauthRelayState();
-          const result = await startConnectorOAuth(connector, base, state);
-          if (!result.ok) return err(502, result.error);
-          return json(result);
-        }
-      }
-      if (path === "/api/connectors/oauth/callback" && req.method === "GET") {
-        const code = url.searchParams.get("code") ?? "";
-        const state = url.searchParams.get("state") ?? "";
-        const errorParam = url.searchParams.get("error");
-        if (errorParam) return oauthClosePage(`Authorization was cancelled: ${errorParam}`, false);
-        const result = code && state ? await completeConnectorOAuth(state, code, getConnector) : { ok: false as const, error: "missing code or state" };
-        if (result.ok) await resetConnector(result.connectorId);
-        return oauthClosePage(result.ok ? "Connected. You can close this window." : `Could not connect: ${result.error}`, result.ok);
-      }
-      if (path === "/api/connectors/oauth/callback" && req.method === "POST") {
-        // The managed relay path: a hosted callback hands omg the code + state.
-        const body = (await req.json().catch(() => null)) as { code?: string; state?: string } | null;
-        if (!body?.code || !body?.state) return err(400, "code and state are required");
-        const result = await completeConnectorOAuth(body.state, body.code, getConnector);
-        if (!result.ok) return err(502, result.error);
-        await resetConnector(result.connectorId);
-        return json({ ok: true });
-      }
-      {
-        const m = path.match(/^\/api\/connectors\/([0-9a-f]+)\/oauth$/);
-        if (req.method === "DELETE" && m) {
-          const { clearOAuth } = await import("@omg-dev/connectors");
-          clearOAuth(m[1]!);
-          await resetConnector(m[1]!);
-          return json({ ok: true });
-        }
-      }
-      if (path === "/api/connectors" && req.method === "POST") {
-        const body = (await req.json().catch(() => null)) as
-          | { user?: string; org?: boolean; role?: string; name?: string; endpoint?: string; headers?: Record<string, string>; catalogSlug?: string; icon?: string; oauth?: boolean; requireApproval?: boolean }
-          | null;
-        if (!body) return err(400, "invalid JSON body");
-        // Three levels: `org` is the team, `role` is every member of that
-        // role, otherwise the connector belongs to the requesting member.
-        const roleId = typeof body.role === "string" ? body.role.trim() : "";
-        if (roleId && (roleId === OWNER_ROLE_ID || !getRole(roleId))) return err(404, `unknown role "${roleId}"`);
-        const owner = body.org ? "*org*" : roleId ? roleOwner(roleId) : ownerForUser(body.user);
-        const result = createConnector({
-          owner,
-          name: body.name ?? "",
-          endpoint: body.endpoint ?? "",
-          headers: body.headers,
-          catalogSlug: body.catalogSlug,
-          icon: body.icon,
-          oauth: body.oauth,
-          requireApproval: body.requireApproval,
-        });
-        if (!result.ok) return err(400, result.error);
-        return json({ connector: publicView(result.connector) });
-      }
-      if (path === "/api/connectors/catalog" && req.method === "GET") {
-        try {
-          const entries = await loadCatalog(url.searchParams.get("refresh") === "1");
-          const q = url.searchParams.get("q") ?? "";
-          const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 50, 1), 200);
-          return json({ total: entries.length, results: searchCatalog(entries, q, limit) });
-        } catch (e) {
-          return err(502, e instanceof Error ? e.message : "could not load the catalog");
-        }
-      }
-      {
-        const m = path.match(/^\/api\/connectors\/([0-9a-f]+)$/);
-        if (req.method === "PATCH" && m) {
-          const body = (await req.json().catch(() => null)) as Parameters<typeof updateConnector>[1] | null;
-          if (!body) return err(400, "invalid JSON body");
-          const result = updateConnector(m[1]!, body);
-          if (!result.ok) return err(result.error === "connector not found" ? 404 : 400, result.error);
-          await resetConnector(m[1]!);
-          return json({ connector: publicView(result.connector) });
-        }
-        if (req.method === "DELETE" && m) {
-          const result = deleteConnector(m[1]!);
-          if (!result.ok) return err(404, result.error);
-          await resetConnector(m[1]!);
-          return json({ ok: true });
-        }
-      }
-      {
-        const m = path.match(/^\/api\/connectors\/([0-9a-f]+)\/tools$/);
-        if (req.method === "GET" && m) {
-          const connector = getConnector(m[1]!);
-          if (!connector) return err(404, "connector not found");
-          const probe = await probeConnector(connector);
-          if (!probe.ok) return json({ ok: false, error: probe.error, tools: [] });
-          const { listConnectorTools } = await import("@omg-dev/connectors");
-          const tools = await listConnectorTools(connector);
-          return json({ ok: true, tools: tools.map((t) => ({ name: t.name, description: t.description })) });
-        }
-      }
-
-      // Who the browser is viewing as, and what that role lets it see. The
-      // user is the browser's own pick (lfg_user); there is no auth, so this
-      // is a layout answer. Owner may preview another role with `?role=`.
-      if (path === "/api/me" && req.method === "GET") {
-        const user = url.searchParams.get("user")?.trim() || undefined;
-        const preview = url.searchParams.get("role")?.trim() || undefined;
-        let role = roleForUser(user);
-        if (preview && role.id === OWNER_ROLE_ID) {
-          const wanted = getRole(preview);
-          if (!wanted) return err(404, `unknown role "${preview}"`);
-          role = wanted;
-        }
-        const settings = getGlobalSettingsSync();
-        const views: Record<string, boolean> = {};
-        for (const key of VIEW_TOGGLE_KEYS) views[key] = settings[key] && !role.views.hide.includes(key);
-        return json({
-          user: user ?? null,
-          role: { id: role.id, name: role.name },
-          canSwitchRole: roleForUser(user).id === OWNER_ROLE_ID,
-          views,
-          // The raw role lists too, so the web can AND them against a settings
-          // change without a round trip.
-          hide: role.views.hide,
-          hiddenPages: role.views.hiddenPages,
-        });
-      }
-
-      // ---- roles ----
-      // Per-role tool policy for sessions on this box (src/policy/roles.ts).
-      // Rules use Executor's pattern grammar over `<server>.<tool>` ids.
-      if (path === "/api/roles" && req.method === "GET") {
-        return json({ roles: listRoles() });
-      }
-      if (path === "/api/roles" && req.method === "POST") {
-        const body = (await req.json().catch(() => null)) as Parameters<typeof createRole>[0] | null;
-        if (!body) return err(400, "invalid JSON body");
-        const result = createRole(body);
-        if (!result.ok) return err(400, result.error);
-        return json({ role: result.role });
-      }
-      {
-        const m = path.match(/^\/api\/roles\/([a-z0-9-]+)$/);
-        // Method first: src/commands/auto-agent-route-wiring.test.ts locates
-        // the auto-agents PATCH branch by its `if (m && req.method === "PATCH")`
-        // text, and this route sits earlier in the file.
-        if (req.method === "PATCH" && m) {
-          const body = (await req.json().catch(() => null)) as Parameters<typeof updateRole>[1] | null;
-          if (!body) return err(400, "invalid JSON body");
-          const result = updateRole(m[1]!, body);
-          if (!result.ok) return err(result.error === "role not found" ? 404 : 400, result.error);
-          return json({ role: result.role });
-        }
-        if (m && req.method === "DELETE") {
-          const result = deleteRole(m[1]!);
-          if (!result.ok) return err(result.error === "role not found" ? 404 : 400, result.error);
-          // Sessions still pointing at the role fall back to owner in
-          // resolveCaller. Clear the rows so the roster does not show a
-          // role that no longer exists.
-          for (const row of listManaged()) {
-            if (row.role === m[1]) patchManaged(row.tmuxName, { role: undefined });
-          }
-          invalidateListSessionsCache();
-          // The role's connector bucket goes with it: no member can read a
-          // `role:<id>` bucket for a role that no longer exists. Drop the
-          // stored OAuth tokens and any live hub client for each one.
-          const { clearOAuth } = await import("@omg-dev/connectors");
-          for (const connector of deleteConnectorsForOwner(roleOwner(m[1]!))) {
-            clearOAuth(connector.id);
-            await resetConnector(connector.id);
-          }
-          return json({ ok: true });
-        }
-      }
-      // Move one session to another role. Takes effect on that session's next
-      // tools/list or tools/call; nothing restarts.
-      {
-        const m = path.match(/^\/api\/sessions\/([^/]+)\/role$/);
-        if (req.method === "PATCH" && m) {
-          const sessionId = decodeURIComponent(m[1]!);
-          const body = (await req.json().catch(() => null)) as { role?: unknown } | null;
-          const requested = typeof body?.role === "string" ? body.role.trim() : "";
-          if (!requested) return err(400, "role is required");
-          if (!getRole(requested)) return err(404, `unknown role "${requested}"`);
-          const row = listManaged().find((s) => s.sessionId === sessionId || s.nativeSessionId === sessionId);
-          if (!row) return err(404, "session not found");
-          patchManaged(row.tmuxName, { role: requested === OWNER_ROLE_ID ? undefined : requested });
-          invalidateListSessionsCache();
-          return json({ ok: true, role: requested });
-        }
-      }
-
       // Agent control of the browser on that desktop, via Bun.WebView attached
       // over DevTools. These are what the MCP tools call; they act on the one
       // visible tab, so whatever the agent does shows up on the streamed screen.
@@ -4484,11 +4066,6 @@ export async function cmdServe() {
             case "type": {
               if (!body.text) return err(400, "text is required");
               await browserType(body.text);
-              return json({ ok: true });
-            }
-            case "paste": {
-              if (!body.text) return err(400, "text is required");
-              await browserPaste(body.text);
               return json({ ok: true });
             }
             case "press": {
@@ -5134,79 +4711,7 @@ a{color:#60a5fa}
               return err(400, "skippedUpdateVersion must be a string of 100 characters or fewer");
             patch.skippedUpdateVersion = b.skippedUpdateVersion;
           }
-          if (b?.defaultAgent !== undefined) {
-            if (
-              typeof b.defaultAgent !== "string" ||
-              b.defaultAgent.length > DEFAULT_AGENT_KEY_MAX_LENGTH ||
-              !/^[a-z0-9-]*$/i.test(b.defaultAgent)
-            ) {
-              return err(400, "defaultAgent must be an agent key (letters, digits, dashes) or empty");
-            }
-            patch.defaultAgent = b.defaultAgent;
-          }
-          if (b?.defaultModel !== undefined) {
-            if (typeof b.defaultModel !== "string" || b.defaultModel.length > DEFAULT_MODEL_MAX_LENGTH)
-              return err(400, `defaultModel must be a string of ${DEFAULT_MODEL_MAX_LENGTH} characters or fewer`);
-            patch.defaultModel = b.defaultModel;
-          }
-          // One explicit branch per switch: settings-validation.test.ts reads
-          // this handler for a `patch.<field> =` per GlobalSettings key.
-          if (b?.showSidebarAgentIcons !== undefined) {
-            if (typeof b.showSidebarAgentIcons !== "boolean")
-              return err(400, "showSidebarAgentIcons must be a boolean");
-            patch.showSidebarAgentIcons = b.showSidebarAgentIcons;
-          }
-          if (b?.showSessionAgentIcons !== undefined) {
-            if (typeof b.showSessionAgentIcons !== "boolean")
-              return err(400, "showSessionAgentIcons must be a boolean");
-            patch.showSessionAgentIcons = b.showSessionAgentIcons;
-          }
-          if (b?.showComposerModels !== undefined) {
-            if (typeof b.showComposerModels !== "boolean")
-              return err(400, "showComposerModels must be a boolean");
-            patch.showComposerModels = b.showComposerModels;
-          }
-          if (b?.showComposerAgents !== undefined) {
-            if (typeof b.showComposerAgents !== "boolean")
-              return err(400, "showComposerAgents must be a boolean");
-            patch.showComposerAgents = b.showComposerAgents;
-          }
-          if (b?.showBots !== undefined) {
-            if (typeof b.showBots !== "boolean") return err(400, "showBots must be a boolean");
-            patch.showBots = b.showBots;
-          }
-          if (b?.showSchedules !== undefined) {
-            if (typeof b.showSchedules !== "boolean")
-              return err(400, "showSchedules must be a boolean");
-            patch.showSchedules = b.showSchedules;
-          }
-          if (b?.showSessionDiffBar !== undefined) {
-            if (typeof b.showSessionDiffBar !== "boolean")
-              return err(400, "showSessionDiffBar must be a boolean");
-            patch.showSessionDiffBar = b.showSessionDiffBar;
-          }
-          if (b?.showComposerFastMode !== undefined) {
-            if (typeof b.showComposerFastMode !== "boolean")
-              return err(400, "showComposerFastMode must be a boolean");
-            patch.showComposerFastMode = b.showComposerFastMode;
-          }
-          if (b?.customInstructions !== undefined) {
-            if (
-              typeof b.customInstructions !== "string" ||
-              b.customInstructions.length > CUSTOM_INSTRUCTIONS_MAX_LENGTH
-            ) {
-              return err(
-                400,
-                `customInstructions must be a string of ${CUSTOM_INSTRUCTIONS_MAX_LENGTH} characters or fewer`,
-              );
-            }
-            patch.customInstructions = b.customInstructions;
-          }
           const settings = await setGlobalSettings(patch);
-          // The connector gateway follows its switch: off stops the daemon
-          // now rather than leaving it running behind a 404, and on starts it
-          // without waiting for the next boot. Off the response path: a cold
-          // start is seconds.
           return json({ settings });
         }
         return err(405, "method not allowed");
@@ -7252,7 +6757,6 @@ a{color:#60a5fa}
           if (!b?.answer?.trim()) return err(400, "missing answer");
           const q = await answerQuestion(m[1], { answer: b.answer.trim(), via: b.via });
           if (!q) return err(404, "unknown or already-answered question");
-
           // `deliver: false` — the person answered by typing in the owning
           // session's own composer, so that message is ALREADY on its way to
           // the agent. Record the answer (this also wakes a blocked long-poll)
@@ -7335,27 +6839,6 @@ a{color:#60a5fa}
           if (!q) return err(404, "unknown or not-yet-answered question");
           return json({ question: q });
         }
-      }
-      // Empty the feed in one action. The per-finding route below is the
-      // single-row equivalent; this is not a loop over it on purpose. Each
-      // updateFinding call re-reads and rewrites the whole JSONL file, so a
-      // client-side fan-out over N findings is N full rewrites that interleave
-      // and drop each other's writes. One batched write in the store instead.
-      //
-      // Literal path, and it cannot collide with the /:id route below: that
-      // regex is [0-9a-f]+ and "clear" contains l and r.
-      if (path === "/api/auto/findings/clear" && req.method === "POST") {
-        // Optional { ids }: the caller clears exactly the findings it showed.
-        // The rail is project-scoped, so an unscoped clear would dismiss rows
-        // the button never offered to. No body = every open finding.
-        const b = (await req.json().catch(() => null)) as { ids?: unknown } | null;
-        let ids: string[] | undefined;
-        if (b?.ids !== undefined) {
-          if (!Array.isArray(b.ids) || b.ids.some((i) => typeof i !== "string"))
-            return err(400, "expected { ids?: string[] }");
-          ids = b.ids as string[];
-        }
-        return json({ cleared: await dismissAllFindings(ids) });
       }
       {
         const m = path.match(/^\/api\/auto\/findings\/([0-9a-f]+)$/);
@@ -7847,29 +7330,6 @@ a{color:#60a5fa}
         return json({
           providers: await getUsageSummary({ force: url.searchParams.get("force") === "1" }),
         });
-      }
-
-      if (path === "/api/usage/codex/reset-credit") {
-        if (req.method !== "POST") return err(405, "method not allowed");
-        const body = (await req.json().catch(() => null)) as {
-          creditId?: unknown;
-          idempotencyKey?: unknown;
-        } | null;
-        const creditId = typeof body?.creditId === "string" ? body.creditId.trim() : "";
-        const idempotencyKey = typeof body?.idempotencyKey === "string"
-          ? body.idempotencyKey.trim()
-          : "";
-        if (!creditId || !idempotencyKey) {
-          return err(400, "creditId and idempotencyKey are required");
-        }
-        try {
-          const outcome = await consumeCodexRateLimitResetCredit({ creditId, idempotencyKey });
-          invalidateProviderUsage("codex");
-          const provider = await getProviderUsage("codex", { force: true });
-          return json({ outcome, provider });
-        } catch (error) {
-          return err(502, error instanceof Error ? error.message : String(error));
-        }
       }
 
       // One source, fetched on its own. This is what makes a single ring (the
@@ -8544,15 +8004,8 @@ a{color:#60a5fa}
           spawnedBy?: string;
           /** Start even though the live-agent cap is full — self-hosted only. */
           overLimit?: boolean;
-          /** Role the session runs as at the MCP endpoints. Missing = owner. */
-          role?: string;
           agent?: "claude" | "codex" | "aisdk" | "codex-aisdk" | "opencode" | "jcode" | "grok" | "cursor" | "copilot" | "hermes" | "pi";
         } | null;
-        const requestedRole = typeof body?.role === "string" ? body.role.trim() : "";
-        if (requestedRole && !getRole(requestedRole)) return err(400, `unknown role "${requestedRole}"`);
-        // Resolved below once the user tag is known: an explicit role wins,
-        // else the tagged user's role (src/policy/roles.ts members).
-        let sessionRole: string | undefined;
         const agent = resolveActiveSessionAgent(body?.agent);
         if (!agent) {
           if (body?.agent === "hermes") return err(410, "agent \"hermes\" has been removed");
@@ -8722,6 +8175,7 @@ a{color:#60a5fa}
         if (gate instanceof Response) return gate;
         try {
         const tmuxName = `lfg-${randomBytes(3).toString("hex")}`;
+        const isSubagent = spawnedBy === "subagent";
         const cwdResolved = await resolveSessionCwd(repo.cwd, tmuxName, {
           worktree: body?.worktree,
           selfRepo: SELF_REPO,
@@ -8760,8 +8214,6 @@ a{color:#60a5fa}
                         ? resolvedModel ?? PI_DEFAULT_MODEL
                         : resolvedModel;
         const requestedTitle = body?.title?.trim().slice(0, 200);
-        const resolvedRole = requestedRole || roleForUser(assignedUser).id;
-        sessionRole = resolvedRole !== OWNER_ROLE_ID ? resolvedRole : undefined;
         const claim = addManaged({
           tmuxName,
           cwd,
@@ -8787,10 +8239,6 @@ a{color:#60a5fa}
           spawnedBy,
           repoRoot: worktree?.repoRoot,
           worktreeBranch: worktree?.branch,
-          role: sessionRole,
-          // Every session launched from here is handed its token at spawn
-          // (omgMcpServers), so the endpoint may demand it.
-          mcpTokenRequired: true,
         }, idempotencyKey);
         if (!claim.created) return replaySessionCreation(claim.session);
         if (claudeAccountId) bindClaudeSessionAccount(launchId, claudeAccountId);
@@ -8809,20 +8257,8 @@ a{color:#60a5fa}
           fastMode,
           sessionId: launchId,
           omgUser: assignedUser,
-          // Issue 521: parents run contained too — their own
-          // lfg-agent-*.service, so omg.service restarts stop
-          // accumulating orphaned children.
-          containInAgentSlice: true,
+          containInAgentSlice: isSubagent,
           claudeAccountId,
-          // Restricted roles run their harness in a filesystem sandbox
-          // (src/sandbox/bwrap.ts). Owner and unknown roles get none.
-          sandbox: roleSandbox(sessionRole),
-          // An allowlist role also gets an egress proxy URL carrying its own
-          // token, so its outbound traffic is held to the role's hosts.
-          egressProxyUrl:
-            roleEgress(sessionRole).mode === "allowlist" && egressProxy
-              ? egressProxy.proxyUrlFor(launchId, sessionToken(launchId))
-              : undefined,
         });
         if (!r.ok) {
           // The caller received no committed session. Release the claim so a
@@ -9060,23 +8496,12 @@ a{color:#60a5fa}
               },
             });
           }
-          // A "file" artifact is never rendered by omg.dev, only downloaded.
-          // These bytes are agent-chosen and are served from the app's own
-          // origin, so anything the browser would INTERPRET here is something
-          // the agent can execute as the user. Forcing the attachment for the
-          // whole kind means there is no allowlist to keep correct: a `.html`
-          // or `.svg` the agent wrote is saved, never run. Do not relax this
-          // to add an inline preview without solving that first.
-          const isFileArtifact = (artifact.media ?? "image") === "file";
           const baseHeaders: Record<string, string> = {
             "Content-Type": contentType,
             "Cache-Control": "private, max-age=31536000, immutable",
             "X-Content-Type-Options": "nosniff",
             // Video seeking (and Safari playback) needs byte-range support.
             "Accept-Ranges": "bytes",
-            ...(isFileArtifact
-              ? { "Content-Disposition": contentDisposition("attachment", artifact.name) }
-              : {}),
           };
           // Honor a single-range request so the <video> element can seek without
           // re-downloading the whole file. Bun.file().slice() streams the slice.
@@ -9273,35 +8698,6 @@ a{color:#60a5fa}
             return json({ ok: true, artifact, message: imageArtifactToMessage(artifact), indexed: true });
           } catch (e) {
             return err(400, e instanceof Error ? e.message : "could not create video artifact");
-          }
-        }
-      }
-
-      {
-        // Any other file the agent wants to put in front of the user: a PDF,
-        // an audio clip, a CSV, an archive. One route for all of them — the
-        // stored mime type, not the artifact kind, decides the presentation.
-        const m = path.match(/^\/api\/sessions\/([0-9a-fA-F-]{36})\/artifacts\/files$/);
-        if (m && req.method === "POST") {
-          const body = (await req.json().catch(() => null)) as {
-            path?: string;
-            caption?: string;
-            alt?: string;
-          } | null;
-          if (!body?.path?.trim()) return err(400, "path required");
-          try {
-            const transcriptPath = await resolveTranscript(m[1]);
-            const indexPath = transcriptPath ?? sessionIndexKey(m[1]);
-            const artifact = createFileArtifact({
-              sessionId: m[1],
-              path: body.path,
-              caption: body.caption,
-              alt: body.alt,
-            });
-            indexArtifactMessage(indexPath, m[1], artifact);
-            return json({ ok: true, artifact, message: imageArtifactToMessage(artifact), indexed: true });
-          } catch (e) {
-            return err(400, e instanceof Error ? e.message : "could not create file artifact");
           }
         }
       }
@@ -10966,33 +10362,7 @@ a{color:#60a5fa}
   // Keep SQLite as the chat read model for every active session. Transcript
   // JSONL files are treated as an import source; live draft deltas stay
   // ephemeral until the provider writes the completed turn.
-  // Give the connector package (@omg-dev/connectors) this host's data dir,
-  // token-encryption secret, and base URL. The same package runs in the
-  // hosted omg.dev sandbox with its own values.
-  configureConnectors({
-    dataDir: () => PATHS.data,
-    secret: () => boxSecretMaterial(),
-    baseUrl: () => localServeBaseUrl(),
-  });
   startChatIngestMonitor(listSessionsCached);
-
-  // The egress proxy: a restricted-role session's harness is pointed here, so
-  // it reaches only the model APIs plus its role's allowed hosts. Resolves the
-  // caller from the same per-session token the MCP endpoints use.
-  void startEgressProxy({
-    log: (l) => console.log(l),
-    resolve: (sessionId, token) => {
-      if (!verifySessionToken(sessionId, token)) return null;
-      const row = listManaged().find((s) => s.sessionId === sessionId || s.nativeSessionId === sessionId);
-      const egress = roleEgress(row?.role);
-      if (egress.mode !== "allowlist") return null;
-      return { sessionId, allow: [...DEFAULT_ALLOW_HOSTS, ...egress.allowHosts] };
-    },
-  })
-    .then((proxy) => {
-      egressProxy = proxy;
-    })
-    .catch((e) => console.error(`[egress] start failed: ${e instanceof Error ? e.message : String(e)}`));
   // Warm the resumable-session cache in the background so the first time someone
   // opens the resume picker it's already served from SQLite (no cold scan wait).
   void refreshResumableCache({ force: true }).catch(() => {});
