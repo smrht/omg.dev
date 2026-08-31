@@ -4100,6 +4100,18 @@ export async function cmdServe() {
       // Agent control of the browser on that desktop, via Bun.WebView attached
       // over DevTools. These are what the MCP tools call; they act on the one
       // visible tab, so whatever the agent does shows up on the streamed screen.
+      // Every action the dispatcher serves, as full route literals: the
+      // startsWith prefix below is invisible to the route scanner in
+      // client-api-route-coverage.test.ts, and the 404 names them for humans.
+      const browserActionRoutes = [
+        "/api/computer/browser/navigate",
+        "/api/computer/browser/click",
+        "/api/computer/browser/type",
+        "/api/computer/browser/press",
+        "/api/computer/browser/text",
+        "/api/computer/browser/inspect",
+        "/api/computer/browser/screenshot",
+      ];
       if (path.startsWith("/api/computer/browser/") && req.method === "POST") {
         if (!desktopStatus().running) return err(409, "the computer is not running");
         const action = path.slice("/api/computer/browser/".length);
@@ -4156,7 +4168,12 @@ export async function cmdServe() {
               return new Response(blob, { headers: { "content-type": "image/png" } });
             }
             default:
-              return err(404, `unknown browser action: ${action}`);
+              return err(
+                404,
+                `unknown browser action: ${action} (known: ${browserActionRoutes
+                  .map((route) => route.slice("/api/computer/browser/".length))
+                  .join(", ")})`,
+              );
           }
         } catch (e) {
           return err(500, e instanceof Error ? e.message : "browser action failed");

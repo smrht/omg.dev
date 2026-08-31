@@ -40,7 +40,8 @@ describe("session lifecycle actions", () => {
     for (const menu of [dropdown, context]) {
       expect(menu).toContain("busy: boolean;");
       expect(menu).toMatch(/\{busy \? \([\s\S]*?>\s*Stop\s*</);
-      expect(menu).toContain('label="Archive session"');
+      // omg-fork: archiving stops the agent first, and says so.
+      expect(menu).toContain('label="Stop and archive"');
     }
   });
 
@@ -54,7 +55,8 @@ describe("session lifecycle actions", () => {
     // Two session archive actions remain unchanged. The bot conversation
     // restart and bot sheet delete use the same inline primitive too.
     expect(app.match(/<DoubleConfirmAction/g)?.length).toBe(4);
-    expect(app.match(/confirmLabel="Confirm archive"/g)?.length).toBe(2);
+    // omg-fork: both session archive actions confirm as "stop and archive".
+    expect(app.match(/confirmLabel="Confirm stop and archive"/g)?.length).toBe(2);
     expect(doubleConfirm).toContain("closeOnClick: armed && !pending");
     expect(doubleConfirm).toContain("setTimeout(() => setArmed(false), timeoutMs)");
     expect(doubleConfirm).toContain("slide-in-from-bottom-1");

@@ -88,8 +88,11 @@ describe("page navigation reachability", () => {
     expect(page, "the Computer must render a close control").toContain(
       'aria-label="Close the computer"',
     );
+    // omg-fork Design Mode: close returns to the inspecting session when a
+    // selection is in flight, and home to Live otherwise — the home branch is
+    // what this guard is about.
     expect(app, "the shell must send the Computer home").toContain(
-      'onClose={() => setTab("live")}',
+      'else setTab("live")',
     );
   });
 

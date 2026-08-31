@@ -78,7 +78,9 @@ describe("the session row's swipe actions (RailItem)", () => {
 
   // The mobile list is the surface that offers it; the gesture is touch-only.
   test("the mobile list wires archive into its rows", () => {
-    expect(APP).toContain("onArchive={() => void archiveSession(sid)}");
+    // omg-fork: mobile rows guard archive away from shipped reviews, bot
+    // conversations and schedule spawns; the wiring itself must stay.
+    expect(APP).toContain("? () => void archiveSession(sid)");
     expect(APP).toContain('closeSessionRequest(sid, "mobile_swipe_archive")');
   });
 
