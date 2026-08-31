@@ -70,6 +70,10 @@ export const DEFAULT_DESKTOP: DesktopConfig = {
   height: 800,
   rfbPort: envPort("OMG_COMPUTER_RFB_PORT", 5900),
   cdpPort: envPort("OMG_COMPUTER_CDP_PORT", 9222),
+  // Issue 692: a proxy set once in the environment survives restarts and
+  // `omg update` without re-typing it into computer_start. An explicit
+  // proxy=... still wins: startDesktop spreads `partial` over this default.
+  proxy: process.env.OMG_COMPUTER_PROXY || undefined,
   profileDir: `${process.env.HOME ?? "/tmp"}/.omg/computer/chrome-profile`,
 };
 
@@ -158,6 +162,16 @@ function alive(pid: number | undefined): boolean {
   }
 }
 
+/**
+ * The pid of the Chrome the agent drives, however this desktop came to be.
+ *
+ * A desktop we spawned keeps a child handle; one we adopted after a server
+ * restart only has pids on disk. Both are the same browser to a caller.
+ */
+function chromePid(s: DesktopState): number | undefined {
+  return s.adoptedPids?.chrome ?? s.chrome?.pid;
+}
+
 function killPid(pid: number | undefined, signal: NodeJS.Signals = "SIGTERM"): void {
   if (!pid) return;
   try {
@@ -176,11 +190,16 @@ async function adoptOrReap(): Promise<boolean> {
   const record = readStateFile();
   if (!record) return false;
 
-  const { xvfb, vnc } = record.pids;
-  // Xvfb and x11vnc are the two that matter: without them there is no screen
-  // and nothing to stream, whatever else survived.
+  const { xvfb, vnc, chrome } = record.pids;
+  // A screen nobody can drive is not a Computer. Chrome belongs in this test:
+  // adopting a stack whose browser died is what made `running: true` lie while
+  // the CDP port answered nothing.
   const healthy =
-    alive(xvfb) && alive(vnc) && (await waitForPort(record.config.rfbPort, 1500));
+    alive(xvfb) &&
+    alive(vnc) &&
+    alive(chrome) &&
+    (await waitForPort(record.config.rfbPort, 1500)) &&
+    (await waitForPort(record.config.cdpPort, 1500));
 
   if (!healthy) {
     for (const pid of Object.values(record.pids)) killPid(pid);
@@ -295,7 +314,10 @@ export interface DesktopStatus {
 
 export function desktopStatus(): DesktopStatus {
   const deps = ensureDeps();
-  if (!state) {
+  // `state` proves we started something once, not that it is still up. Report
+  // on the browser, so a caller that reads `running` gets an answer it can act
+  // on instead of one it has to verify with a curl.
+  if (!state || !alive(chromePid(state))) {
     return {
       running: false,
       display: null,
@@ -410,12 +432,38 @@ export async function ensureDesktopAdopted(): Promise<void> {
 }
 
 /**
+ * Chrome flags for a proxied browser: the proxy carries the traffic, and
+ * nothing else does.
+ *
+ * A SOCKS proxy only handles TCP, so three paths around it each get their own
+ * flag. QUIC is HTTP/3 over UDP and bypasses the tunnel entirely -- switched
+ * off rather than proxied. WebRTC can share the real address over a
+ * non-proxied UDP path -- the handling policy forbids exactly that. And DNS:
+ * left alone, Chrome resolves hostnames with the local resolver, so the
+ * resolver rules answer NOTFOUND for everything except loopback; names then
+ * travel to the proxy unresolved (SOCKS5 forwards hostnames), and the
+ * EXCLUDEs keep a proxy bound to 127.0.0.1 and localhost pages reachable.
+ */
+export function chromeProxyFlags(proxy: string): string[] {
+  return [
+    `--proxy-server=${proxy}`,
+    "--disable-quic",
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost",
+  ];
+}
+
+/**
  * Start the desktop. Idempotent: a second call while it is up is a no-op and
  * returns the current status, so two sessions racing to open the Computer tab
  * cannot start two stacks.
  */
 export async function startDesktop(partial: Partial<DesktopConfig> = {}): Promise<DesktopStatus> {
-  if (state) return desktopStatus();
+  if (state && alive(chromePid(state))) return desktopStatus();
+  // Chrome died under a live server. Drop the stale handle and fall through to
+  // adoptOrReap(), which reads the pids off disk and reaps the whole stack --
+  // otherwise Xvfb and x11vnc stay behind and the new Xvfb cannot take :99.
+  state = null;
 
   // A desktop this box left running survives a server restart. Reattach to it
   // rather than starting a second stack on the same display and ports.
@@ -494,7 +542,9 @@ export async function startDesktop(partial: Partial<DesktopConfig> = {}): Promis
     `--window-size=${Math.round(config.width * 0.82)},${Math.round(config.height * 0.78)}`,
   ];
   // Guus's setup runs each browser behind a webshare proxy; this is that knob.
-  if (config.proxy) chromeArgs.push(`--proxy-server=${config.proxy}`);
+  // Issue 692: with a proxy set, Chrome must not leak around the tunnel
+  // (QUIC over UDP, WebRTC, local DNS) -- see chromeProxyFlags above.
+  if (config.proxy) chromeArgs.push(...chromeProxyFlags(config.proxy));
   next.chrome = spawn(chrome, chromeArgs, { stdio: "ignore", env, detached: false });
 
   // Publish the state BEFORE waiting on ports. If a wait fails or throws, the
