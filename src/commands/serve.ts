@@ -2659,10 +2659,10 @@ async function launchBotSession(
     const resolvedModel = resolveModelForAgent(agent, bot.model, bot.thinkingLevel);
     const launchModel = agent === "grok"
       ? resolvedModel ?? GROK_DEFAULT_MODEL()
-      : agent === "cursor" || agent === "jcode" || agent === "copilot" || agent === "fx" || agent === "muse"
+      : agent === "cursor" || agent === "jcode" || agent === "copilot" || agent === "fx"
         ? resolvedModel ?? "auto"
-        : agent === "opencode"
-          ? resolvedModel ?? defaultModelForAgent("opencode")
+        : agent === "opencode" || agent === "muse"
+          ? resolvedModel ?? defaultModelForAgent(agent)
           : agent === "codex-aisdk"
             ? resolvedModel ?? "gpt-5.5"
             : agent === "aisdk"

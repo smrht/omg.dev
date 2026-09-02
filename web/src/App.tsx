@@ -1369,10 +1369,10 @@ const FX_MODELS = [
   "moonshotai/kimi-k3",
   "zai/glm-5.2",
 ];
-// Kept in sync with MUSE_MODELS in src/agent-catalog.ts: the server default
-// is the -contributor variant (content may be used for product improvement),
-// so the plain model comes first and is the default here.
-const MUSE_MODELS = ["muse-spark-1.2", "muse-spark-1.2-contributor", "muse-spark-1.1", "auto"];
+// Kept in sync with MUSE_MODELS in src/agent-catalog.ts (the server catalog,
+// fed by discovery, is authoritative). No "auto" and no -contributor twin:
+// the server default is the contributor variant, which omg never selects.
+const MUSE_MODELS = ["muse-spark-1.2"];
 const THINKING_LEVELS = ["low", "medium", "high", "xhigh"] as const;
 type ThinkingLevel = string;
 type AutoAgentBackend = "aisdk" | "codex-aisdk" | "grok" | "cursor" | "fx" | "muse" | "opencode";

@@ -1,3 +1,4 @@
+import { defaultModelForAgent } from "./agent-catalog.ts";
 import {
   CODING_AGENT_ADAPTERS,
   type ActiveSessionAgentKind,
@@ -170,7 +171,7 @@ export const ACTIVE_CODING_AGENT_PROVIDERS = {
       name: request.name,
       cwd: request.cwd,
       prompt: request.prompt,
-      model: request.model ?? "auto",
+      model: request.model ?? defaultModelForAgent("muse"),
       key: request.sessionId,
       thinkingLevel: request.thinkingLevel,
       omgSessionId: request.sessionId,

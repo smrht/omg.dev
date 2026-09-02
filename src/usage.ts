@@ -29,6 +29,7 @@ import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { claudeAccessToken } from "./claude-creds.ts";
 import { claudeAccountConfigDir, connectedClaudeAccounts } from "./claude-accounts.ts";
+import { defaultModelForAgent } from "./agent-catalog.ts";
 import { PATHS } from "./config.ts";
 
 export type UsageWindow = {
@@ -717,7 +718,6 @@ async function opencodeUsage(ref: UsageProviderRef): Promise<ProviderUsage> {
 // only once the previous one is an hour old (five minutes on an explicit
 // refresh) or its window has reset.
 const MUSE_API_BASE = "https://api.meta.ai";
-const MUSE_PROBE_MODEL = "muse-spark-1.2";
 // The API floor (400 "`max_output_tokens` The number must be `>= 16`" on
 // 2026-09-02); the stream is cut the moment the usage event lands anyway.
 const MUSE_PROBE_MAX_OUTPUT_TOKENS = 16;
@@ -823,7 +823,7 @@ async function probeMuseSubscription(apiKey: string): Promise<MuseSubscriptionSn
         Accept: "text/event-stream",
       },
       body: JSON.stringify({
-        model: MUSE_PROBE_MODEL,
+        model: defaultModelForAgent("muse"),
         input: ".",
         max_output_tokens: MUSE_PROBE_MAX_OUTPUT_TOKENS,
         stream: true,
