@@ -74,10 +74,12 @@ export const FX_MODELS: string[] = [
   "zai/glm-5.2",
 ];
 export const DEEPSEEK_MODELS: string[] = ["deepseek-v4-flash", "deepseek-v4-pro"];
-// Muse's catalog is only known after `muse login` (it reflects the signed-in
-// plan), so until a discovery surface exists the picker offers "auto" — the
-// server default — and nothing else.
-export const MUSE_MODELS: string[] = ["auto"];
+// Captured from `muse serve` model/list + GET api.meta.ai/muse-code/models on
+// 2026-09-02. The server default is the `-contributor` variant, whose content
+// "may be used for product improvement", so omg defaults to the plain model
+// and only sends the contributor id when a person picks it. "auto" keeps the
+// server default.
+export const MUSE_MODELS: string[] = ["muse-spark-1.2", "muse-spark-1.2-contributor", "muse-spark-1.1", "auto"];
 export const HERMES_MODELS: string[] = [
   "nousresearch/hermes-4-405b",
   "nousresearch/hermes-4-70b",
@@ -230,7 +232,7 @@ export const MODEL_OPTIONS: Record<CodingAgentKind, { defaultModel: string; mode
   grok: { defaultModel: "grok-4.6", models: GROK_MODELS },
   cursor: { defaultModel: "auto", models: CURSOR_MODELS },
   fx: { defaultModel: "auto", models: FX_MODELS },
-  muse: { defaultModel: "auto", models: MUSE_MODELS },
+  muse: { defaultModel: "muse-spark-1.2", models: MUSE_MODELS },
   deepseek: { defaultModel: "deepseek-v4-flash", models: DEEPSEEK_MODELS },
   hermes: { defaultModel: "nousresearch/hermes-4-405b", models: HERMES_MODELS },
   opencode: { defaultModel: "opencode/deepseek-v4-flash-free", models: OPENCODE_MODELS },

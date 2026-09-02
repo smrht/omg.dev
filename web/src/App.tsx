@@ -1369,9 +1369,10 @@ const FX_MODELS = [
   "moonshotai/kimi-k3",
   "zai/glm-5.2",
 ];
-// Muse's catalog is only known after `muse login`; "auto" is the server
-// default. Kept in sync with MUSE_MODELS in src/agent-catalog.ts.
-const MUSE_MODELS = ["auto"];
+// Kept in sync with MUSE_MODELS in src/agent-catalog.ts: the server default
+// is the -contributor variant (content may be used for product improvement),
+// so the plain model comes first and is the default here.
+const MUSE_MODELS = ["muse-spark-1.2", "muse-spark-1.2-contributor", "muse-spark-1.1", "auto"];
 const THINKING_LEVELS = ["low", "medium", "high", "xhigh"] as const;
 type ThinkingLevel = string;
 type AutoAgentBackend = "aisdk" | "codex-aisdk" | "grok" | "cursor" | "fx" | "muse" | "opencode";
@@ -1427,7 +1428,7 @@ const AGENT_DEFAULT_MODEL: Record<AgentKind, string> = {
   grok: "grok-4.6",
   cursor: "auto",
   fx: "auto",
-  muse: "auto",
+  muse: "muse-spark-1.2",
   deepseek: "deepseek-v4-flash",
   opencode: "opencode/deepseek-v4-flash-free",
   jcode: "auto",
