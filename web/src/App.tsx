@@ -1369,9 +1369,12 @@ const FX_MODELS = [
   "moonshotai/kimi-k3",
   "zai/glm-5.2",
 ];
+// Muse's catalog is only known after `muse login`; "auto" is the server
+// default. Kept in sync with MUSE_MODELS in src/agent-catalog.ts.
+const MUSE_MODELS = ["auto"];
 const THINKING_LEVELS = ["low", "medium", "high", "xhigh"] as const;
 type ThinkingLevel = string;
-type AutoAgentBackend = "aisdk" | "codex-aisdk" | "grok" | "cursor" | "fx" | "opencode";
+type AutoAgentBackend = "aisdk" | "codex-aisdk" | "grok" | "cursor" | "fx" | "muse" | "opencode";
 function savedThinkingLevel(): ThinkingLevel {
   const value = localStorage.getItem("lfg_thinking_level");
   return value && (THINKING_LEVELS as readonly string[]).includes(value) ? value : "medium";
@@ -1393,7 +1396,8 @@ function agentSupportsThinking(agent: AgentKind): boolean {
     agent === "codex-aisdk" ||
     agent === "opencode" ||
     agent === "jcode" ||
-    agent === "pi"
+    agent === "pi" ||
+    agent === "muse"
   );
 }
 
@@ -1408,6 +1412,7 @@ const AGENT_MODELS: Record<AgentKind, string[]> = {
   grok: GROK_MODELS,
   cursor: CURSOR_MODELS,
   fx: FX_MODELS,
+  muse: MUSE_MODELS,
   deepseek: DEEPSEEK_MODELS,
   opencode: OPENCODE_MODELS,
   jcode: JCODE_MODELS,
@@ -1422,6 +1427,7 @@ const AGENT_DEFAULT_MODEL: Record<AgentKind, string> = {
   grok: "grok-4.6",
   cursor: "auto",
   fx: "auto",
+  muse: "auto",
   deepseek: "deepseek-v4-flash",
   opencode: "opencode/deepseek-v4-flash-free",
   jcode: "auto",
@@ -1439,6 +1445,8 @@ const AGENT_THINKING_LEVELS: Record<AgentKind, string[]> = {
   // fx keeps reasoning effort in ~/.fx/settings.json and takes no per-launch
   // flag on `fx acp`, so the selector stays hidden.
   fx: [],
+  // Muse accepts its reasoningEffort vocabulary live per turn over MSP.
+  muse: ["none", "minimal", "low", "medium", "high", "xhigh", "ultra"],
   deepseek: [],
   opencode: [],
   jcode: ["low", "medium", "high", "xhigh", "max"],
@@ -20860,7 +20868,7 @@ export type ResumableSession = {
   title: string;
   lastActivityAt: number | null;
   lastUserText: string | null;
-  agent: "claude" | "codex" | "opencode" | "grok" | "cursor" | "fx";
+  agent: "claude" | "codex" | "opencode" | "grok" | "cursor" | "fx" | "muse";
   model?: string | null;
   // Roster email the session was attributed to (mirrors the server type), so
   // historical rows can respect the owner filter like live ones do.

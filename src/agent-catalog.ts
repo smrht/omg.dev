@@ -74,6 +74,10 @@ export const FX_MODELS: string[] = [
   "zai/glm-5.2",
 ];
 export const DEEPSEEK_MODELS: string[] = ["deepseek-v4-flash", "deepseek-v4-pro"];
+// Muse's catalog is only known after `muse login` (it reflects the signed-in
+// plan), so until a discovery surface exists the picker offers "auto" — the
+// server default — and nothing else.
+export const MUSE_MODELS: string[] = ["auto"];
 export const HERMES_MODELS: string[] = [
   "nousresearch/hermes-4-405b",
   "nousresearch/hermes-4-70b",
@@ -143,6 +147,7 @@ export const AUTO_AGENT_BACKENDS = [
   "grok",
   "cursor",
   "fx",
+  "muse",
   "opencode",
 ] as const;
 export type AutoAgentBackend = (typeof AUTO_AGENT_BACKENDS)[number];
@@ -154,6 +159,7 @@ const MODEL_CATALOG_KEYS: CodingAgentKind[] = [
   "grok",
   "cursor",
   "fx",
+  "muse",
   "deepseek",
   "opencode",
   "jcode",
@@ -183,6 +189,8 @@ export const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "x
 // Jcode exposes the same /effort vocabulary as Claude. The managed REPL uses
 // that command both before the first prompt and for live session changes.
 export const JCODE_THINKING_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+// Muse's reasoningEffort vocabulary, changeable live per turn over MSP.
+export const MUSE_THINKING_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh", "ultra"] as const;
 export type ModelCatalogItem = {
   key: CodingAgentKind;
   label: string;
@@ -207,6 +215,7 @@ const LABELS: Record<CodingAgentKind, string> = {
   grok: "grok",
   cursor: "cursor",
   fx: "fx",
+  muse: "muse",
   deepseek: "deepseek",
   hermes: "hermes",
   pi: "pi",
@@ -221,6 +230,7 @@ export const MODEL_OPTIONS: Record<CodingAgentKind, { defaultModel: string; mode
   grok: { defaultModel: "grok-4.6", models: GROK_MODELS },
   cursor: { defaultModel: "auto", models: CURSOR_MODELS },
   fx: { defaultModel: "auto", models: FX_MODELS },
+  muse: { defaultModel: "auto", models: MUSE_MODELS },
   deepseek: { defaultModel: "deepseek-v4-flash", models: DEEPSEEK_MODELS },
   hermes: { defaultModel: "nousresearch/hermes-4-405b", models: HERMES_MODELS },
   opencode: { defaultModel: "opencode/deepseek-v4-flash-free", models: OPENCODE_MODELS },
@@ -561,6 +571,7 @@ export function thinkingLevelsForAgent(
   if (agent === "jcode") return JCODE_THINKING_LEVELS;
   if (agent === "codex" || agent === "codex-aisdk") return CODEX_THINKING_LEVELS;
   if (agent === "cursor") return CURSOR_THINKING_LEVELS;
+  if (agent === "muse") return MUSE_THINKING_LEVELS;
   return null;
 }
 

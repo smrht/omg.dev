@@ -14,6 +14,7 @@ import {
   spawnManagedDeepseekAcpSession,
   spawnManagedGrokAcpSession,
   spawnManagedJcodeSdkSession,
+  spawnManagedMuseMspSession,
   spawnManagedOpencodeAisdkSession,
   spawnManagedPiSession,
 } from "./tmux.ts";
@@ -159,6 +160,19 @@ export const ACTIVE_CODING_AGENT_PROVIDERS = {
       prompt: request.prompt,
       model: request.model ?? "auto",
       key: request.sessionId,
+      omgSessionId: request.sessionId,
+      omgUser: request.omgUser,
+      containInAgentSlice: request.containInAgentSlice,
+      resume: request.resume,
+    })),
+  muse: provider("muse", (request) =>
+    spawnManagedMuseMspSession({
+      name: request.name,
+      cwd: request.cwd,
+      prompt: request.prompt,
+      model: request.model ?? "auto",
+      key: request.sessionId,
+      thinkingLevel: request.thinkingLevel,
       omgSessionId: request.sessionId,
       omgUser: request.omgUser,
       containInAgentSlice: request.containInAgentSlice,
