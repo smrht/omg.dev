@@ -88,7 +88,7 @@ describe("muse usage provider", () => {
       const auth = String((init?.headers as Record<string, string>)?.Authorization ?? "");
       if (auth !== "Bearer muse-key") throw new Error("missing bearer");
       const body = JSON.parse(String(init?.body)) as { max_output_tokens?: number; stream?: boolean };
-      expect(body.max_output_tokens).toBe(1);
+      expect(body.max_output_tokens).toBe(16);
       expect(body.stream).toBe(true);
       return new Response(SSE, { status: 200, headers: { "Content-Type": "text/event-stream" } });
     }) as typeof fetch;

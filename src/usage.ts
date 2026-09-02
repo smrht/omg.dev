@@ -712,12 +712,15 @@ async function opencodeUsage(ref: UsageProviderRef): Promise<ProviderUsage> {
 // window, `weekly` = the weekly one, both `used_percent` + epoch-second
 // `resets_at`). Reading it therefore COSTS a prompt against the very window it
 // reports — the Everyday plan is 10–50 prompts per 5 hours — so this provider
-// is deliberately frugal: one `max_output_tokens: 1` request, the stream closed
+// is deliberately frugal: one minimal request, the stream closed
 // the moment the event lands, the reading persisted on disk, and a new probe
 // only once the previous one is an hour old (five minutes on an explicit
 // refresh) or its window has reset.
 const MUSE_API_BASE = "https://api.meta.ai";
 const MUSE_PROBE_MODEL = "muse-spark-1.2";
+// The API floor (400 "`max_output_tokens` The number must be `>= 16`" on
+// 2026-09-02); the stream is cut the moment the usage event lands anyway.
+const MUSE_PROBE_MAX_OUTPUT_TOKENS = 16;
 export const MUSE_PROBE_TTL_MS = 60 * 60_000;
 export const MUSE_PROBE_FORCE_MIN_MS = 5 * 60_000;
 
@@ -822,7 +825,7 @@ async function probeMuseSubscription(apiKey: string): Promise<MuseSubscriptionSn
       body: JSON.stringify({
         model: MUSE_PROBE_MODEL,
         input: ".",
-        max_output_tokens: 1,
+        max_output_tokens: MUSE_PROBE_MAX_OUTPUT_TOKENS,
         stream: true,
       }),
       signal: controller.signal,
