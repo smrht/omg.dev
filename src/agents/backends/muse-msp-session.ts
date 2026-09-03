@@ -12,6 +12,8 @@
 // `approval/requested` / `userInput/requested` and are answered with
 // `approval/decide` / `userInput/answer`. Recorded against muse 1.0.2.
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { extractAttachments, isImageMime, readAsBase64 } from "../../attachment-images.ts";
@@ -38,6 +40,34 @@ export function musePath(): string {
  * OS sandbox is off; `--trust-workspace` loads the workspace's skills and
  * rules the way the TUI does after its trust prompt.
  */
+/**
+ * omg → muse session id bridge. muse 1.0.2 strips the environment of the MCP
+ * servers it spawns (only HOME/PATH/PWD/… survive) and does not interpolate
+ * settings.json `env` values, so the omg session id cannot reach the omg MCP
+ * server by inheritance or by a `${VAR}` placeholder. The one thing the MCP
+ * child keeps is its working directory (= the session workspace), so the
+ * harness records `sha256(realpath(cwd)) → sessionId` here and the guard
+ * wrapper looks it up by its own cwd. A workspace with no record is a
+ * standalone muse (no omg session), and the guard skips the server entirely.
+ */
+export function museSessionMapDir(): string {
+  return join(homedir(), ".cache", "omg-muse-sessions");
+}
+
+export function museSessionMapKey(cwd: string): string {
+  return createHash("sha256").update(cwd).digest("hex").slice(0, 32);
+}
+
+function recordMuseSession(cwd: string, sessionId: string): void {
+  try {
+    const dir = museSessionMapDir();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, museSessionMapKey(cwd)), sessionId, { mode: 0o600 });
+  } catch {
+    // A missing map only means the omg MCP servers stay off for this session.
+  }
+}
+
 export function museServeArgv(): string[] {
   return ["serve", "--disable-sandbox", "--trust-workspace"];
 }
@@ -422,6 +452,10 @@ export async function cmdMuseMspSession(argv: string[]): Promise<void> {
     recoveredAt,
     initialPrompt,
     async createRuntime(sink) {
+      // Record cwd → session id so the guarded MCP launchers can pass the real
+      // omg session id to `omg mcp` (muse strips their env). `key` is the omg
+      // session id (the harness key).
+      if (key) recordMuseSession(cwd, key);
       const child: ChildProcess = spawn(musePath(), museServeArgv(), {
         cwd,
         env: museChildEnv(),
