@@ -199,6 +199,11 @@ export function containedAgentCommand(
   if (process.env.PATH) argv.push(`--setenv=PATH=${process.env.PATH}`);
   if (opts.omgSessionId) argv.push(`--setenv=LFG_SESSION_ID=${opts.omgSessionId}`);
   argv.push(`--setenv=OMG_CAPABILITY_VERSION=${OMG_CAPABILITY_VERSION}`);
+  // The muse harness reaches muse-spark-1.3 only through the Meta egress proxy
+  // (Meta gates the catalog by request origin). systemd-run scrubs the
+  // environment to this allowlist, so OMG_MUSE_PROXY has to be passed through
+  // explicitly or `muse serve` calls Meta directly and gets "lack access".
+  if (process.env.OMG_MUSE_PROXY) argv.push(`--setenv=OMG_MUSE_PROXY=${process.env.OMG_MUSE_PROXY}`);
   if (opts.omgUser) argv.push(`--setenv=LFG_USER=${opts.omgUser}`);
   for (const [key, value] of Object.entries(agentTmpEnv())) {
     argv.push(`--setenv=${key}=${value}`);
