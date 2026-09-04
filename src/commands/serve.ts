@@ -7119,6 +7119,12 @@ a{color:#60a5fa}
               tools: current.tools,
             });
             console.log(`[auto] refined ${agent.id} from feedback (${prompt.length} chars)`);
+            // Reading removes the answered item from the open list, while a
+            // genuine recurrence can still escalate. Dismissed would instead
+            // tell the next run never to surface this title again.
+            if (finding && finding.status === "open") {
+              await updateFinding(finding.id, { status: "read" });
+            }
           })().then(
             () => settleRefine(agent.id),
             (e) => {

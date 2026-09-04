@@ -219,8 +219,12 @@ describe("POST /api/auto/agents/:id/refine (feedback → rewritten instruction)"
     expect(handler).toContain('if (!current) throw new Error("the agent was deleted while it was being updated")');
   });
 
+  test("marks the answered finding read without suppressing a real recurrence", () => {
+    expect(handler).toContain('await updateFinding(finding.id, { status: "read" })');
+    expect(handler).not.toContain('await updateFinding(finding.id, { status: "dismissed" })');
+  });
+
   test("the agent payload carries the refine state for the browser poll", () => {
     expect(SERVE).toContain("refine: refineStatus(a.id)");
   });
 });
-

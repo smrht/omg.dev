@@ -34,12 +34,35 @@ import {
  */
 const MAX_FINDINGS_PER_RUN = 5;
 
-const SYSTEM = `You are an autonomous watch agent. Carry out the instruction below.
-
-You have read-only tools (Read, Grep, Glob, WebSearch, WebFetch) — use them to
+/**
+ * The framing every run gets ahead of the owner's instruction.
+ *
+ * It is built per agent because a run with Bash or Skill can act. Describing
+ * that run as read-only made the system prompt override an instruction to
+ * handle the work itself, so acting agents repeatedly reported work instead.
+ */
+export function buildSystem(extraTools: readonly string[] = []): string {
+  const acting = extraTools.filter((t) => !READONLY_TOOLS.includes(t));
+  const tools = acting.length
+    ? `You have read-only tools (${READONLY_TOOLS.join(", ")}) and, on top of those,
+${acting.join(", ")} — so you can ACT, not only look. Use the read-only tools to
+gather your own context. If the instruction tells you to handle something
+yourself (send, label, write, run a script, load a skill), then do it, exactly
+within what the instruction allows — never file "someone should do X" for work
+the instruction told you to do. Work you completed is not a problem to surface:
+report it as ONE low-severity finding whose title says what you did, so the
+owner can see it happened. Something you were told to handle but could not is
+a finding of its own, with the reason. Beyond that, decide what, if anything,
+is worth surfacing as a notification right now. Be strict: most runs should
+surface nothing. Only surface something concrete, high-leverage, and actionable
+— never filler.`
+    : `You have read-only tools (${READONLY_TOOLS.join(", ")}) — use them to
 gather your own context. Decide what, if anything, is worth surfacing as a
 notification right now. Be strict: most runs should surface nothing. Only
-surface something concrete, high-leverage, and actionable — never filler.
+surface something concrete, high-leverage, and actionable — never filler.`;
+  return `You are an autonomous watch agent. Carry out the instruction below.
+
+${tools}
 
 Report every INDEPENDENT problem you find, not just the most important one — two
 unrelated problems are two findings. This is not licence to pad: if one thing is
@@ -61,6 +84,7 @@ Each finding must stand alone: its title names one specific problem, and its
 reasoning and suggest refer only to that problem.
 
 Rules: title is one line. At most 4 short reasoning bullets per finding. No essay.`;
+}
 
 function normSeverity(s: unknown): Severity {
   const v = String(s ?? "").toLowerCase();
@@ -437,7 +461,7 @@ async function runAutoAgentInner(
   const mine = (await listFindings()).filter((f) => f.agentId === agent.id);
   const feedback = buildFindingFeedback(mine);
 
-  const prompt = `${SYSTEM}\n\n## Instruction\n${agent.prompt}${feedback}`;
+  const prompt = `${buildSystem(agent.tools ?? [])}\n\n## Instruction\n${agent.prompt}${feedback}`;
   // The agent's base repo (chosen from the repo list in the UI) is where it runs
   // and from which it inherits .claude/settings.json. If it's unset, fall back to
   // the repo root but say so loudly — a missing base means the agent is watching
