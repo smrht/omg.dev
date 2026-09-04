@@ -131,6 +131,27 @@ describe("recentSessionRoster", () => {
     expect(roster[1].startedAt).toBeNull();
   });
 
+  test("known stopped chat precedes unknown history even when it stopped last", () => {
+    recentSessionRoster([liveRow({ sessionId: "last-known", startedAt: 300 })], []);
+    const roster = recentSessionRoster(
+      [liveRow({ sessionId: "earlier-live", startedAt: 100 })],
+      [resumeRow({ sessionId: "never-known" }), resumeRow({ sessionId: "last-known" })],
+    );
+    expect(roster.map((s) => s.sessionId)).toEqual(["earlier-live", "last-known", "never-known"]);
+  });
+
+  test("equal starts keep the upstream session-id tiebreaker after stopping", () => {
+    recentSessionRoster([
+      liveRow({ sessionId: "same-a", startedAt: 100 }),
+      liveRow({ sessionId: "same-b", startedAt: 100 }),
+    ], []);
+    const roster = recentSessionRoster(
+      [liveRow({ sessionId: "same-b", startedAt: 100 })],
+      [resumeRow({ sessionId: "same-a" })],
+    );
+    expect(roster.map((s) => s.sessionId)).toEqual(["same-a", "same-b"]);
+  });
+
   test("remembered starts survive a reload via localStorage", () => {
     const store: Record<string, string> = {};
     const fakeStorage = {

@@ -125,7 +125,12 @@ export function recentSessionRoster(
       continue;
     }
     const at: number = startedAt;
-    const idx = merged.findIndex((s) => s.startedAt != null && s.startedAt > at);
+    const idx = merged.findIndex((s) =>
+      s.startedAt == null
+        ? s.shippedReview === true
+        : s.startedAt > at ||
+          (s.startedAt === at && (s.sessionId ?? "").localeCompare(row.sessionId) > 0),
+    );
     if (idx === -1) merged.push(historical);
     else merged.splice(idx, 0, historical);
   }
