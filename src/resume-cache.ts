@@ -394,6 +394,7 @@ export function upsertResumableRows(rows: ResumableCacheRow[]): void {
       );
     }
   })(rows);
+  if (pendingRosterHide.size) settlePendingRosterHides();
 }
 
 // Drop cache rows whose transcripts no longer exist so a deleted / rotated
@@ -510,6 +511,30 @@ export function setRosterHidden(sessionId: string, hidden: boolean): boolean {
     )
     .run(hidden ? 1 : 0, sessionId, sessionId);
   return Number(result.changes ?? 0) > 0;
+}
+
+// A chat closed from the Live workspace must not come back as a "Finished"
+// row: the archive dialog promises it leaves the list and lives on in Resume.
+// The durable row may not exist yet at close time (the cache learns a
+// transcript on its next refresh), so an unmatched hide waits here and lands
+// the moment the row arrives through upsertResumableRows. Only the UI close
+// route calls this; reclaim closes keep their Finished row.
+const pendingRosterHide = new Set<string>();
+
+export function hideFromRosterWhenCached(sessionId: string): boolean {
+  if (setRosterHidden(sessionId, true)) return true;
+  pendingRosterHide.add(sessionId);
+  return false;
+}
+
+function settlePendingRosterHides(): void {
+  for (const id of pendingRosterHide) {
+    if (setRosterHidden(id, true)) pendingRosterHide.delete(id);
+  }
+}
+
+export function __resetPendingRosterHideForTests(): void {
+  pendingRosterHide.clear();
 }
 
 // A managed codex-aisdk chat and its native rollout row describe the SAME

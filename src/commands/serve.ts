@@ -71,6 +71,7 @@ import * as pwaBootLog from "../pwa-boot-log.ts";
 import { botRuntimeContract, shortSessionId } from "../omg-capabilities.ts";
 import {
   getCachedResumableSession,
+  hideFromRosterWhenCached,
   setRosterHidden,
   updateResumableUser,
   upsertResumableRows,
@@ -10448,6 +10449,10 @@ a{color:#60a5fa}
           if (!sess) return err(404, "session not found");
           const outcome = await closeLiveSession(sess, m[1], closeLog);
           if (!outcome.ok) return err(outcome.status, outcome.reason);
+          // Closed by the user = gone from the Live list, as the archive
+          // dialog promises; the transcript stays in Resume > Sessions. Without
+          // this the row came straight back as "Finished" on the next refresh.
+          hideFromRosterWhenCached(m[1]);
           return json({ ok: true });
         }
       }
