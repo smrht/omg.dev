@@ -32,6 +32,8 @@ describe("mobile secondary page hierarchy", () => {
 
   test("secondary mobile pages provide an explicit return to Live", () => {
     expect(app.match(/aria-label="Back to Live"/g)?.length).toBeGreaterThanOrEqual(2);
-    expect(app).toContain('isMobile && (tab === "notifications" || tab === "artifacts")');
+    expect(app).toContain(
+      'isMobile && (tab === "notifications" || tab === "artifacts" || tab === "board")',
+    );
   });
 });
