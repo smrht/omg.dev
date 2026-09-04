@@ -87,6 +87,24 @@ export function museApprovalMode(env: NodeJS.ProcessEnv = process.env): MuseAppr
 }
 
 /**
+ * Muse asks for approval on every MCP tool call regardless of approval mode:
+ * `allowAll` covers its own built-in tools, but an `mcp__*` call still raises
+ * `approval/requested` with subject kind `tool_action` (measured 2026-09-04,
+ * muse 1.0.3, session log `effective_mode: allow_all`). The choices are
+ * once/session-scoped only, so a human answer never survives the next session
+ * and every fresh Muse session prompted again on its first computer or omg
+ * tool. Under `allowAll` omg answers those itself with the widest approving
+ * choice; a stricter mode still routes to the dashboard prompt.
+ */
+export function museAutoApprovalChoice<T extends { choiceId: string; decision?: string }>(
+  choices: T[],
+  mode: MuseApprovalMode = museApprovalMode(),
+): T | undefined {
+  if (mode !== "allowAll") return undefined;
+  return choices.find((c) => c.decision === "approvedForSession") ?? choices.find((c) => c.decision === "approved");
+}
+
+/**
  * Provider routing for `session/start`. Left implicit, MSP resolves a bare
  * `modelId` to provider `muse`, and that route cannot replay media it retained
  * from an earlier model call: the first call with an uploaded image succeeds,
@@ -114,6 +132,18 @@ export function museSessionStartParams(
   // "auto" is omg's cross-agent placeholder for the provider default.
   if (model && model !== "auto") params.modelId = model;
   return params;
+}
+
+/** The `session/setApprovalMode` params that re-apply the configured mode. Exposed for tests. */
+export function museSetApprovalModeParams(
+  sessionId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Record<string, unknown> {
+  return {
+    commandId: uuidv7(),
+    sessionId,
+    mode: museApprovalMode(env),
+  };
 }
 
 export const MUSE_REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "ultra"] as const;
@@ -411,6 +441,37 @@ export function museTurnInput(prompt: string): Array<Record<string, unknown>> {
   return [{ type: "text", text }, ...parts];
 }
 
+/**
+ * Stall watchdog for the muse serve view stream.
+ *
+ * Measured 2026-09-04 (muse 1.0.3, five sessions in one evening): muse's
+ * per-session view projection flips to `unavailable` mid-turn — the run keeps
+ * going in muse's own journal (model calls, tool calls, approval waits) but
+ * the serve stops emitting `item/*`, `approval/requested` and `turn/completed`
+ * to this harness. The dashboard showed a permanent busy spinner, a pending
+ * shell approval nobody could see, and a stop button that cancelled the turn
+ * inside muse yet never released the harness because no `turn/completed`
+ * followed. Two bounds fix that: an open turn with no bytes from the serve for
+ * MUSE_STREAM_STALL_MS, or no `turn/completed` within MUSE_INTERRUPT_GRACE_MS
+ * of an interrupt, drops the serve; the next turn boots a fresh one and
+ * resumes the durable session. A pending dashboard prompt is legitimate
+ * silence (muse waits for the human) and never counts.
+ */
+export const MUSE_STREAM_STALL_MS = 10 * 60_000;
+export const MUSE_INTERRUPT_GRACE_MS = 20_000;
+export const MUSE_STALL_POLL_MS = 15_000;
+
+export function isMuseStreamStalled(input: {
+  turnOpen: boolean;
+  pendingPrompts: number;
+  lastEventAt: number;
+  now: number;
+  stallMs?: number;
+}): boolean {
+  if (!input.turnOpen || input.pendingPrompts > 0) return false;
+  return input.now - input.lastEventAt >= (input.stallMs ?? MUSE_STREAM_STALL_MS);
+}
+
 /** The plain-text question list Muse's `userInput/requested` carries. Exposed for tests. */
 export function museUserInputAnswers(
   questions: Array<{ id: string; question: string; header?: string; options?: Array<{ label: string; description?: string }> }>,
@@ -456,142 +517,253 @@ export async function cmdMuseMspSession(argv: string[]): Promise<void> {
       // omg session id to `omg mcp` (muse strips their env). `key` is the omg
       // session id (the harness key).
       if (key) recordMuseSession(cwd, key);
-      const child: ChildProcess = spawn(musePath(), museServeArgv(), {
-        cwd,
-        env: museChildEnv(),
-        stdio: ["pipe", "pipe", "inherit"],
-      });
-      if (!child.stdin || !child.stdout) throw new Error("muse serve stdio was not available");
-      const stdin = child.stdin;
-      const client = new MspClient((line) => {
-        stdin.write(`${line}\n`);
-      });
-      child.stdout.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => client.feed(chunk));
-      let exited = false;
+      let child: ChildProcess | null = null;
+      let client: MspClient | null = null;
+      let exited = true;
       let turnDone: ((params: any) => void) | null = null;
-      child.on("exit", (code, signal) => {
-        exited = true;
-        client.close(`muse serve exited (${signal ?? code ?? "unknown"})`);
-        turnDone?.({ terminal: "failed", error: { message: `muse serve exited (${signal ?? code ?? "unknown"})` } });
-      });
-
+      let lastEventAt = Date.now();
+      let pendingPrompts = 0;
       let state = newMuseTurnState();
       let effort = museReasoningEffort(thinkingLevel);
       let sessionId = "";
       const seenApprovals = new Set<string>();
       const seenUserInputs = new Set<string>();
 
-      for (const method of ["item/started", "item/delta", "item/updated", "item/completed"]) {
-        client.onNotification(method, (params) => applyMuseViewEvent(method, params, sink, state));
-      }
-      client.onNotification("turn/completed", (params) => {
-        turnDone?.(params);
-      });
-      client.onNotification("approval/requested", (params) => {
-        const approvalId = String(params?.approvalId ?? "");
-        if (!approvalId || seenApprovals.has(approvalId)) return;
-        seenApprovals.add(approvalId);
-        const choices = (params?.availableChoices ?? []) as Array<{ choiceId: string; label: string; decision?: string }>;
-        if (!choices.length) return;
-        const subject = params?.subject ?? {};
-        const title = subject.command
-          ? `${params?.toolName ?? "tool"}: ${subject.command}`
-          : `${params?.toolName ?? "tool"} ${params?.rawArgs ?? ""}`.trim();
-        void sink
-          .ask(title, choices.map((choice) => ({ label: choice.label, description: choice.decision })), "Muse permission")
-          .then((selected) => {
-            const choice = selected == null ? choices.find((c) => c.decision === "denied") ?? choices[choices.length - 1]! : choices[selected]!;
-            return client.request("approval/decide", {
-              commandId: uuidv7(),
-              sessionId,
-              approvalId,
-              choiceId: choice.choiceId,
-              requirementId: params?.currentRequirementId,
-            });
-          })
-          .catch(() => {});
-      });
-      client.onNotification("userInput/requested", (params) => {
-        const userInputId = String(params?.userInputId ?? "");
-        if (!userInputId || seenUserInputs.has(userInputId)) return;
-        seenUserInputs.add(userInputId);
-        void museUserInputAnswers(params?.questions ?? [], (question, options, header) => sink.ask(question, options, header ?? "Muse question"))
-          .then((answers) =>
-            answers
-              ? client.request("userInput/answer", { commandId: uuidv7(), sessionId, userInputId, answers })
-              : client.request("userInput/cancel", { commandId: uuidv7(), sessionId, userInputId }),
-          )
-          .catch(() => {});
-      });
+      // A dashboard prompt is a legitimate silence: muse waits for the human,
+      // so the stall watchdog must not count that time.
+      const askGuarded: ManagedSdkEventSink["ask"] = async (question, options, header) => {
+        pendingPrompts++;
+        try {
+          return await sink.ask(question, options, header);
+        } finally {
+          pendingPrompts--;
+        }
+      };
 
-      await client.request("initialize", {
-        clientInfo: { name: "omg", title: "omg.dev", version: "1" },
-      });
-      client.notify("initialized");
-      if (resume) {
-        // Durable on disk: resuming returns the session without replaying
-        // its history as live events, so nothing is re-indexed.
-        const result = await client.request<{ session?: { sessionId?: string } }>("session/resume", {
-          commandId: uuidv7(),
-          sessionId: resume,
-          excludeItems: true,
-        });
-        sessionId = result?.session?.sessionId ?? resume;
-      } else {
-        const result = await client.request<{ session?: { sessionId?: string } }>(
-          "session/start",
-          museSessionStartParams(cwd, model),
-        );
-        sessionId = result?.session?.sessionId ?? "";
-        if (!sessionId) throw new Error("muse session/start returned no session id");
+      function failTurn(reason: string): void {
+        const done = turnDone;
+        turnDone = null;
+        done?.({ terminal: "failed", error: { message: reason } });
       }
+
+      // Drop the current `muse serve`. The session itself is durable on disk;
+      // the next turn boots a fresh serve and resumes it (see boot()).
+      function dropServe(reason: string): void {
+        const current = child;
+        const currentClient = client;
+        exited = true;
+        child = null;
+        client = null;
+        currentClient?.close(reason);
+        try {
+          current?.stdin?.end();
+        } catch {}
+        try {
+          current?.kill();
+        } catch {}
+        failTurn(reason);
+      }
+
+      function wire(c: MspClient): void {
+        for (const method of ["item/started", "item/delta", "item/updated", "item/completed"]) {
+          c.onNotification(method, (params) => applyMuseViewEvent(method, params, sink, state));
+        }
+        c.onNotification("turn/completed", (params) => {
+          const done = turnDone;
+          turnDone = null;
+          done?.(params);
+        });
+        c.onNotification("approval/requested", (params) => {
+          const approvalId = String(params?.approvalId ?? "");
+          if (!approvalId || seenApprovals.has(approvalId)) return;
+          seenApprovals.add(approvalId);
+          const choices = (params?.availableChoices ?? []) as Array<{ choiceId: string; label: string; decision?: string }>;
+          if (!choices.length) return;
+          const auto = museAutoApprovalChoice(choices);
+          if (auto) {
+            void c
+              .request("approval/decide", {
+                commandId: uuidv7(),
+                sessionId,
+                approvalId,
+                choiceId: auto.choiceId,
+                requirementId: params?.currentRequirementId,
+              })
+              .catch(() => {});
+            return;
+          }
+          const subject = params?.subject ?? {};
+          const title = subject.command
+            ? `${params?.toolName ?? "tool"}: ${subject.command}`
+            : `${params?.toolName ?? "tool"} ${params?.rawArgs ?? ""}`.trim();
+          void askGuarded(title, choices.map((choice) => ({ label: choice.label, description: choice.decision })), "Muse permission")
+            .then((selected) => {
+              const choice = selected == null ? choices.find((x) => x.decision === "denied") ?? choices[choices.length - 1]! : choices[selected]!;
+              return c.request("approval/decide", {
+                commandId: uuidv7(),
+                sessionId,
+                approvalId,
+                choiceId: choice.choiceId,
+                requirementId: params?.currentRequirementId,
+              });
+            })
+            .catch(() => {});
+        });
+        c.onNotification("userInput/requested", (params) => {
+          const userInputId = String(params?.userInputId ?? "");
+          if (!userInputId || seenUserInputs.has(userInputId)) return;
+          seenUserInputs.add(userInputId);
+          void museUserInputAnswers(params?.questions ?? [], (question, options, header) => askGuarded(question, options, header ?? "Muse question"))
+            .then((answers) =>
+              answers
+                ? c.request("userInput/answer", { commandId: uuidv7(), sessionId, userInputId, answers })
+                : c.request("userInput/cancel", { commandId: uuidv7(), sessionId, userInputId }),
+            )
+            .catch(() => {});
+        });
+      }
+
+      // Spawn `muse serve`, handshake, and select the session: `session/start`
+      // on first boot, `session/resume` for recovery and for every re-boot
+      // after dropServe().
+      async function boot(resumeId: string | undefined): Promise<void> {
+        const spawned: ChildProcess = spawn(musePath(), museServeArgv(), {
+          cwd,
+          env: museChildEnv(),
+          stdio: ["pipe", "pipe", "inherit"],
+        });
+        if (!spawned.stdin || !spawned.stdout) throw new Error("muse serve stdio was not available");
+        const stdin = spawned.stdin;
+        const c = new MspClient((line) => {
+          stdin.write(`${line}\n`);
+        });
+        child = spawned;
+        client = c;
+        exited = false;
+        lastEventAt = Date.now();
+        spawned.stdout.setEncoding("utf8");
+        spawned.stdout.on("data", (chunk: string) => {
+          lastEventAt = Date.now();
+          c.feed(chunk);
+        });
+        spawned.on("exit", (code, signal) => {
+          if (child !== spawned) return;
+          exited = true;
+          child = null;
+          client = null;
+          const reason = `muse serve exited (${signal ?? code ?? "unknown"})`;
+          c.close(reason);
+          failTurn(reason);
+        });
+        wire(c);
+
+        await c.request("initialize", {
+          clientInfo: { name: "omg", title: "omg.dev", version: "1" },
+        });
+        c.notify("initialized");
+        if (resumeId) {
+          // Durable on disk: resuming returns the session without replaying
+          // its history as live events, so nothing is re-indexed.
+          const result = await c.request<{ session?: { sessionId?: string } }>("session/resume", {
+            commandId: uuidv7(),
+            sessionId: resumeId,
+            excludeItems: true,
+          });
+          sessionId = result?.session?.sessionId ?? resumeId;
+          // A resumed session keeps the approval mode it was stored with, which
+          // predates omg's allowAll default (measured 2026-09-04: a "Ga verder"
+          // continuation ran on-request and prompted every tool call). Re-select
+          // the configured mode so resume behaves like a fresh start.
+          await c.request("session/setApprovalMode", museSetApprovalModeParams(sessionId));
+        } else {
+          const result = await c.request<{ session?: { sessionId?: string } }>(
+            "session/start",
+            museSessionStartParams(cwd, model),
+          );
+          sessionId = result?.session?.sessionId ?? "";
+          if (!sessionId) throw new Error("muse session/start returned no session id");
+        }
+      }
+
+      await boot(resume);
 
       return {
         nativeSessionId: sessionId,
         async runTurn(prompt) {
           state = newMuseTurnState();
-          for (const method of ["item/started", "item/delta", "item/updated", "item/completed"]) {
-            client.onNotification(method, (params) => applyMuseViewEvent(method, params, sink, state));
+          if (exited) {
+            // The previous serve went silent or died and was dropped. Bring a
+            // fresh one up on the same durable session; if muse cannot resume
+            // it, the error reaches the chat instead of an endless spinner.
+            await boot(sessionId || resume);
           }
-          if (exited) throw new Error("muse serve is not running");
+          const c = client;
+          if (!c) throw new Error("muse serve is not running");
           const completed = new Promise<any>((resolve) => {
             turnDone = resolve;
           });
-          const params: Record<string, unknown> = {
-            commandId: uuidv7(),
-            sessionId,
-            input: museTurnInput(prompt),
-          };
-          if (effort) params.reasoningEffort = effort;
-          await client.request("turn/start", params);
-          const outcome = await completed;
-          turnDone = null;
-          if (outcome?.terminal === "failed") {
-            const message = outcome?.error?.message ?? outcome?.reason ?? "turn failed";
-            throw new Error(String(message));
+          lastEventAt = Date.now();
+          const watchdog = setInterval(() => {
+            if (!turnDone || client !== c) return;
+            const now = Date.now();
+            if (!isMuseStreamStalled({ turnOpen: true, pendingPrompts, lastEventAt, now })) return;
+            const silent = Math.round((now - lastEventAt) / 1000);
+            console.error(`muse-msp-session ${key}: muse serve silent ${silent}s mid-turn; restarting muse serve`);
+            dropServe(`muse serve went silent for ${silent}s mid-turn; it has been restarted — send the message again to continue`);
+          }, MUSE_STALL_POLL_MS);
+          try {
+            const params: Record<string, unknown> = {
+              commandId: uuidv7(),
+              sessionId,
+              input: museTurnInput(prompt),
+            };
+            if (effort) params.reasoningEffort = effort;
+            await c.request("turn/start", params);
+            const outcome = await completed;
+            if (outcome?.terminal === "failed") {
+              const message = outcome?.error?.message ?? outcome?.reason ?? "turn failed";
+              throw new Error(String(message));
+            }
+            return { text: state.draft, thinking: state.thought };
+          } finally {
+            clearInterval(watchdog);
+            turnDone = null;
           }
-          return { text: state.draft, thinking: state.thought };
         },
         async interrupt() {
-          if (exited || !sessionId) return;
+          const c = client;
+          if (exited || !sessionId || !c) return;
           try {
-            await client.request("turn/interrupt", { commandId: uuidv7(), sessionId });
+            await c.request("turn/interrupt", { commandId: uuidv7(), sessionId });
           } catch {}
+          // A live serve answers an interrupt with `turn/completed`
+          // (terminal cancelled) within about a second. When its view stream
+          // is dead nothing arrives, and without this bound the turn stayed
+          // open forever: busy spinner, every follow-up queued behind it.
+          setTimeout(() => {
+            if (!turnDone || client !== c) return;
+            console.error(`muse-msp-session ${key}: no turn/completed ${MUSE_INTERRUPT_GRACE_MS / 1000}s after interrupt; restarting muse serve`);
+            dropServe("interrupted, but muse serve sent no turn/completed; it has been restarted — send the message again to continue");
+          }, MUSE_INTERRUPT_GRACE_MS);
         },
         async setModel(next) {
-          if (!next || next === "auto") return;
+          if (!next || next === "auto" || !client) return;
           await client.request("session/setModel", { commandId: uuidv7(), sessionId, model: { modelId: next } });
         },
         setThinkingLevel(next) {
           effort = museReasoningEffort(next);
         },
         close() {
-          client.close("session closed");
+          const current = child;
+          const currentClient = client;
+          exited = true;
+          child = null;
+          client = null;
+          currentClient?.close("session closed");
           try {
-            stdin.end();
+            current?.stdin?.end();
           } catch {}
-          child.kill();
+          current?.kill();
         },
       };
     },
