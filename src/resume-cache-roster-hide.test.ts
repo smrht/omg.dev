@@ -26,7 +26,9 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-function row(over: Partial<Parameters<typeof upsertResumableRows>[0][number]> = {}) {
+function row(
+  over: Partial<Parameters<typeof upsertResumableRows>[0][number]> = {},
+): Parameters<typeof upsertResumableRows>[0][number] {
   return {
     sessionId: "11111111-1111-4111-8111-111111111111",
     cwd: "/srv/app",
@@ -48,7 +50,9 @@ describe("roster_hidden (issue 521 follow-up)", () => {
     // mode), not roster_hidden's 007 itself.
     expect(queryResumableCache().total).toBe(0);
     const db = new Database(join(root, "resume-cache.sqlite"), { readonly: true });
-    const columns = db.query<{ name: string }, []>("PRAGMA table_info(resumable_sessions)").all();
+    const columns = db
+      .query<{ name: string; notnull: number }, []>("PRAGMA table_info(resumable_sessions)")
+      .all();
     expect(columns.map((column) => column.name)).toContain("roster_hidden");
     expect(
       db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version,

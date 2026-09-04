@@ -313,10 +313,7 @@ const executorSession = createSharedSession(async () => {
 type ExecutorSessie = {
   use<R>(
     call: (verbinding: {
-      callTool(verzoek: { name: string; arguments?: Record<string, unknown> }): Promise<{
-        content?: unknown;
-        isError?: boolean;
-      }>;
+      callTool(verzoek: { name: string; arguments?: Record<string, unknown> }): Promise<unknown>;
     }) => Promise<R>,
   ): Promise<R>;
 };
@@ -337,12 +334,10 @@ export async function callExecutor(
   if (!auth.ok) return text({ ok: false, error: auth.error });
 
   try {
-    const result = await sessie.use((client) =>
-      client.callTool({ name: tool, arguments: args }) as Promise<{
-        content?: unknown;
-        isError?: boolean;
-      }>,
+    const rawResult = await sessie.use((client) =>
+      client.callTool({ name: tool, arguments: args }),
     );
+    const result = rawResult as { content?: unknown; isError?: boolean };
     // Content 1:1 doorspelen: de Executor bepaalt zelf wat een antwoord bevat.
     if (Array.isArray(result?.content) && result.content.length > 0) {
       return { content: result.content, ...(result.isError ? { isError: true } : {}) };

@@ -223,7 +223,7 @@ test("een falende close op een kapotte verbinding blokkeert de volgende aanroep 
 
 test("mislukte verbinding propageert en laat geen vastgelopen connecting-staat achter", async () => {
   let pogingen = 0;
-  const sessie = createSharedSession(async () => {
+  const sessie = createSharedSession(async (): Promise<ReturnType<typeof nepClient>> => {
     pogingen += 1;
     throw new Error("connect geweigerd");
   });
