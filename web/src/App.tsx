@@ -195,6 +195,7 @@ import {
   useNumberedClaudeAccounts,
   agentIconAlt,
   agentIconSrc,
+  sessionIconAlt,
   timeAgo,
   type ViewerArtifact,
 } from "./lib/session-ui";
@@ -14272,7 +14273,7 @@ const RailItem = memo(function RailItem({
           )}
           {!drivingBot && showFavicon && showAgentIcons ? (
             <span
-              title={session.agentLabel || agentIconAlt(session.agent)}
+              title={session.agentLabel || sessionIconAlt(session.agent, session.model)}
               className="absolute bottom-1 right-1 flex size-[18px] items-center justify-center rounded-md bg-card ring-2 ring-card"
             >
               <AgentMark

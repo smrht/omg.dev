@@ -35,6 +35,21 @@ export function agentIconSrc(agent?: string): string {
   return omgAssetUrl(`/agent-claude.svg${v}`);
 }
 
+/**
+ * Muse Spark runs on the Codex harness (agent "codex", model "muse-spark-*").
+ * The harness mark alone would show OpenAI while Meta is answering; resolve
+ * the icon from the model so the roster and header say what is really running.
+ */
+export function sessionIconAgent(agent?: string, model?: string | null): string | undefined {
+  if ((agent === "codex" || agent === "codex-aisdk") && /^muse/i.test(model ?? "")) return "muse";
+  return agent;
+}
+
+export function sessionIconAlt(agent?: string, model?: string | null): string {
+  if (sessionIconAgent(agent, model) === "muse" && agent !== "muse") return "Codex · Muse Spark";
+  return agentIconAlt(agent);
+}
+
 export function agentIconAlt(agent?: string): string {
   if (agent === "codex" || agent === "codex-aisdk") return "Codex";
   if (agent === "grok") return "Grok";
@@ -235,7 +250,7 @@ export function SessionAgentIcon({
   wrapperClassName,
   showAccountNumber = true,
 }: {
-  session: Pick<Session, "agent" | "agentLabel" | "claudeAccountId">;
+  session: Pick<Session, "agent" | "agentLabel" | "claudeAccountId" | "model">;
   className?: string;
   size?: "sm" | "md";
   wrapperClassName?: string;
@@ -244,10 +259,10 @@ export function SessionAgentIcon({
 }) {
   const accountNumber = useClaudeAccountNumber(session.agent, session.claudeAccountId);
   const number = showAccountNumber ? accountNumber : null;
-  const label = session.agentLabel || agentIconAlt(session.agent);
+  const label = session.agentLabel || sessionIconAlt(session.agent, session.model);
   const img = (
     <img
-      src={agentIconSrc(session.agent)}
+      src={agentIconSrc(sessionIconAgent(session.agent, session.model))}
       alt={number == null ? label : `${label} ${number}`}
       title={session.agentLabel || undefined}
       className={className}
