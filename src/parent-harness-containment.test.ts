@@ -62,6 +62,29 @@ describe("managed parent harness containment (issue 521)", () => {
     expect(launch.cmd.indexOf("--")).toBeGreaterThan(0);
   });
 
+  test("the Executor MCP bearer survives the systemd-run env scrub", () => {
+    const prev = process.env.EXECUTOR_MCP_TOKEN;
+    process.env.EXECUTOR_MCP_TOKEN = "tok-executor-test";
+    try {
+      const result = spawnManagedAisdkSession({
+        name: "lfg-parentexec",
+        cwd: root,
+        model: "opus",
+        sessionId: "sess-exec",
+        omgSessionId: "sess-exec",
+      });
+      expect(result.ok).toBe(true);
+      const launch = JSON.parse(readFileSync(capture, "utf8")) as { cmd: string[] };
+      if (!isLinux) return;
+      // Every harness config carries `Bearer ${EXECUTOR_MCP_TOKEN}`; without the
+      // pass-through the header expands empty and Executor answers 401.
+      expect(launch.cmd).toContain("--setenv=EXECUTOR_MCP_TOKEN=tok-executor-test");
+    } finally {
+      if (prev === undefined) delete process.env.EXECUTOR_MCP_TOKEN;
+      else process.env.EXECUTOR_MCP_TOKEN = prev;
+    }
+  });
+
   test("containInAgentSlice: false remains an explicit opt-out", () => {
     const result = spawnManagedAisdkSession({
       name: "lfg-parenty",

@@ -206,6 +206,11 @@ export function containedAgentCommand(
   // environment to this allowlist, so OMG_MUSE_PROXY has to be passed through
   // explicitly or `muse serve` calls Meta directly and gets "lack access".
   if (process.env.OMG_MUSE_PROXY) argv.push(`--setenv=OMG_MUSE_PROXY=${process.env.OMG_MUSE_PROXY}`);
+  // Executor MCP (Sams connectie-hub op netcup-vps8000): every harness config
+  // references `Bearer ${EXECUTOR_MCP_TOKEN}`, so without this pass-through the
+  // header expands to an empty bearer and the server answers 401
+  // (AUTH_HEADER_REJECTED, measured 2026-09-05 on a Claude session).
+  if (process.env.EXECUTOR_MCP_TOKEN) argv.push(`--setenv=EXECUTOR_MCP_TOKEN=${process.env.EXECUTOR_MCP_TOKEN}`);
   if (opts.omgUser) argv.push(`--setenv=LFG_USER=${opts.omgUser}`);
   for (const [key, value] of Object.entries(agentTmpEnv())) {
     argv.push(`--setenv=${key}=${value}`);
