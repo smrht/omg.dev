@@ -593,6 +593,8 @@ import {
   CustomInstructionsRow,
 } from "./views/custom-instructions-page";
 import { RemoteAccessSettingsSection } from "./components/remote-access-settings";
+import { CloudAccountSettingsSection } from "./components/cloud-account-settings";
+import { MachineSwitcher } from "./components/machine-switcher";
 import { ConnectorsPage, ConnectorsRow } from "./views/connectors-page";
 import {
   UpdateNavButton,
@@ -1285,6 +1287,7 @@ type SlashSkillState = {
 
 const CLAUDE_MODELS = ["sonnet", "opus", "haiku", "fable", "claude-fable-5-1"];
 const CODEX_MODELS = [
+  "gpt-6-astra",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
@@ -1297,6 +1300,7 @@ const CODEX_MODELS = [
 // aliases). Kept in sync with the AISDK_MODELS allowlist in serve.ts.
 const AISDK_MODELS = ["fable", "claude-fable-5-1", "opus", "sonnet", "haiku"];
 const CODEX_AISDK_MODELS = [
+  "gpt-6-astra",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
@@ -6032,6 +6036,8 @@ export function App() {
   // selector — a back tap away from what the gear used to do. Unset leaves the
   // item out entirely rather than guessing a destination.
   const { onOpenHostSettings } = useEmbeddedHostOptions();
+  // A host that supplies its own machine list gets the switcher too.
+  const { machines: hostMachines } = useEmbeddedHostOptions();
   const hostSettingsInMenu = embedded && !!onOpenHostSettings;
   // Keep the session list + Shipped/Artifacts mounted after first visit so
   // tab switches don't remount, re-fetch, or reboot gallery iframes. Hidden
@@ -8779,6 +8785,9 @@ export function App() {
               : "px-2 md:px-3",
           )}
         >
+          {/* Top left on mobile: an icon only, the header has no room for a
+              name. Same menu as the desktop rail row. */}
+          {!embedded || hostMachines ? <MachineSwitcher variant="icon" /> : null}
           <LiveHeaderContext
             intro={showHeaderBrandIntro}
             hosted={embedded}
@@ -12182,6 +12191,8 @@ function RailStage({
    */
   hostSettingsInMenu?: boolean;
 }) {
+  // A host that supplies its own machine list gets the switcher too.
+  const hostMachines = useEmbeddedHostOptions().machines;
   const appDialog = useAppDialog();
   const { conversations: botConversationsForRail, selectedConversationId: selectedBotConversationForRail, markRead: markBotRowRead } = useContext(BotUnreadContext);
   const MAX_COLUMNS = 4;
@@ -13415,6 +13426,11 @@ function RailStage({
             that fills it never pays for it and one that doesn't never sees it.
             The collapsed flag rides along so the host can stack its controls
             vertically in the 56px rail instead of overflowing it. */}
+        {/* Machine switcher, in the same last-row spot the hosted app docks
+            its navigation into. Empty until the box is signed in to omg Cloud
+            with a machine it can reach, so a plain install sees no change.
+            A hosted surface never shows it: the host owns machine selection. */}
+        {!hosted || hostMachines ? <MachineSwitcher variant="rail" collapsed={railCollapsed} /> : null}
         {hosted ? (
           <div
             data-lfg-host-slot="rail-footer"
@@ -14181,21 +14197,23 @@ const RailItem = memo(function RailItem({
   /** Swipe left to archive. Absent on surfaces where that is not offered. */
   onArchive?: () => void;
 }) {
-  const { showSidebarAgentIcons: showAgentIcons } = useContext(ViewPrefsContext);
+  const { showSidebarAgentIcons: showAgentIcons, showSidebarFavicons: showFavicons } =
+    useContext(ViewPrefsContext);
   const botDirectory = useContext(BotDirectoryContext);
   const drivingBotId = productBotId(session);
   const drivingBot = drivingBotId ? botDirectory.get(drivingBotId) : undefined;
   const faviconSrc = projectFaviconSrc(session.project);
   const [failedFaviconSrc, setFailedFaviconSrc] = useState<string | null>(null);
-  // The favicon follows the agent icon setting: hiding agent icons means a
-  // plain row, and a project logo is as much an identity mark as the harness.
-  const showFavicon = showAgentIcons && !!faviconSrc && failedFaviconSrc !== faviconSrc;
-  // Agent icons off means no identity mark at all in the expanded row: no
-  // harness, no favicon, and no placeholder box holding the space. Busy and
-  // blocked move to the indicator slot. A collapsed rail is only marks, so
-  // it keeps a neutral one. A bot row keeps its face; that is the bot, not
-  // an agent icon.
-  const plainRow = !drivingBot && !showAgentIcons && !collapsed;
+  // The favicon has its own switch. Favicons on with agent icons off keeps
+  // the project logo as the row's only mark, with no agent badge in the
+  // corner. Favicons off with agent icons on falls back to the harness mark.
+  const showFavicon = showFavicons && !!faviconSrc && failedFaviconSrc !== faviconSrc;
+  // Both off means no identity mark at all in the expanded row: no harness,
+  // no favicon, and no placeholder box holding the space. Busy and blocked
+  // move to the indicator slot. A collapsed rail is only marks, so it keeps
+  // a neutral one. A bot row keeps its face; that is the bot, not an agent
+  // icon.
+  const plainRow = !drivingBot && !showAgentIcons && !showFavicon && !collapsed;
   // Read state, from the roster's own set. A working session is never in that
   // set — the server holds the mark back while a turn is running, because the
   // dot means "ready for you" and a session mid-turn is not. It comes back on
@@ -16217,6 +16235,16 @@ function SessionChatBody({
               scrollToEndNonce={dictationScrollNonce}
               onPaste={files.onPasteFiles}
               onKeyDown={(e) => {
+                // Esc is the inverse of the rail's Enter ("focus into the
+                // composer"): it drops focus so the global single-key
+                // shortcuts (Arrow/j/k) work again. SkillTextarea already
+                // ate Escape if a picker was open, so this only runs when
+                // the plain field has focus.
+                if (e.key === "Escape" && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  e.currentTarget.blur();
+                  return;
+                }
                 if (e.key !== "Enter" || e.shiftKey) return;
                 e.preventDefault();
                 // Cmd/Ctrl+Enter is the keyboard twin of holding the send
@@ -28399,6 +28427,8 @@ function SettingsView({
         </div>
       </section>
 
+      <CloudAccountSettingsSection />
+
       <RemoteAccessSettingsSection />
 
       <AgentConcurrencySettingsSection
@@ -28747,6 +28777,7 @@ function ViewSettingsSection({
   const { viewer: roleViewer, roles } = useContext(RoleViewerContext);
   const rows: { key: keyof ViewPrefs & `show${string}`; label: string; hint: string }[] = [
     { key: "showSidebarAgentIcons", label: "Agent icons in the sidebar", hint: "The harness mark and assignee face on each session row." },
+    { key: "showSidebarFavicons", label: "Project favicons in the sidebar", hint: "The project logo on each session row. Off shows the agent mark instead." },
     { key: "showSessionAgentIcons", label: "Agent icons in chat", hint: "The harness mark in a session's header. Off shows nothing there." },
     { key: "showSessionDiffBar", label: "Worktree diff badge in chat", hint: "The floating changes bar above the composer." },
     { key: "showComposerAgents", label: "Agent picker in the composer", hint: "Off: every new session uses the default agent." },
