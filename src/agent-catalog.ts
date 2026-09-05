@@ -114,7 +114,7 @@ export const PI_OPENCODE_MODELS: string[] = [
   "opencode/gpt-5.6-sol",
   "opencode/kimi-k2.7-code",
   "opencode/minimax-m3",
-  "opencode/deepseek-v4-flash-free",
+  "opencode/nemotron-3.5-lightning-free",
 ];
 export const PI_MODELS: string[] = [
   "fable",
@@ -132,8 +132,29 @@ export const PI_MODELS: string[] = [
 // therefore looked like "OpenCode only offers one free model" to every brand
 // new user who opened the picker inside the first refresh window, so seed it
 // with the full credential-free Zen set instead of one representative id.
-export const OPENCODE_MODELS: string[] = [
+// deepseek-v4-flash-free led this list and was the default until 2026-09-05,
+// when OpenCode Zen started answering every call to it with
+// `UnknownError: Unexpected server error` and dropped it from `opencode
+// models`. nemotron-3.5-lightning-free is on the live free list and answers.
+// Free OpenCode Zen models known to answer, best first. Discovery on a box
+// returns whatever subset Zen advertises to that box (a fresh omg.dev Computer
+// on 2026-09-05 saw deepseek-v4-flash-free, hy3-free, mimo-v2.5-free,
+// nemotron-3-ultra-free and north-mini-code-free; this machine saw a different
+// set), so the anonymous default is the first of these that discovery offers.
+export const PREFERRED_FREE_OPENCODE_MODELS: readonly string[] = [
+  "opencode/nemotron-3.5-lightning-free",
+  "opencode/mimo-v2.5-free",
+  "opencode/ling-3.0-flash-fin-free",
+  "opencode/nemotron-3-ultra-free",
+];
+// Models Zen still advertises but no longer serves. Never offered, never the
+// default. deepseek-v4-flash-free: every call fails with
+// `UnknownError: Unexpected server error` since 2026-09-05.
+export const RETIRED_OPENCODE_MODELS: ReadonlySet<string> = new Set([
   "opencode/deepseek-v4-flash-free",
+]);
+export const OPENCODE_MODELS: string[] = [
+  "opencode/nemotron-3.5-lightning-free",
   "opencode/laguna-s-2.1-free",
   "opencode/ling-3.0-tiny-free",
   "opencode/longcat-2.0-free",
@@ -240,7 +261,7 @@ export const MODEL_OPTIONS: Record<CodingAgentKind, { defaultModel: string; mode
   muse: { defaultModel: "muse-spark-1.2", models: MUSE_MODELS },
   deepseek: { defaultModel: "deepseek-v4-flash", models: DEEPSEEK_MODELS },
   hermes: { defaultModel: "nousresearch/hermes-4-405b", models: HERMES_MODELS },
-  opencode: { defaultModel: "opencode/deepseek-v4-flash-free", models: OPENCODE_MODELS },
+  opencode: { defaultModel: "opencode/nemotron-3.5-lightning-free", models: OPENCODE_MODELS },
   jcode: { defaultModel: "auto", models: JCODE_MODELS },
   pi: { defaultModel: "sonnet", models: PI_MODELS },
   copilot: { defaultModel: "claude-sonnet-4.5", models: COPILOT_MODELS },
@@ -408,7 +429,7 @@ export function curateOpenCodeModels(
   // OpenCode publishes credential-free models in its live catalog. Keep these
   // dynamic instead of pinning one release in LFG: anonymous installs can then
   // follow provider additions/removals without an LFG release.
-  const free = models.filter((model) => /^opencode\/.+-free$/.test(model));
+  const free = models.filter((model) => /^opencode\/.+-free$/.test(model) && !RETIRED_OPENCODE_MODELS.has(model));
   // ChatGPT subscription models (openai/*, present when opencode is logged in
   // via ChatGPT Plus/Pro OAuth) lead the picker. Mirror the codex harness
   // preference order, then stay future-proof by surfacing the newest release
@@ -727,7 +748,13 @@ export function defaultModelForCatalogItem(
   fullOpenCodeCatalog: boolean,
 ): string {
   if (key === "opencode" && !fullOpenCodeCatalog) {
-    const free = models.find((model) => /^opencode\/.+-free$/.test(model));
+    // Discovery lists the free tier in catalog order, and that order put a
+    // retired model in front of every anonymous box. Launch the best free
+    // model discovery offers; the first free entry is only the fallback for
+    // a catalog that carries none of the preferred ones.
+    const preferred = PREFERRED_FREE_OPENCODE_MODELS.find((model) => models.includes(model));
+    if (preferred) return preferred;
+    const free = models.find((model) => /^opencode\/.+-free$/.test(model) && !RETIRED_OPENCODE_MODELS.has(model));
     if (free) return free;
   }
   // Muse: discovery lists the catalog newest release first, and the newest

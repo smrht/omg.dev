@@ -1,3 +1,9 @@
+import { LiveHeaderContext } from "./components/live-header-context";
+import { activeMachine } from "./lib/machines";
+import { useHeaderProfile } from "./lib/header-profile";
+import { RuntimeAvailabilityContext, useRuntimeAvailability, shouldReloadRuntime } from "./lib/runtime-availability";
+import { RuntimeRecovery, RuntimeEmptyState } from "./components/runtime-recovery";
+import { AutoAgentPage } from "./components/auto-agent-page";
 import { Component, createContext, type ComponentProps, forwardRef, memo, Suspense, useCallback, useContext, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import type {
@@ -128,6 +134,7 @@ import {
 } from "./lib/bot-transcript";
 import {
   initialUserFilter,
+  reconcileUserFilter,
   sessionMatchesUserFilter,
   userFilterUpdatesStandaloneIdentity,
 } from "./lib/user-filter";
@@ -457,6 +464,7 @@ import {
   useChatMarkdownMetrics,
 } from "./lib/markdown-metrics";
 import { defaultRangeExtractor, useVirtualizer, type Range } from "@tanstack/react-virtual";
+import { remeasureChatRows } from "./lib/remeasure-chat-rows";
 import {
   parseMessageAttachments,
   type MessageAttachment,
@@ -1320,7 +1328,7 @@ const CURSOR_MODELS = [
   "cursor-grok-4.6",
 ];
 const OPENCODE_MODELS = [
-  "opencode/deepseek-v4-flash-free",
+  "opencode/nemotron-3.5-lightning-free",
 ];
 // pi resolves the same Claude aliases as claude/aisdk plus one custom proxy
 // model id. Kept in sync with PI_MODELS in src/agent-catalog.ts (the server
@@ -1406,7 +1414,7 @@ const AGENT_DEFAULT_MODEL: Record<AgentKind, string> = {
   fx: "auto",
   muse: "muse-spark-1.2",
   deepseek: "deepseek-v4-flash",
-  opencode: "opencode/deepseek-v4-flash-free",
+  opencode: "opencode/nemotron-3.5-lightning-free",
   jcode: "auto",
   pi: "sonnet",
   copilot: "claude-sonnet-4.5",
@@ -6038,6 +6046,12 @@ export function App() {
   const { onOpenHostSettings } = useEmbeddedHostOptions();
   // A host that supplies its own machine list gets the switcher too.
   const { machines: hostMachines } = useEmbeddedHostOptions();
+  const headerProfile = useHeaderProfile(
+    hostMachines?.activeId ?? activeMachine().id,
+    identity,
+    users.find((user) => user.email === identity),
+  );
+
   const hostSettingsInMenu = embedded && !!onOpenHostSettings;
   // Keep the session list + Shipped/Artifacts mounted after first visit so
   // tab switches don't remount, re-fetch, or reboot gallery iframes. Hidden
@@ -6154,15 +6168,13 @@ export function App() {
   const botUnreadIdentityRef = useRef(botUnreadIdentity);
   botUnreadIdentityRef.current = botUnreadIdentity;
   // The mobile Live header introduces the product mark, then gives that prime
-  // strip of screen back to the person using it. Start the two-second hold only
-  // once bootstrap is ready so a slow connection does not consume the intro
-  // behind the startup state.
+  // strip of screen back to the person using it. Network retries must not
+  // keep the product mark visible indefinitely.
   const [showHeaderBrandIntro, setShowHeaderBrandIntro] = useState(true);
   useEffect(() => {
-    if (loading) return;
     const timer = window.setTimeout(() => setShowHeaderBrandIntro(false), 2000);
     return () => window.clearTimeout(timer);
-  }, [loading]);
+  }, []);
 
   // Mobile viewport sizing. iOS can return from the app switcher with stale
   // `dvh`/fixed-viewport metrics; a pinch zoom fixes it because WebKit is forced
@@ -6889,18 +6901,10 @@ export function App() {
   // email on a roster-less box, which hides every unassigned session forever
   // because the "valid roster email" branch never runs when users is empty.
   useEffect(() => {
-    if (!users.length) {
-      if (userFilter !== "__all" && userFilter !== "__unassigned") {
-        setUserFilter("__all");
-      }
-      return;
-    }
-    const valid =
-      userFilter === "__all" ||
-      userFilter === "__unassigned" ||
-      users.some((u) => u.email === userFilter);
-    if (!valid) setUserFilter(hostedSurface ? "__all" : users[0]?.email ?? "__all");
-  }, [hostedSurface, userFilter, users]);
+    const ready = computerVersionReport !== null && computerVersionReport.generation === omgTransportGeneration();
+    const next = reconcileUserFilter(userFilter, users, ready);
+    if (next !== userFilter) setUserFilter(next);
+  }, [userFilter, users, computerVersionReport]);
 
   useEffect(() => {
     // This key is filter-only. Hosted surfaces use it too so a deliberate
@@ -7402,7 +7406,7 @@ export function App() {
         if (cancelled) return;
         const seen = computerVersionReportRef.current?.bootId ?? null;
         const now = typeof payload.bootId === "string" ? payload.bootId : null;
-        if (!seen || !now || seen === now) return;
+        if (!shouldReloadRuntime(seen, now)) return;
         void loadCore().catch(() => {});
       })
       .catch(() => {});
@@ -7410,6 +7414,15 @@ export function App() {
       cancelled = true;
     };
   }, [useWsLive, liveStatus, loadCore]);
+
+  const retryRuntime = useCallback(() => {
+    if (loading) return;
+    wsLiveStream.reconnectNow();
+    setLoading(true);
+    void loadCore()
+      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
+      .finally(() => setLoading(false));
+  }, [loading, loadCore, wsLiveStream.reconnectNow]);
 
   const selectedConversationSid = selectedBotConversationId
     ? botConversations.find((row) =>
@@ -8129,6 +8142,20 @@ export function App() {
     setSetupChecks(checksPayload.checks ?? []);
   }, []);
 
+  const agentSetupRunning = codingAgents.some((agent) => agent.status.setupRunning);
+  const agentSetupWasRunning = useRef(false);
+  useEffect(() => {
+    if (agentSetupRunning) {
+      agentSetupWasRunning.current = true;
+      const id = window.setInterval(() => void refreshCodingAgents(), 1000);
+      return () => window.clearInterval(id);
+    }
+    if (agentSetupWasRunning.current) {
+      agentSetupWasRunning.current = false;
+      void refreshCodingAgents({ refreshModels: true });
+    }
+  }, [agentSetupRunning, refreshCodingAgents]);
+
   const refreshToolConnections = useCallback(async () => {
     try {
       const payload = await api<{ connections?: ToolConnectOption[] }>("/api/connections");
@@ -8197,6 +8224,29 @@ export function App() {
         loading: "Starting setup…",
         success: "Setup started",
         error: (e) => (e instanceof Error ? e.message : "Couldn't start setup"),
+      },
+    );
+  }
+
+  function updateCodingAgent(kind: AgentKind) {
+    setCodingAgents((current) =>
+      current.map((item) =>
+        item.key === kind
+          ? { ...item, status: { ...item.status, setupRunning: true } }
+          : item,
+      ),
+    );
+    toast.promise(
+      api<{ agents: CodingAgentInfo[]; models?: ModelCatalogItem[] | null }>(`/api/coding-agents/${kind}/update`, {
+        method: "POST",
+      }).then((payload) => {
+        setCodingAgents(payload.agents ?? []);
+        setModelCatalog(buildAgentModelCatalog(payload.models));
+      }),
+      {
+        loading: "Updating CLI…",
+        success: "Update started",
+        error: (e) => (e instanceof Error ? e.message : "Couldn't start update"),
       },
     );
   }
@@ -8719,6 +8769,14 @@ export function App() {
     <OpenSettingsPageContext.Provider value={setTab}>
     <BotDirectoryContext.Provider value={botDirectory}>
     <ViewerIdentityContext.Provider value={viewerParticipantId}>
+    <RuntimeAvailabilityContext.Provider value={{
+      status: useWsLive ? wsLiveStream.connection.status : "live",
+      transportLive: useWsLive && wsLiveStream.connection.status === "live",
+      loading,
+      ready: computerVersionReport !== null && computerVersionReport.generation === omgTransportGeneration(),
+      error,
+      retry: retryRuntime,
+    }}>
     <SendIdentityContext.Provider value={botUnreadIdentity || null}>
     <SessionUnreadContext.Provider value={sessionUnreadValue}>
     <BotUnreadContext.Provider value={{ conversations: botConversations, any: hasUnreadBotConversation(botConversations), selectedConversationId: selectedBotConversationId, markRead: (sessionId) => void markBotConversationVisible(sessionId).catch(() => {}) }}>
@@ -8726,15 +8784,11 @@ export function App() {
     <EditBotContext.Provider value={openBotEditor}>
     <div
       ref={rootRef}
-      inert={loading}
       aria-busy={loading}
-      aria-disabled={loading || undefined}
-      aria-describedby={loading ? "lfg-startup-status" : undefined}
+      aria-describedby={loading && bare ? "lfg-startup-status" : undefined}
       data-startup-state={loading ? "connecting" : "ready"}
       className={cn(
         bare ? BARE_SHELL_CLASS : APP_SHELL_CLASS,
-        loading &&
-          "[&_button]:cursor-wait [&_button]:opacity-60 [&_input]:cursor-wait [&_input]:opacity-60 [&_select]:cursor-wait [&_select]:opacity-60 [&_textarea]:cursor-wait [&_textarea]:opacity-60",
         // Embed: leave a blank band of our own background under the host
         // compact pill so list/inline composer sit above it. Full-bleed
         // portals (session sheet) use --lfg-safe-bottom on their own chrome.
@@ -8779,7 +8833,7 @@ export function App() {
            identical everywhere LFG's Live view is mounted. */
         <header
           className={cn(
-            "z-40 flex min-w-0 shrink-0 items-center justify-between gap-2 pb-1 pt-[calc(0.5rem+env(safe-area-inset-top))]",
+            "z-40 flex min-w-0 shrink-0 items-center gap-2 pb-1 pt-[calc(0.5rem+env(safe-area-inset-top))]",
             embedded
               ? "pl-3 pr-[calc(0.75rem+var(--lfg-host-top-inset))]"
               : "px-2 md:px-3",
@@ -8789,10 +8843,10 @@ export function App() {
               name. Same menu as the desktop rail row. */}
           {!embedded || hostMachines ? <MachineSwitcher variant="icon" /> : null}
           <LiveHeaderContext
-            intro={showHeaderBrandIntro}
-            hosted={embedded}
+            intro={showHeaderBrandIntro && !error}
+            brand={<ProductBrand compact hosted={embedded} />}
             viewerName={viewer?.name}
-            user={users.find((user) => user.email === identity)}
+            user={headerProfile}
             identity={identity}
             busyCount={liveSessions.filter(
               (session) => !!liveStream.busyBySid[session.sessionId ?? ""],
@@ -8810,6 +8864,7 @@ export function App() {
                   <UserFilterMenu
                     value={userFilter}
                     users={users}
+                    displayUser={headerProfile}
                     onChange={changeUserFilter}
                   />
                 )}
@@ -8858,6 +8913,7 @@ export function App() {
                   <UserFilterMenu
                     value={userFilter}
                     users={users}
+                    displayUser={headerProfile}
                     onChange={changeUserFilter}
                   />
                 )}
@@ -9003,6 +9059,7 @@ export function App() {
                 <UserFilterMenu
                   value={userFilter}
                   users={users}
+                    displayUser={headerProfile}
                   onChange={changeUserFilter}
                 />
               </>
@@ -9033,23 +9090,8 @@ export function App() {
 
       {embedded ? null : <PwaInstallCallout />}
 
-      {error ? (
-        <div className="mx-3 mt-3 flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          <span className="min-w-0 flex-1">{error}</span>
-          {/* A startup failure can persist with nothing left to retry it, so it
-              needs a way out that is not "reload the tab". It also measures
-              into the mobile chrome height, so an undismissable one keeps
-              pushing the scroll surface down for as long as it is wrong. */}
-          <button
-            type="button"
-            onClick={() => setError(null)}
-            aria-label="Dismiss"
-            className="-mr-1 shrink-0 rounded-md p-0.5 opacity-70 transition-opacity hover:opacity-100"
-          >
-            <X className="size-4" />
-          </button>
-        </div>
-      ) : null}
+      {isMobile && isPrimarySurfaceTab(tab) ? null : <RuntimeRecovery />}
+
       </div>
       )}
 
@@ -9283,6 +9325,7 @@ export function App() {
             agents={codingAgents}
             onVisibleChange={(kind, visible) => void setCodingAgentVisible(kind, visible)}
             onSetup={setupCodingAgent}
+            onUpdate={updateCodingAgent}
             onLogin={(kind, accountId) => loginCodingAgent(kind, undefined, accountId)}
             onAddClaudeAccount={addClaudeAccount}
             onRemoveClaudeAccount={removeClaudeAccountFromSettings}
@@ -9581,8 +9624,8 @@ export function App() {
         onComplete={completeConnectionAuth}
       />
 
-      {useWsLive ? (
-        <ConnectionStatusToasts connection={wsLiveStream.connection} onRetry={wsLiveStream.reconnectNow} />
+      {useWsLive && !error ? (
+        <ConnectionStatusToasts recoveryVisible={!bare} connection={wsLiveStream.connection} onRetry={wsLiveStream.reconnectNow} />
       ) : null}
       <VoiceSetupDialog />
       {/* Shift toggles the all-agent usage campfire; long-press rings on mobile. */}
@@ -9634,7 +9677,7 @@ export function App() {
       />
       <Toaster position={isMobile ? "top-center" : "bottom-center"} />
     </div>
-    {loading ? <AppStartupStatus /> : null}
+    {loading && bare ? <AppStartupStatus /> : null}
     {terminalSid ? (
       <SessionTerminalOverlay
         sessionId={terminalSid}
@@ -9647,6 +9690,7 @@ export function App() {
     </BotUnreadContext.Provider>
     </SessionUnreadContext.Provider>
     </SendIdentityContext.Provider>
+    </RuntimeAvailabilityContext.Provider>
     </ViewerIdentityContext.Provider>
     </BotDirectoryContext.Provider>
     </OpenSettingsPageContext.Provider>
@@ -9722,180 +9766,6 @@ function ProductBrand({
         omg.dev
       </span>
     </span>
-  );
-}
-
-// Mobile Live uses the otherwise-empty span between the account controls and
-// the screen edge as a small contextual surface. It begins as the familiar LFG
-// mark, then expands into a personal status line. The welcome is the resting
-// state; activity only interrupts it while work is genuinely in motion.
-// Questions take precedence, but keep the same quiet plain-text treatment.
-function LiveHeaderContext({
-  intro,
-  hosted = false,
-  viewerName,
-  user,
-  identity,
-  busyCount,
-  onOpenNotifications,
-}: {
-  intro: boolean;
-  hosted?: boolean;
-  viewerName?: string;
-  user?: User;
-  identity?: string | null;
-  busyCount: number;
-  onOpenNotifications: () => void;
-}) {
-  const { questions } = useAsk();
-  // Hosted identity is presentation-only and intentionally wins over the LFG
-  // roster. omg Computers have no roster by design, so deriving this welcome
-  // from session ownership would either say "Unassigned" or reintroduce the
-  // rejected-user bug that roster-less hosted instances were built to avoid.
-  // When nothing identifies the viewer at all — a roster-less host that passes
-  // no viewer, or omg's signed-out preview — there is no name to greet, so the
-  // greeting drops the name entirely. It must NOT fall through to shortUser()'s
-  // "unassigned": that is a roster FILTER label ("show unowned sessions"),
-  // never a person, and it rendered as "Welcome, Unassigned" in the preview.
-  const rawName = viewerName?.trim() || user?.name?.trim() || (identity ? shortUser(identity) : "");
-  const firstNamePart = rawName.split(/\s+/)[0] ?? "";
-  const firstName = firstNamePart
-    ? `${firstNamePart.charAt(0).toUpperCase()}${firstNamePart.slice(1)}`
-    : "";
-  const questionCount = questions.length;
-  const showCard = intro;
-  const actionInMotion = busyCount > 0;
-  const [showAmbientStatus, setShowAmbientStatus] = useState(false);
-  const [ambientSwapState, setAmbientSwapState] = useState<"idle" | "exit" | "enter">("idle");
-  const ambientTextRef = useRef<HTMLSpanElement>(null);
-  const ambientSwapTimerRef = useRef<number | null>(null);
-  const ambientContext = `${busyCount} agent${busyCount === 1 ? "" : "s"} building`;
-  const welcomeMessage = firstName ? `Welcome, ${firstName}` : "Welcome";
-  const headline = questionCount
-    ? questionCount === 1
-      ? firstName
-        ? `${firstName}, an agent needs you`
-        : "An agent needs you"
-      : firstName
-        ? `${firstName}, ${questionCount} agents need you`
-        : `${questionCount} agents need you`
-    : actionInMotion && showAmbientStatus
-      ? ambientContext
-      : welcomeMessage;
-
-  useEffect(() => {
-    if (intro || questionCount || !actionInMotion) {
-      setShowAmbientStatus(false);
-      setAmbientSwapState("idle");
-      return;
-    }
-
-    // Let the personal welcome breathe. Activity gets a shorter cameo, then
-    // yields back to the welcome instead of competing with it equally.
-    const dwellMs = showAmbientStatus ? 2800 : 8000;
-    const dwellTimer = window.setTimeout(() => {
-      setAmbientSwapState("exit");
-      const swapDuration = Number.parseFloat(
-        window.getComputedStyle(document.documentElement).getPropertyValue("--text-swap-dur"),
-      ) || 150;
-      ambientSwapTimerRef.current = window.setTimeout(() => {
-        setShowAmbientStatus((current) => !current);
-        setAmbientSwapState("enter");
-      }, swapDuration);
-    }, dwellMs);
-
-    return () => {
-      window.clearTimeout(dwellTimer);
-      if (ambientSwapTimerRef.current !== null) {
-        window.clearTimeout(ambientSwapTimerRef.current);
-        ambientSwapTimerRef.current = null;
-      }
-    };
-  }, [actionInMotion, intro, questionCount, showAmbientStatus]);
-
-  useLayoutEffect(() => {
-    if (ambientSwapState !== "enter") return;
-    const label = ambientTextRef.current;
-    if (!label) return;
-    void label.offsetHeight;
-    const frame = window.requestAnimationFrame(() => setAmbientSwapState("idle"));
-    return () => window.cancelAnimationFrame(frame);
-  }, [ambientSwapState, showAmbientStatus]);
-
-  return (
-    <NavIsland
-      surface={showCard}
-      className={cn(
-        "shrink-0 overflow-hidden transition-[width] duration-500 ease-ios",
-        intro
-          ? "w-11"
-          : hosted
-            ? "w-[min(17rem,calc(100vw-var(--lfg-host-top-inset)-1.5rem))]"
-            : "w-[min(17rem,calc(100vw-6.75rem))]",
-      )}
-    >
-      <button
-        type="button"
-        onClick={() => {
-          haptic("selection");
-          onOpenNotifications();
-        }}
-        aria-label={
-          intro
-            ? "omg.dev"
-            : questionCount
-              ? `${headline}. Tap to open notifications`
-              : actionInMotion
-                ? `${welcomeMessage}. ${ambientContext}`
-                : welcomeMessage
-        }
-        title={intro ? "omg.dev" : "Open notifications"}
-        className={cn(
-          "relative flex h-11 w-full items-center overflow-hidden rounded-full text-left transition-colors active:scale-[0.98]",
-          showCard && "glass-island",
-          "text-foreground",
-        )}
-      >
-        <span
-          aria-hidden
-          className={cn(
-            "absolute inset-0 flex items-center justify-center transition-all duration-300 ease-ios",
-            intro ? "scale-100 opacity-100" : "scale-75 opacity-0",
-          )}
-        >
-          <ProductBrand compact hosted={hosted} />
-        </span>
-        <span
-          aria-live={questionCount ? "polite" : "off"}
-          className={cn(
-            "flex min-w-0 items-center px-1 transition-all duration-300 ease-ios",
-            intro ? "translate-y-1 opacity-0" : "translate-y-0 opacity-100 delay-150",
-          )}
-        >
-          <span className="min-w-0 leading-none">
-            <span
-              ref={ambientTextRef}
-              className={cn(
-                "t-text-swap block truncate tracking-[-0.01em]",
-                ambientSwapState === "exit" && "is-exit",
-                ambientSwapState === "enter" && "is-enter-start",
-                questionCount
-                  ? "text-[14px] font-semibold"
-                  : actionInMotion && showAmbientStatus
-                    ? "text-[12px] font-medium"
-                    : "text-[16px] font-semibold",
-              )}
-            >
-              {!questionCount && actionInMotion && showAmbientStatus ? (
-                <ShimmerText>{headline}</ShimmerText>
-              ) : (
-                headline
-              )}
-            </span>
-          </span>
-        </span>
-      </button>
-    </NavIsland>
   );
 }
 
@@ -11764,12 +11634,7 @@ function LiveView({
     return (
       <div className="flex flex-col gap-5">
         {coach}
-        <div className="flex min-h-[50dvh] flex-col items-center justify-center gap-3 text-center">
-          <MessageSquare className="size-8 text-muted-foreground/45" aria-hidden />
-          <span className="text-sm font-medium text-muted-foreground">
-            No running sessions
-          </span>
-        </div>
+        <RuntimeEmptyState />
       </div>
     );
   }
@@ -18751,16 +18616,13 @@ const ChatStream = memo(function ChatStream({
   // fallback offset intact unless the instance is explicitly invalidated.
   // Re-measure mounted rows in the same layout pass so real DOM sizes stay
   // authoritative while unmounted rows switch to the harvested CSS model.
+  // Keyboard CSS-variable updates also invalidate metrics. Restore DOM sizes
+  // even during scrolling, when TanStack's measureElement skips its sync read.
   const measuredMetricsVersionRef = useRef(0);
   useLayoutEffect(() => {
     if (!rowContext || metrics.version === measuredMetricsVersionRef.current) return;
     measuredMetricsVersionRef.current = metrics.version;
-    virtualizer.measure();
-    const container = virtualContainerRef.current;
-    if (!container) return;
-    for (const row of container.querySelectorAll<HTMLElement>("[data-index]")) {
-      virtualizer.measureElement(row);
-    }
+    remeasureChatRows(virtualizer, virtualContainerRef.current);
   }, [metrics.version, rowContext, virtualizer]);
 
   const virtualRows = virtualizer.getVirtualItems();
@@ -21826,6 +21688,7 @@ function NewSessionDialog({
   // campfire). The nonce lets the same agent be requested more than once.
   agentRequest?: { kind: AgentKind; accountId?: string; nonce: number } | null;
 }) {
+  const runtime = useRuntimeAvailability();
   const catalog = useAgentModelCatalog();
   const accessMode = useContext(AgentAccessModeContext);
   const view = useContext(ViewPrefsContext);
@@ -22510,6 +22373,7 @@ function NewSessionDialog({
   function submit(e?: FormEvent, overrideText?: string, overrideThinking?: ThinkingLevel) {
     e?.preventDefault();
     if (launching) return;
+    if (runtime.loading || !runtime.ready || runtime.status !== "live" || runtime.error) return;
     const taskPrompt = (overrideText ?? prompt).trim();
     const files = attachments;
     if (!taskPrompt && !files.length) return;
@@ -22679,6 +22543,7 @@ function NewSessionDialog({
   // variant is always expanded.
   const compact = variant === "inline" && !expanded;
   const canSubmit =
+    !runtime.loading && runtime.ready && runtime.status === "live" && !runtime.error &&
     !!selectedRepo &&
     visibleAgentOptions.some((option) => option.key === agent) &&
     (!!prompt.trim() || attachments.length > 0);
@@ -24776,92 +24641,10 @@ function AgentModelRow<K extends AgentKind>({
   );
 }
 
-// ---------- auto agents: sheets + manage view ----------
+// ---------- auto agents: pages + manage view ----------
 
-// Bottom sheet built on the shadcn Drawer (vaul) primitive — gives us the drag
-// handle, focus trap, escape-to-close, and overlay for free, matching the rest
-// of the app's UI kit. `title` feeds the a11y-required (visually hidden) label.
-function BottomSheet({
-  onClose,
-  title,
-  page = false,
-  expandOnFocus = true,
-  footer,
-  children,
-}: {
-  onClose: () => void;
-  title: string;
-  /** Morph from a content-sized card into a full-height page. See the
-   *  `.lfg-sheet-page` rule in index.css for what that means geometrically —
-   *  the short version is that the sheet claims the band above the keyboard so
-   *  the footer lands on it instead of being shoved off-screen. */
-  page?: boolean;
-  /** Enter page mode by itself whenever a field inside the sheet takes focus,
-   *  instead of the caller deciding up front. A content-sized card cannot win
-   *  against the soft keyboard — it gets shoved off the top — and the caller
-   *  usually cannot know in advance whether this particular visit will involve
-   *  typing. FindingSheet has driven `page` from focus by hand since page mode
-   *  landed; this is that behaviour made available to every sheet, so the
-   *  auto-agent forms stop being the ones that still fight the keyboard. */
-  expandOnFocus?: boolean;
-  /** Pinned to the bottom of the sheet: in page mode this is what ends up
-   *  sitting directly on the keyboard, so it should hold the field the user is
-   *  typing into and its actions — nothing that scrolls. */
-  footer?: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <Drawer
-      open
-      // The viewport already shrinks around the mobile keyboard. Vaul's input
-      // repositioning applies a second offset, which can push the focused auto-
-      // agent field (and the rest of the sheet) out of the visible viewport.
-      repositionInputs={false}
-      onOpenChange={(open) => {
-        if (!open) onClose();
-      }}
-    >
-      <DrawerContent
-        // Bottom sheets can be launched from the full-screen chat layer (z-90).
-        // Keep both the scrim and sheet above it without raising every Drawer in
-        // the app, since page-level drawers intentionally sit below some screens.
-        overlayClassName="z-[100]"
-        className="z-[100]"
-        // The morph lives in DrawerContent now, so every drawer in the app has
-        // it. `page` still lets a caller force it; `expandOnFocus` is kept as
-        // an explicit opt-out for sheets with no fields.
-        page={page}
-        expandOnFocus={expandOnFocus}
-      >
-        <DrawerTitle className="sr-only">{title}</DrawerTitle>
-        {/* min-h-0 twice on purpose: without it a flex child refuses to shrink
-            below its content, and the body would push the footer out of the
-            sheet instead of scrolling under it. */}
-        {/* flex-auto, not flex-1: with a `0%` basis these children contribute
-            nothing to an auto-height sheet, and how much a flex container then
-            resolves from their content is exactly where engines disagree. A
-            content basis sizes the compact card off its content everywhere, and
-            still fills (and shrinks, hence min-h-0) once page mode fixes the
-            height. */}
-        <div className="flex min-h-0 flex-auto flex-col">
-          {/* flex-col on the scroller so a caller can `mt-auto` its content to
-              sit against the footer. Deliberately margin-auto and not
-              justify-end: a flex-end scroll container clips its own overflow at
-              the top, and this one overflows the moment the keyboard is up. */}
-          <div className="flex min-h-0 flex-auto flex-col overflow-y-auto overscroll-contain">
-            {children}
-          </div>
-          {footer ? <div className="shrink-0">{footer}</div> : null}
-        </div>
-      </DrawerContent>
-    </Drawer>
-  );
-}
-
-// What FindingDetail hands back to whoever hosts it. `paged` is true while a
-// field inside the detail has focus, so the host can bottom-anchor the body
-// against the keyboard the same way the standalone sheet does.
-type FindingDetailParts = { paged: boolean; footer: ReactNode; body: ReactNode };
+// Shared report content and reply controls for the full-page hosts.
+type FindingDetailParts = { footer: ReactNode; body: ReactNode };
 
 // One finding, read and acted on. Owns nothing about the surface it sits in:
 // FindingSheet wraps it in its own bottom sheet, and AgentReportSheet swaps it
@@ -24961,12 +24744,6 @@ function FindingDetail({
     claudeAccountId: backend === "aisdk" ? livePin || undefined : undefined,
   });
 
-  // Page mode. The sheet stops being a card sized by its content and becomes a
-  // full-height surface whose body scrolls under a pinned footer, so the
-  // keyboard has something sane to push against instead of shoving the finding
-  // off the top of the screen. Any field taking focus enters it — the reveal
-  // buttons below just do that by focusing what they open.
-  const [paged, setPaged] = useState(false);
   const exitTimer = useRef<number | null>(null);
   const cancelExit = () => {
     if (exitTimer.current !== null) {
@@ -24976,30 +24753,25 @@ function FindingDetail({
   };
   useEffect(() => cancelExit, []);
 
-  // Leaving the last field folds the sheet back down — but only if nothing was
-  // typed, so work in progress can't vanish under someone dismissing the
-  // keyboard to read the finding again. The delay (and the pointer-down
-  // cancel below) is what keeps a tap on the footer's own buttons from
+  // Hide an empty reply after focus leaves the page. Preserve any draft.
+  // The delay (and the pointer-down cancel below) is what keeps a tap on the footer's own buttons from
   // unmounting them between blur and click.
   function scheduleExit() {
     cancelExit();
     exitTimer.current = window.setTimeout(() => {
       exitTimer.current = null;
-      const root = footerRef.current?.closest("[data-slot=drawer-content]");
+      const root = footerRef.current?.closest("[data-auto-agent-page]");
       if (root && root.contains(deepActiveElement())) return;
       if (text.trim() || feedbackText.trim()) return;
-      setPaged(false);
       setInstructing(false);
       setTuning(false);
     }, 260);
   }
 
-  // Reveal a field and put the cursor in it. The rAF lets the footer swap and
-  // the sheet start its height morph first; focusing a node that is still being
-  // laid out is what makes iOS scroll the wrong thing under the keyboard.
+  // Reveal the footer field before focusing it, so the browser can scroll
+  // the mounted input into view.
   function reveal(which: "instruct" | "tune") {
     cancelExit();
-    setPaged(true);
     if (which === "instruct") setInstructing(true);
     else setTuning(true);
     requestAnimationFrame(() => {
@@ -25116,7 +24888,6 @@ function FindingDetail({
       onFocusCapture={(e) => {
         if (isTypingTarget(e.target as Element)) {
           cancelExit();
-          setPaged(true);
         }
       }}
       onBlurCapture={scheduleExit}
@@ -25156,7 +24927,6 @@ function FindingDetail({
               onClick={() => {
                 setFeedbackText("");
                 setTuning(false);
-                setPaged(false);
               }}
             >
               Cancel
@@ -25296,13 +25066,9 @@ function FindingDetail({
   );
 
   return render({
-    paged,
     footer,
     body: (
-      // Bottom-anchored while a field has focus: the finding stays next to
-      // the field you're typing into, and the slack sits above it where the
-      // keyboard is — not as a hole between the two.
-      <div className={cn("px-2 pb-2 pt-1", paged && "mt-auto")}>
+      <div className="px-2 pb-2 pt-1">
         {/* One quiet identity line. The old header set the agent name at the
             same weight as the title, so two lines competed to be read first —
             the finding is the headline, the agent is metadata. */}
@@ -25381,22 +25147,15 @@ function FindingDetail({
 
 type FindingDetailProps = Omit<Parameters<typeof FindingDetail>[0], "render">;
 
-// A single finding in its own sheet. Reached from the new-finding toast; the
-// Auto section opens the agent's report instead (AgentReportSheet).
-//
-// Always a page on a phone. The content-sized card this used to be capped at
-// 80vh and only grew to the full screen once a field took focus, so a long
-// finding was read through a letterbox and the composer, when it appeared,
-// arrived with a jump. Desktop ignores `page` (see index.css) and keeps the
-// centered dialog.
+// A single finding opened from the new-finding toast.
 function FindingSheet({ onClose, ...props }: FindingDetailProps & { onClose: () => void }) {
   return (
     <FindingDetail
       {...props}
       render={({ footer, body }) => (
-        <BottomSheet onClose={onClose} title={`${props.agentName} finding`} page footer={footer}>
+        <AutoAgentPage onClose={onClose} title={`${props.agentName} finding`} footer={footer}>
           {body}
-        </BottomSheet>
+        </AutoAgentPage>
       )}
     />
   );
@@ -25520,7 +25279,7 @@ function AgentReportSheet({
         onDismiss={onDismiss}
         onRefineAgent={onRefineAgent}
         render={({ footer, body }) => (
-          <BottomSheet onClose={onClose} title={`${agentName} finding`} page footer={footer}>
+          <AutoAgentPage onClose={onClose} title={`${agentName} finding`} footer={footer}>
             {findings.length > 1 ? (
               <div className="shrink-0 px-1 pb-1 pt-0.5">
                 <button
@@ -25534,7 +25293,7 @@ function AgentReportSheet({
               </div>
             ) : null}
             {body}
-          </BottomSheet>
+          </AutoAgentPage>
         )}
       />
     );
@@ -25562,11 +25321,9 @@ function AgentReportSheet({
   );
 
   return (
-    <BottomSheet
+    <AutoAgentPage
       onClose={onClose}
       title={`${agentName} report`}
-      page
-      expandOnFocus={false}
       footer={footer}
     >
       <div className="px-2 pb-2 pt-1">
@@ -25638,7 +25395,7 @@ function AgentReportSheet({
           ))}
         </div>
       </div>
-    </BottomSheet>
+    </AutoAgentPage>
   );
 }
 
@@ -25702,7 +25459,7 @@ function NewAutoAgentComposer({
   }
 
   return (
-    <BottomSheet onClose={onClose} title="New auto agent">
+    <AutoAgentPage onClose={onClose} title="New auto agent">
       <div className="px-2 pb-4 pt-1">
         <div className="flex items-center gap-2">
           <Sparkles className="size-5 text-primary" />
@@ -25758,7 +25515,7 @@ function NewAutoAgentComposer({
           scheduledOnly
         />
       </div>
-    </BottomSheet>
+    </AutoAgentPage>
   );
 }
 
@@ -25994,12 +25751,9 @@ function AgentEditorSheet({
   );
 
   return (
-    // A page, not a card, on a phone: the form is six rows and a prompt, and a
-    // content-sized sheet put the prompt under the keyboard on every visit.
-    <BottomSheet
+    <AutoAgentPage
       onClose={onClose}
       title={isNew ? "New auto agent" : "Edit auto agent"}
-      page
       footer={footer}
     >
       <div className="px-2 pb-3 pt-1">
@@ -26289,7 +26043,7 @@ function AgentEditorSheet({
           </div>
         ) : null}
       </div>
-    </BottomSheet>
+    </AutoAgentPage>
   );
 }
 

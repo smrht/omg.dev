@@ -2,6 +2,44 @@
 
 Recent product updates and deployment notes.
 
+## September 5, 2026 - Free OpenCode default follows what the box can use (v0.6.47)
+
+- **The free OpenCode default is the best free model the box actually
+  discovers.** OpenCode advertises a different free set to each box, and the
+  retired `deepseek-v4-flash-free` was still first in that set on a fresh
+  omg.dev Computer. LFG now launches the first known-working free model the
+  box offers, and never offers a retired model.
+
+## September 5, 2026 - Free OpenCode default really launches (v0.6.46)
+
+- **An anonymous box now launches the configured free OpenCode model.** The
+  picker used to take the first free model that OpenCode's catalog listed,
+  which was still the retired `deepseek-v4-flash-free`. The configured
+  default (`opencode/nemotron-3.5-lightning-free`) now wins whenever the
+  catalog offers it.
+
+## September 5, 2026 - Update coding agents and refresh models from Settings (v0.6.45)
+
+- **Settings can update a coding agent CLI and refresh its models.** Expand
+  an installed agent and tap Update to reinstall the latest CLI, then re-probe
+  its model list. Refresh models at the top of the page re-probes without
+  waiting for the daily catalog cron. This is how an existing Computer picks
+  up a new Codex model such as GPT-6 Astra.
+
+## September 5, 2026 - Mobile chat layout and auto-agent pages (v0.6.44)
+
+- **OpenCode default model is `opencode/nemotron-3.5-lightning-free`.** The
+  previous default, `opencode/deepseek-v4-flash-free`, now fails on
+  OpenCode's side with `Unexpected server error` and is gone from the
+  OpenCode catalog. A new box, and every omg.dev free Computer, picks the
+  working model.
+
+- **Chat messages keep their measured heights during keyboard changes.**
+  Opening or closing the mobile keyboard while messages arrive no longer
+  leaves rows at estimated heights that can make messages overlap.
+- **Auto-agent reports and editing use full pages.** The report and editor
+  have more room to scroll on mobile and desktop.
+
 ## September 5, 2026 - omg Cloud sign-in and machine switching (v0.6.43)
 
 - **Sign in to omg Cloud from Settings.** The box runs the sign-in through
