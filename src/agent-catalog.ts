@@ -2,6 +2,7 @@ import type { Agent } from "./agents/registry.ts";
 import type { AutoAgent } from "./auto/store.ts";
 import type { CodingAgentInfo, CodingAgentKind } from "./coding-agents.ts";
 import { readModelDiscoveryCacheSync } from "./model-discovery.ts";
+import { CODEX_MUSE_MODELS, museSubscriptionKey } from "./agents/backends/codex-muse.ts";
 import { PI_AUTH_PROVIDER_IDS } from "./pi-auth.ts";
 import type { Session } from "./sessions.ts";
 
@@ -28,6 +29,7 @@ export type SkillCatalogItem = {
 // without this entry the picker cannot reach it.
 export const CLAUDE_MODELS: string[] = ["fable", "claude-fable-5-1", "opus", "sonnet", "haiku"];
 export const CODEX_MODELS: string[] = [
+  "gpt-6-astra",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
@@ -41,6 +43,7 @@ export const CODEX_MODELS: string[] = [
 // `claude-fable-5-1` is carried here for the same reason as CLAUDE_MODELS.
 export const AISDK_MODELS: string[] = ["fable", "claude-fable-5-1", "opus", "sonnet", "haiku"];
 export const CODEX_AISDK_MODELS: string[] = [
+  "gpt-6-astra",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
@@ -451,19 +454,39 @@ export function curateOpenCodeModels(
   return out.length ? out : models.slice(0, 16);
 }
 
-function curateCodexModels(models: string[]): string[] {
+export function curateCodexModels(models: string[]): string[] {
   const out: string[] = [];
   const add = (model: string) => {
     if (models.includes(model) && !out.includes(model)) out.push(model);
   };
 
-  for (const model of CODEX_MODELS) add(model);
+  // Codex' remote catalog can lag an account rollout: this box could launch
+  // Astra while `codex debug models` still omitted it. Keep only entitlement-
+  // proven local overrides ahead of discovery; removed legacy models remain
+  // governed by the authoritative remote list.
+  for (const model of CODEX_MODELS) {
+    if (model === "gpt-6-astra") out.push(model);
+    else add(model);
+  }
   addLatest(out, models.filter((m) => /^gpt-\d/.test(m) && !m.includes("codex") && !m.includes("mini")));
   addLatest(out, models.filter((m) => /^gpt-\d/.test(m) && m.includes("mini")));
   addLatest(out, models.filter((m) => /^gpt-\d/.test(m) && m.includes("codex") && !m.includes("spark")));
   addLatest(out, models.filter((m) => m.includes("spark")));
   for (const fallback of CODEX_MODELS) if (!out.includes(fallback) && models.includes(fallback)) out.push(fallback);
   return out.length ? out : models;
+}
+
+/**
+ * Muse Spark on the Codex harness (codex-muse.ts). `codex debug models` never
+ * lists Meta's models, so they are appended after the OpenAI catalog — and only
+ * while a Muse subscription credential is on the box, so the picker never
+ * offers a model that would fail at launch.
+ */
+export function withCodexMuseModels(models: string[], museAvailable: boolean): string[] {
+  if (!museAvailable) return models;
+  const out = [...models];
+  for (const model of CODEX_MUSE_MODELS) if (!out.includes(model)) out.push(model);
+  return out;
 }
 
 function curateGrokModels(models: string[]): string[] {
@@ -511,7 +534,8 @@ function curateModels(
 ): string[] {
   if (agent === "cursor") return curateCursorModels(models);
   if (agent === "opencode") return curateOpenCodeModels(models, connectedProviderIds);
-  if (agent === "codex" || agent === "codex-aisdk") return curateCodexModels(models);
+  if (agent === "codex") return curateCodexModels(models);
+  if (agent === "codex-aisdk") return withCodexMuseModels(curateCodexModels(models), Boolean(museSubscriptionKey()));
   if (agent === "grok") return curateGrokModels(models);
   if (agent === "fx") return curateFxModels(models);
   if (agent === "muse") return curateMuseModels(models);

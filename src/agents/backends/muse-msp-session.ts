@@ -566,14 +566,19 @@ export async function cmdMuseMspSession(argv: string[]): Promise<void> {
 
       function wire(c: MspClient): void {
         for (const method of ["item/started", "item/delta", "item/updated", "item/completed"]) {
-          c.onNotification(method, (params) => applyMuseViewEvent(method, params, sink, state));
+          c.onNotification(method, (params) => {
+            lastEventAt = Date.now();
+            applyMuseViewEvent(method, params, sink, state);
+          });
         }
         c.onNotification("turn/completed", (params) => {
+          lastEventAt = Date.now();
           const done = turnDone;
           turnDone = null;
           done?.(params);
         });
         c.onNotification("approval/requested", (params) => {
+          lastEventAt = Date.now();
           const approvalId = String(params?.approvalId ?? "");
           if (!approvalId || seenApprovals.has(approvalId)) return;
           seenApprovals.add(approvalId);
@@ -610,6 +615,7 @@ export async function cmdMuseMspSession(argv: string[]): Promise<void> {
             .catch(() => {});
         });
         c.onNotification("userInput/requested", (params) => {
+          lastEventAt = Date.now();
           const userInputId = String(params?.userInputId ?? "");
           if (!userInputId || seenUserInputs.has(userInputId)) return;
           seenUserInputs.add(userInputId);
@@ -642,8 +648,11 @@ export async function cmdMuseMspSession(argv: string[]): Promise<void> {
         exited = false;
         lastEventAt = Date.now();
         spawned.stdout.setEncoding("utf8");
+        // Raw bytes are NOT progress: muse serve keeps writing keepalives
+        // (~200 bytes / 20 s, measured 2026-09-04) while its view projection
+        // is dead, which kept `lastEventAt` fresh and the stall watchdog blind
+        // for half an hour. Only view-stream notifications count (see wire()).
         spawned.stdout.on("data", (chunk: string) => {
-          lastEventAt = Date.now();
           c.feed(chunk);
         });
         spawned.on("exit", (code, signal) => {
@@ -733,18 +742,22 @@ export async function cmdMuseMspSession(argv: string[]): Promise<void> {
         async interrupt() {
           const c = client;
           if (exited || !sessionId || !c) return;
-          try {
-            await c.request("turn/interrupt", { commandId: uuidv7(), sessionId });
-          } catch {}
           // A live serve answers an interrupt with `turn/completed`
           // (terminal cancelled) within about a second. When its view stream
           // is dead nothing arrives, and without this bound the turn stayed
           // open forever: busy spinner, every follow-up queued behind it.
+          // Armed BEFORE the request goes out: a serve whose stream is dead
+          // does not answer `turn/interrupt` either, and awaiting that reply
+          // first meant the timer was never armed (session fd89be61,
+          // 2026-09-04: 30 min busy, zero log lines).
           setTimeout(() => {
             if (!turnDone || client !== c) return;
             console.error(`muse-msp-session ${key}: no turn/completed ${MUSE_INTERRUPT_GRACE_MS / 1000}s after interrupt; restarting muse serve`);
             dropServe("interrupted, but muse serve sent no turn/completed; it has been restarted — send the message again to continue");
           }, MUSE_INTERRUPT_GRACE_MS);
+          try {
+            await c.request("turn/interrupt", { commandId: uuidv7(), sessionId });
+          } catch {}
         },
         async setModel(next) {
           if (!next || next === "auto" || !client) return;

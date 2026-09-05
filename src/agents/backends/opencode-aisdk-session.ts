@@ -85,6 +85,11 @@ function ensureOpencodeOnPath(): void {
   if (!cur.split(":").includes(dir)) process.env.PATH = dir + ":" + cur;
 }
 
+/** Managed interactive sessions have nobody in OpenCode's own UI to approve prompts. */
+export function managedOpencodeServerOptions() {
+  return { port: 0, config: { permission: "allow" as const } };
+}
+
 // "anthropic/claude-sonnet-4-6" → { providerID, modelID }. No slash → let the
 // server pick its configured default model.
 function modelRef(model: string): { providerID: string; modelID: string } | undefined {
@@ -550,7 +555,9 @@ export async function cmdOpencodeAisdkSession(argv: string[]): Promise<void> {
   // ports work transparently.
   let server: Awaited<ReturnType<typeof createOpencodeServer>>;
   try {
-    server = await createOpencodeServer({ port: 0 });
+    // OpenCode supports the string shorthand; the v1 SDK's generated Config
+    // type still only describes the older object form.
+    server = await createOpencodeServer(managedOpencodeServerOptions() as any);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error(`opencode-aisdk-session: failed to start opencode server: ${msg}`);

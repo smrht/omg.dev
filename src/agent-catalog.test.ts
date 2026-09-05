@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   accessibleModelsForAgent,
+  curateCodexModels,
+  withCodexMuseModels,
   curateCursorModels,
   curateOpenCodeModels,
   defaultModelForAgent,
@@ -254,4 +256,27 @@ describe("curateCursorModels", () => {
     const out = curateCursorModels(CURSOR_DISCOVERED);
     for (const model of out) expect(model).not.toMatch(/-(fast|xhigh|high|medium|low)$/);
   });
+});
+
+describe("Codex model catalog", () => {
+  test("keeps entitlement-proven Astra ahead of a stale discovery result", () => {
+    expect(curateCodexModels(["gpt-5.6-sol"])).toEqual(["gpt-6-astra", "gpt-5.6-sol"]);
+  });
+
+  test("muse-spark joins the codex-aisdk list only while a Muse subscription credential exists", () => {
+    expect(withCodexMuseModels(["gpt-6-astra", "gpt-5.6-sol"], true)).toEqual(["gpt-6-astra", "gpt-5.6-sol", "muse-spark-1.3", "muse-spark-1.2"]);
+    expect(withCodexMuseModels(["gpt-6-astra", "gpt-5.6-sol"], false)).toEqual(["gpt-6-astra", "gpt-5.6-sol"]);
+    expect(withCodexMuseModels(["muse-spark-1.3"], true)).toEqual(["muse-spark-1.3", "muse-spark-1.2"]);
+  });
+
+  test.each(["codex", "codex-aisdk"] as const)(
+    "%s offers Astra while Sol remains the default",
+    (key) => {
+      const item = listModelCatalog([codingAgent(key, true)]).find((entry) => entry.key === key);
+
+      expect(item?.models[0]).toBe("gpt-6-astra");
+      expect(item?.models).toContain("gpt-6-astra");
+      expect(item?.defaultModel).toBe("gpt-5.6-sol");
+    },
+  );
 });

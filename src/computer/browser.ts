@@ -58,6 +58,48 @@ let viewTargetId: string | null = null;
  */
 let viewStartedAt: number | null = null;
 const inspector = new BrowserInspector(async () => await agentView());
+const NAVIGATION_TIMEOUT_MS = 30_000;
+
+interface NavigationView {
+  navigate(url: string): Promise<void>;
+}
+
+interface NavigationRecoveryOptions {
+  timeoutMs?: number;
+  recover: () => void;
+}
+
+/**
+ * Bound Bun.WebView's exclusive navigation operation. A request can disappear
+ * while WebView keeps its internal operation pending; every later navigate()
+ * then fails with "navigation already pending" until the serve process exits.
+ * Closing only the agent-owned view clears that state without restarting the
+ * shared Chromium desktop or touching tabs opened directly by the person.
+ */
+export async function navigateWithRecovery(
+  target: NavigationView,
+  url: string,
+  options: NavigationRecoveryOptions,
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? NAVIGATION_TIMEOUT_MS;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      reject(new Error(`browser navigation timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+
+  try {
+    await Promise.race([target.navigate(url), timeout]);
+  } catch (error) {
+    if (timedOut) options.recover();
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 function webViewCtor(): (new (opts: unknown) => WebViewLike) | null {
   const ctor = (Bun as unknown as { WebView?: new (opts: unknown) => WebViewLike }).WebView;
@@ -156,7 +198,7 @@ export async function browserNavigate(url: string): Promise<{ url: string; title
   const v = await agentView();
   await focusAgentTab();
   await inspector.cancel("navigation");
-  await v.navigate(url);
+  await navigateWithRecovery(v, url, { recover: closeAgentView });
   await captureViewTarget(v);
   return { url: v.url, title: v.title };
 }
