@@ -89,7 +89,7 @@ describe("the session row's swipe actions (RailItem)", () => {
   test("archiving drops the row first and reconciles after", () => {
     const start = APP.indexOf("const archiveSession = useCallback(");
     expect(start).toBeGreaterThan(-1);
-    const body = APP.slice(start, start + 900);
+    const body = APP.slice(start, start + 1400);
     expect(body.indexOf("onRemove(sid);")).toBeLessThan(
       body.indexOf("closeSessionRequest"),
     );
