@@ -36,3 +36,18 @@ test('failed confirm requires a new preview and refreshes the measurement', asyn
   await ui.flushAsync(() => button('Bevestigen en stoppen').click());
   expect(ui.text()).toContain('Controle verlopen'); expect(refreshed).toBe(true);
 });
+test('force requires a new preview and separate explicit confirmation', async () => {
+  ui = mount(); const bodies: any[] = []; let confirms = 0;
+  const request = async <T,>(path: string, body: any): Promise<T> => {
+    bodies.push(body);
+    if (path.endsWith('confirm')) { confirms++; return { stopped: 1, remaining: 0, releasedBytes: 1 } as T; }
+    return { plan: { ...plan, live: false, force: !!body.force, busy: false }, token: body.force ? 'force-token' : 'normal-token' } as T;
+  };
+  ui.render(<SessionUsageControls row={{ ...row, live: false }} request={request} onChanged={() => {}} />);
+  await ui.flushAsync(() => button('Restprocessen stoppen').click());
+  await ui.flushAsync(() => button('Geforceerd stoppen controleren').click());
+  expect(confirms).toBe(0); expect(bodies[1].force).toBe(true);
+  expect(document.body.textContent).toContain('Niet-opgeslagen werk');
+  await ui.flushAsync(() => button('Ja, geforceerd stoppen').click());
+  expect(confirms).toBe(1); expect(bodies[2].token).toBe('force-token');
+});

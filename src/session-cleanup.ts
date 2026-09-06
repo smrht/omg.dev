@@ -3,40 +3,53 @@ import { readFile, readdir, readlink } from 'node:fs/promises';
 import { scanProcs, type ProcInfo, type SessionUsageRow } from './session-usage';
 
 export type CleanupTarget = { pid: number; startTicks: number; label: string; bytes: number; reason: string | null };
-export type CleanupPlan = { key: string; sessionId: string | null; title: string; live: boolean; busy: boolean; targets: CleanupTarget[]; blocked: string | null };
+export type CleanupPlan = { key: string; sessionId: string | null; title: string; live: boolean; busy: boolean; force?: boolean; targets: CleanupTarget[]; blocked: string | null };
 type Owner = { sessionId: string | null; tmuxName: string | null; cwd: string | null; pid?: number; busy?: boolean; managed?: boolean; persistent?: boolean; botId?: string; sourceKind?: string; parentSessionId?: string | null; parentNativeSessionId?: string | null; nativeSessionId?: string | null };
 
 const infrastructure = /^(systemd|tmux|tmux-server|sshd|init|login|dbus-daemon|chrome|chromium|chromium-browser|chrome_crashpad_handler|headless_shell|firefox|firefox-bin)$/;
 const nameOf = (p: ProcInfo) => p.argv[0]?.split('/').pop() ?? '';
 
-// Any listening TCP/UDP socket is conservatively shared. Failure to inspect
-// sockets fails closed, including when a descriptor cannot be read.
-async function listeningPids(procs: ProcInfo[]): Promise<Set<number>> {
-  const inodes = new Set<string>();
+// Force may stop an idle loopback OpenCode server in a closed worktree.
+// Other listeners and any active connection keep the process protected.
+export function socketBlocksCleanup(table: string, fields: string[], connections: string[][], allowIdleOpenCode: boolean): boolean {
+  if (!allowIdleOpenCode || !table.startsWith('tcp')) return true;
+  const [address, port] = fields[1]!.split(':');
+  if (!['0100007F', '00000000000000000000000001000000'].includes(address!)) return true;
+  return connections.some(c => c[2]?.split(':')[1] === port && !['0A', '06', '07'].includes(c[3]!));
+}
+async function listeningPids(procs: ProcInfo[], force = false): Promise<Set<number>> {
+  const inodes = new Map<string, { table: string; fields: string[] }>();
+  const connections: string[][] = [];
   for (const table of ['tcp', 'tcp6', 'udp', 'udp6']) {
     const rows = (await readFile(`/proc/net/${table}`, 'utf8')).trim().split('\n').slice(1);
     for (const row of rows) {
       const fields = row.trim().split(/\s+/);
-      if (table.startsWith('udp') || fields[3] === '0A') inodes.add(fields[9]!);
+      if (table.startsWith('tcp')) connections.push(fields);
+      if (table.startsWith('udp') || fields[3] === '0A') inodes.set(fields[9]!, { table, fields });
     }
   }
   const blocked = new Set<number>();
   await Promise.all(procs.map(async p => {
     try {
+      if (force && await readlink(`/proc/${p.pid}/ns/net`) !== await readlink('/proc/self/ns/net')) { blocked.add(p.pid); return; }
       const fds = await readdir(`/proc/${p.pid}/fd`);
       for (const fd of fds) {
         let link: string;
         try { link = await readlink(`/proc/${p.pid}/fd/${fd}`); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') blocked.add(p.pid); continue; }
         const inode = /^socket:\[(\d+)\]$/.exec(link)?.[1];
-        if (inode && inodes.has(inode)) blocked.add(p.pid);
+        const socket = inode && inodes.get(inode);
+        if (socket) {
+          const sameNetwork = await readlink(`/proc/${p.pid}/ns/net`) === await readlink('/proc/self/ns/net');
+          if (socketBlocksCleanup(socket.table, socket.fields, connections, force && sameNetwork && nameOf(p) === 'opencode')) blocked.add(p.pid);
+        }
       }
     } catch { blocked.add(p.pid); }
   }));
   return blocked;
 }
 
-export function planCleanup(row: SessionUsageRow, owners: Owner[], procs: ProcInfo[], listeners: Set<number>, serverPid = process.pid): CleanupPlan {
+export function planCleanup(row: SessionUsageRow, owners: Owner[], procs: ProcInfo[], listeners: Set<number>, serverPid = process.pid, force = false): CleanupPlan {
   const byPid = new Map(procs.map(p => [p.pid, p]));
   const owner = row.live ? owners.find(s => (row.sessionId && s.sessionId === row.sessionId) || (row.managedName && s.tmuxName === row.managedName)) : undefined;
   const selfAncestors = new Set<number>();
@@ -64,8 +77,17 @@ export function planCleanup(row: SessionUsageRow, owners: Owner[], procs: ProcIn
     if (p.env.sessionId && p.env.sessionId !== row.sessionId) return false;
     return !!((scope && scope === row.managedName) || (row.sessionId && p.env.sessionId === row.sessionId) || (row.managedName && p.env.managedName === row.managedName));
   };
+  const eligible = (p: ProcInfo): boolean => {
+    if (strong(p)) return true;
+    if (!force || row.live || !row.orphan || !row.worktreePath || p.cwd !== row.worktreePath) return false;
+    const scope = /\/lfg-agent-([^/]+)\.service(?:\/|$)/.exec(p.cgroup)?.[1];
+    if (scope && scope !== row.managedName) return false;
+    // Stale labels from closed runs are allowed only in the exact worktree.
+    if (otherOwners.some(o => (o.sessionId && o.sessionId === p.env.sessionId) || (o.tmuxName && o.tmuxName === p.env.managedName))) return false;
+    return true;
+  };
   for (const p of procs) {
-    if (!strong(p) || belongsToOtherLiveOwner(p) || selfAncestors.has(p.pid) || infrastructure.test(nameOf(p)) || listeners.has(p.pid) || otherOwners.some(s => s.pid === p.pid)) protectedPids.add(p.pid);
+    if (!eligible(p) || belongsToOtherLiveOwner(p) || selfAncestors.has(p.pid) || infrastructure.test(nameOf(p)) || listeners.has(p.pid) || otherOwners.some(s => s.pid === p.pid)) protectedPids.add(p.pid);
   }
   // A parent's termination (or its systemd MainPID exiting) can kill children
   // and cgroup peers. Protect those parents/scopes too, not just the leaf.
@@ -82,7 +104,7 @@ export function planCleanup(row: SessionUsageRow, owners: Owner[], procs: ProcIn
     const p = byPid.get(item.pid);
     let reason: string | null = null;
     if (!p || !p.startTicks) reason = 'Proces verdwenen of niet leesbaar';
-    else if (!strong(p)) reason = 'Eigenaarschap niet bewezen';
+    else if (!eligible(p)) reason = 'Eigenaarschap niet bewezen';
     else if (belongsToOtherLiveOwner(p)) reason = 'Hoort bij een andere actieve sessie';
     else if (protectedPids.has(p.pid) || (protectedScopes.has(exactScope) && inOwnedScope(p))) reason = 'Gedeelde dienst, browser, netwerkserver of beschermde afhankelijkheid';
     else if (otherOwners.some(s => s.cwd && s.cwd === row.worktreePath)) reason = 'Werkmap wordt ook door een andere sessie gebruikt';
@@ -93,22 +115,23 @@ export function planCleanup(row: SessionUsageRow, owners: Owner[], procs: ProcIn
   if (row.live && (!owner?.managed || !targets.some(t => t.pid === owner.pid && !t.reason))) blocked = 'De agent kan niet veilig worden afgesloten';
   if (row.live && targets.some(t => t.reason)) blocked = 'Deze sessie heeft beschermde processen; afsluiten is hier geblokkeerd';
   if (row.live && otherOwners.some(s => s.parentSessionId === row.sessionId || (owner?.nativeSessionId && s.parentNativeSessionId === owner.nativeSessionId))) blocked = "Deze sessie heeft nog een open deelsessie. Sluit die eerst af.";
+  if (force && (row.live || !row.orphan)) blocked = 'Geforceerd stoppen kan alleen bij afgesloten gesprekken';
   if (owner?.persistent || owner?.botId || owner?.sourceKind === "routine") blocked = "Vaste bots en routines beheer je bij hun eigen instellingen";
-  return { key: row.key, sessionId: row.sessionId, title: row.title ?? row.managedName ?? row.key, live: row.live, busy: !!owner?.busy, targets, blocked };
+  return { key: row.key, sessionId: row.sessionId, title: row.title ?? row.managedName ?? row.key, live: row.live, busy: !!owner?.busy, force, targets, blocked };
 }
 
-export async function inspectCleanup(row: SessionUsageRow, owners: Owner[]) {
+export async function inspectCleanup(row: SessionUsageRow, owners: Owner[], force = false) {
   const procs = await scanProcs();
-  return planCleanup(row, owners, procs, await listeningPids(procs));
+  return planCleanup(row, owners, procs, await listeningPids(procs, force), process.pid, force);
 }
 
 export function cleanupFingerprint(plan: CleanupPlan): string {
-  return JSON.stringify([plan.key, plan.sessionId, plan.live, plan.busy, plan.blocked, plan.targets.map(t => [t.pid, t.startTicks, t.reason]).sort((a, b) => Number(a[0]) - Number(b[0]))]);
+  return JSON.stringify([!!plan.force, plan.key, plan.sessionId, plan.live, plan.busy, plan.blocked, plan.targets.map(t => [t.pid, t.startTicks, t.reason]).sort((a, b) => Number(a[0]) - Number(b[0]))]);
 }
 
 // Linux pidfds bind the signal to the actual process, even if its PID is reused
 // between inspection and signalling. No shell, no argv/environ in output.
-export async function terminateTargets(targets: CleanupTarget[]) {
+export async function terminateTargets(targets: CleanupTarget[], force = false) {
   const child = Bun.spawn(['python3', '-c', `
 import os, sys, json, signal
 results=[]
@@ -119,14 +142,14 @@ for t in json.load(sys.stdin):
         with open('/proc/%s/stat'%t['pid']) as f: raw=f.read()
         ticks=int(raw[raw.rfind(')')+2:].split()[19])
         if ticks != t['startTicks']: raise ValueError('identity changed')
-        signal.pidfd_send_signal(fd, signal.SIGTERM)
+        signal.pidfd_send_signal(fd, signal.SIGKILL if sys.argv[1] == 'kill' else signal.SIGTERM)
         results.append({'pid':t['pid'],'sent':True})
     except Exception:
         results.append({'pid':t['pid'],'sent':False})
     finally:
         if fd is not None: os.close(fd)
 print(json.dumps(results))
-`], { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
+`, force ? 'kill' : 'term'], { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
   child.stdin.write(JSON.stringify(targets.filter(t => !t.reason)));
   child.stdin.end();
   const output = await new Response(child.stdout).text();
@@ -142,7 +165,7 @@ export function createCleanupHandler(deps: {
   close: (sessionId: string, owner: Owner) => Promise<void>;
   refresh: () => Promise<unknown>;
 }) {
-  const plans = new Map<string, { fingerprint: string; key: string; expires: number }>();
+  const plans = new Map<string, { fingerprint: string; key: string; force: boolean; expires: number }>();
   let stopping = false;
   const reply = (body: unknown, status = 200) => Response.json(body, { status });
   return async (req: Request, action: 'preview' | 'confirm') => {
@@ -152,26 +175,27 @@ export function createCleanupHandler(deps: {
       if (!body || typeof body !== 'object') return reply({ error: 'Ongeldig verzoek' }, 400);
       for (const [key, value] of plans) if (value.expires < Date.now()) plans.delete(key);
       let key: string;
+      let force = false;
       let expected: string | undefined;
       if (action === 'confirm') {
         if (stopping) return reply({ error: 'Er wordt al een sessie gestopt' }, 409);
         const stored = typeof body.token === 'string' ? plans.get(body.token) : undefined;
         if (!stored) return reply({ error: 'Controle verlopen. Controleer opnieuw.' }, 409);
         plans.delete(body.token as string); // one use, including rejected confirmations
-        key = stored.key; expected = stored.fingerprint;
+        key = stored.key; force = stored.force; expected = stored.fingerprint;
       } else {
         if (typeof body.key !== 'string' || body.key.length > 200) return reply({ error: 'Ongeldige sessie' }, 400);
-        key = body.key;
+        key = body.key; force = body.force === true;
       }
       const snapshot = await deps.snapshot(); // roster failure must fail closed
       const row = snapshot.rows.find(r => r.key === key);
       if (!row) return reply({ error: 'Sessie niet meer in het overzicht. Vernieuw de meting.' }, 409);
-      const plan = await (deps.inspect ?? inspectCleanup)(row, snapshot.owners);
+      const plan = await (deps.inspect ?? inspectCleanup)(row, snapshot.owners, force);
       const fingerprint = cleanupFingerprint(plan);
       if (action === 'preview') {
         if (plans.size >= 200) plans.delete(plans.keys().next().value!);
         const token = crypto.randomUUID();
-        plans.set(token, { fingerprint, key, expires: Date.now() + 60_000 });
+        plans.set(token, { fingerprint, key, force, expires: Date.now() + 60_000 });
         return reply({ plan, token });
       }
       if (expected !== fingerprint) return reply({ error: 'De sessie of processen zijn veranderd. Controleer opnieuw.' }, 409);
@@ -180,7 +204,7 @@ export function createCleanupHandler(deps: {
       if (stopping) return reply({ error: 'Er wordt al een sessie gestopt' }, 409);
       stopping = true;
       try {
-        const signals = await (deps.terminate ?? terminateTargets)(plan.targets);
+        const signals = await (deps.terminate ?? terminateTargets)(plan.targets, force);
         await Bun.sleep(1200);
         const remaining = new Map((await scanProcs()).map(p => [p.pid, p.startTicks]));
         const stopped = plan.targets.filter(t => !t.reason && remaining.get(t.pid) !== t.startTicks);
@@ -193,7 +217,7 @@ export function createCleanupHandler(deps: {
         return reply({ closed, stopped: stopped.length, requested: signals.filter(s => s.sent).length, remaining: plan.targets.filter(t => remaining.get(t.pid) === t.startTicks).length, releasedBytes: stopped.reduce((n, t) => n + t.bytes, 0), usage });
       } finally { stopping = false; }
     } catch {
-      return reply({ error: 'Controle of afsluiten mislukt. Vernieuw het overzicht; er wordt niet hard gestopt.' }, 503);
+      return reply({ error: 'Controle of afsluiten mislukt. Vernieuw het overzicht en controleer opnieuw.' }, 503);
     }
   };
 }

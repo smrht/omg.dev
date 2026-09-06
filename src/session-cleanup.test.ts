@@ -82,3 +82,42 @@ test('an orphan with a missing id cannot claim an unrelated id-less live owner',
   const procs = [proc(44, { env: {} }), proc(10, { ppid: 44, env: { managedName: 'lfg-test' } })];
   expect(planCleanup(orphan, owners, procs, new Set(), 999).targets[0]!.reason).not.toBeNull();
 });
+test('force permits exact closed worktree but protects live owners, browsers and listeners', () => {
+  const weak = proc(10, { env: {} });
+  const force = (r = row(), owners: any[] = [], p = weak, listeners = new Set<number>()) => planCleanup(r, owners, [p], listeners, 999, true);
+  expect(force().targets[0]!.reason).toBeNull();
+  expect(force({ ...row(), live: true }).blocked).not.toBeNull();
+  expect(force(row(), [{ sessionId: 'other', tmuxName: 'lfg-other', cwd: weak.cwd }]).targets[0]!.reason).not.toBeNull();
+  for (const extra of [{ cwd: '/tmp/lfg-test-other' }, { argv: ['chromium'] }, { cgroup: '/lfg-agent-other.service' }, { env: { sessionId: 'other' } }]) {
+    expect(force(row(), [{ sessionId: 'other', tmuxName: 'lfg-other', cwd: '/other' }], proc(10, { ...weak, ...extra })).targets[0]!.reason).not.toBeNull();
+  }
+  expect(force(row(), [], weak, new Set([10])).targets[0]!.reason).not.toBeNull();
+  expect(cleanupFingerprint(force())).not.toBe(cleanupFingerprint({ ...force(), force: false }));
+});
+test('only idle loopback OpenCode listeners can bypass listener protection', async () => {
+  const { socketBlocksCleanup: blocks } = await import('./session-cleanup');
+  const socket = ['0:', '0100007F:A123', '00000000:0000', '0A'];
+  expect(blocks('tcp', socket, [], true)).toBe(false);
+  expect(blocks('tcp', socket, [], false)).toBe(true);
+  expect(blocks('udp', socket, [], true)).toBe(true);
+  expect(blocks('tcp', ['0:', '00000000:A123', '', '0A'], [], true)).toBe(true);
+  expect(blocks('tcp', socket, [['0:', '0100007F:1234', '0100007F:A123', '01']], true)).toBe(true);
+});
+test('real hard stop kills an isolated process that ignores SIGTERM', async () => {
+  const child = Bun.spawn(['python3', '-u', '-c', 'import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); print("ready",flush=True); time.sleep(60)'], { stdout: 'pipe', stderr: 'ignore' });
+  try {
+    await child.stdout.getReader().read();
+    const p = (await scanProcs()).find(p => p.pid === child.pid)!;
+    const t = { pid: p.pid, startTicks: p.startTicks, label: 'test', bytes: 1, reason: null };
+    await terminateTargets([t]); await Bun.sleep(40); expect(child.exitCode).toBeNull();
+    await terminateTargets([t], true); await child.exited; expect(child.signalCode).toBe('SIGKILL');
+  } finally { if (child.exitCode === null) child.kill(); }
+});
+test('confirm cannot upgrade a normal token to force', async () => {
+  const modes: boolean[] = [];
+  const handler = createCleanupHandler({ snapshot: async () => ({ rows: [row()], owners: [] }), inspect: async (r, owners, force = false) => { modes.push(force); return planCleanup(r, owners, [proc(10, {env:{}})], new Set(), 999, force); }, terminate: async () => { throw new Error('Must not signal'); }, close: async () => {}, refresh: async () => ({}) });
+  const request = (body: unknown) => new Request('http://localhost', { method:'POST', headers:{'Content-Type':'application/json'},body:JSON.stringify(body) });
+  const preview = await (await handler(request({key:sid}), 'preview')).json() as {token:string};
+  expect((await handler(request({token:preview.token,force:true}), 'confirm')).status).toBe(409);
+  expect(modes).toEqual([false,false]);
+});
