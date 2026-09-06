@@ -55,3 +55,26 @@ test("connection status replaces the greeting and tapping retries until recovery
   ui.flush(() => button.click());
   expect(notifications).toBe(1);
 });
+
+test("the greeting uses confirmed cloud lifecycle states during connection", () => {
+  const props = { brand: <span>omg</span>, viewerName: "Benny", busyCount: 0, onOpenNotifications: () => {} };
+  for (const [lifecycle, message] of [["starting", "Starting your computer…"], ["waking", "Waking your computer…"], ["failed", "Could not start your computer"], ["paused", "Computer paused"]] as const) {
+    ui.render(<RuntimeAvailabilityContext.Provider value={{ lifecycle, status: "connecting", ready: false, loading: true, error: null, retry: () => {} }}><AskProvider><LiveHeaderContext {...props} intro /></AskProvider></RuntimeAvailabilityContext.Provider>);
+    expect(ui.query("button")?.getAttribute("aria-label")).toBe(message);
+    expect(ui.text()).not.toContain("Welcome");
+  }
+});
+
+test("a ready cloud keeps connecting until the client recovers", () => {
+  const props = { brand: <span>omg</span>, viewerName: "Benny", busyCount: 0, onOpenNotifications: () => {} };
+  const render = (ready: boolean, error: string | null) => ui.render(
+    <RuntimeAvailabilityContext.Provider value={{ lifecycle: "ready", status: "live", ready, loading: false, error, retry: () => {} }}>
+      <AskProvider><LiveHeaderContext {...props} intro={false} /></AskProvider>
+    </RuntimeAvailabilityContext.Provider>,
+  );
+  render(false, "cloud_runtime_unavailable");
+  expect(ui.text()).toContain("Connecting…");
+  expect(ui.text()).not.toContain("Connection unavailable");
+  render(true, null);
+  expect(ui.text()).toContain("Welcome, Benny");
+});

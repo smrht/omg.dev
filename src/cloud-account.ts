@@ -50,6 +50,7 @@ export type CloudAccountStatus = {
    * other; the UI uses this to show it once, as "This computer".
    */
   thisBoxId: string | null;
+  localName?: string;
 };
 
 /** One row of GET /api/cli/computer/status on the control plane. */
@@ -83,6 +84,8 @@ export interface CloudAccountOptions {
   pendingTtlMs?: number;
   /** This box's relay binding id, read fresh each time. Null when not paired. */
   thisBoxId?: () => string | null;
+  localName?: () => string;
+  renameLocal?: (name: string) => Promise<void>;
 }
 
 export interface CloudAccount {
@@ -323,13 +326,14 @@ export function createCloudAccount(options: CloudAccountOptions = {}): CloudAcco
       kind: creds?.kind ?? null,
       authUrl,
       thisBoxId: options.thisBoxId?.() ?? null,
+      localName: options.localName?.() ?? "",
     };
   }
 
   async function listComputers(): Promise<CloudComputerList> {
     const token = await getAccessToken();
     if (!token) throw new CloudAccountError("Not signed in to omg Cloud.", 401);
-    const response = await fetchImpl(`${controlPlaneUrl}/api/cli/computer/status`, {
+    const response = await fetchImpl(`${controlPlaneUrl}/api/cli/computer/status?passive=true`, {
       headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
     });
     const text = await response.text().catch(() => "");
@@ -453,6 +457,57 @@ export function createCloudAccount(options: CloudAccountOptions = {}): CloudAcco
           return json({ ok: true });
         }
         if (path === "/api/cloud/computers" && req.method === "GET") return json(await listComputers());
+        const action = ({
+          "/api/cloud/pairing": "connect",
+          "/api/cloud/rename": "rename",
+          "/api/cloud/provision": "provision",
+        } as Record<string, string>)[path];
+        if (action && req.method === "POST") {
+          // Browser fetch metadata remains same-origin across a TLS-terminating
+          // reverse proxy. Without it, require the literal request origin.
+          const site = req.headers.get("Sec-Fetch-Site");
+          const origin = req.headers.get("Origin");
+          if ((site && site !== "same-origin" && site !== "none") ||
+              (origin && origin !== url.origin && site !== "same-origin")) {
+            throw new CloudAccountError("Cloud machine actions require a same-origin request.", 403);
+          }
+          if (req.headers.get("Content-Type")?.split(";")[0]?.trim().toLowerCase() !== "application/json") {
+            throw new CloudAccountError("Cloud machine actions require application/json.", 415);
+          }
+          let body: Record<string, unknown> = {};
+          if (action === "rename") {
+            const input = await req.json().catch(() => null) as { name?: unknown; bindingId?: unknown } | null;
+            if (typeof input?.name !== "string" || !input.name.trim() || input.name.trim().length > 80 || /[\u0000-\u001f\u007f]/.test(input.name)) {
+              throw new CloudAccountError("Use a machine name with 1 to 80 characters and no control characters.", 400);
+            }
+            if (input.bindingId !== undefined && (typeof input.bindingId !== "string" || !input.bindingId.trim())) {
+              throw new CloudAccountError("A machine id is required.", 400);
+            }
+            let bindingId = input.bindingId ?? "cloud";
+            if (bindingId === "local") {
+              // A paired box uses the account name. An unpaired box uses its
+              // existing local settings store, so no cloud login is required.
+              bindingId = options.thisBoxId?.() ?? "local";
+              if (bindingId === "local") {
+                if (!options.renameLocal) throw new CloudAccountError("Local rename is unavailable.", 503);
+                await options.renameLocal(input.name.trim());
+                return json({ name: input.name.trim() });
+              }
+            }
+            body = { name: input.name.trim(), ...(input.bindingId === undefined ? {} : { bindingId }) };
+          }
+          const token = await getAccessToken();
+          if (!token) throw new CloudAccountError("Not signed in to omg Cloud.", 401);
+          const response = await fetchImpl(`${controlPlaneUrl}/api/cli/computer/${action}`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          return new Response(await response.text(), {
+            status: response.status,
+            headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+          });
+        }
         return json({ error: "not found" }, { status: 404 });
       } catch (error) {
         const status = error instanceof CloudAccountError ? error.status : 500;

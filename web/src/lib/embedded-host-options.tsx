@@ -95,6 +95,8 @@ export interface EmbeddedHostOptions {
 
 /** One machine in a host-supplied list. `local` is the box serving the page. */
 export interface HostMachine {
+  /** False for machines shared by another owner. */
+  canRename?: boolean;
   id: string;
   name: string;
   kind: "cloud" | "connected" | "local";
@@ -104,6 +106,9 @@ export interface HostMachine {
 }
 
 export interface HostMachines {
+  /** Account-owned machine actions. */
+  onAdd?: () => void;
+  onRename?: (id: string) => void;
   machines: HostMachine[];
   /** The id the surface is currently pointed at. */
   activeId: string;

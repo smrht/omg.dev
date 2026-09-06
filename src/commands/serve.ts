@@ -3912,7 +3912,11 @@ export async function cmdServe() {
     subscribeAgentRun,
   });
   const connectManager = createConnectManager();
-  const cloudAccount = createCloudAccount({ thisBoxId: readRelayBoxId });
+  const cloudAccount = createCloudAccount({
+    thisBoxId: readRelayBoxId,
+    localName: () => getGlobalSettingsSync().machineName,
+    renameLocal: async (machineName) => { await setGlobalSettings({ machineName }); },
+  });
   const cloudMachineProxy = createCloudMachineProxy({ account: cloudAccount });
   const server = Bun.serve<AppSocketData>({
     port: PORT,
@@ -5142,7 +5146,10 @@ a{color:#60a5fa}
         path === "/api/cloud/callback" ||
         path === "/api/cloud/token" ||
         path === "/api/cloud/logout" ||
-        path === "/api/cloud/computers"
+        path === "/api/cloud/computers" ||
+        path === "/api/cloud/pairing" ||
+        path === "/api/cloud/rename" ||
+        path === "/api/cloud/provision"
       ) {
         const handled = await cloudAccount.handleRequest(req, url);
         if (path === "/api/cloud/logout") cloudMachineProxy.reset();
@@ -5220,6 +5227,12 @@ a{color:#60a5fa}
         if (req.method === "POST") {
           const b = (await req.json().catch(() => null)) as Partial<GlobalSettings> | null;
           const patch: Partial<GlobalSettings> = {};
+          if (b?.machineName !== undefined) {
+            if (typeof b.machineName !== "string" || b.machineName.trim().length > 80 || /[\u0000-\u001f\u007f]/.test(b.machineName)) {
+              return err(400, "Use a machine name with up to 80 characters and no control characters.");
+            }
+            patch.machineName = b.machineName.trim();
+          }
           if (typeof b?.timeZone === "string") {
             const timeZone = b.timeZone.trim();
             if (!validTimeZone(timeZone)) return err(400, `invalid timezone "${timeZone}"`);

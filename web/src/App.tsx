@@ -1,9 +1,10 @@
 import { SessionUsageControls } from "./components/session-usage-controls";
+import { useRuntimeLifecycle } from "./lib/runtime-lifecycle";
 import { LiveHeaderContext } from "./components/live-header-context";
 import { activeMachine } from "./lib/machines";
 import { useHeaderProfile } from "./lib/header-profile";
 import { RuntimeAvailabilityContext, useRuntimeAvailability, shouldReloadRuntime } from "./lib/runtime-availability";
-import { RuntimeRecovery, RuntimeEmptyState } from "./components/runtime-recovery";
+import { RuntimeRecovery, RuntimeEmptyState, RuntimeStatusBrand, RuntimeStatusDot } from "./components/runtime-recovery";
 import { AutoAgentPage } from "./components/auto-agent-page";
 import { Component, createContext, type ComponentProps, forwardRef, memo, Suspense, useCallback, useContext, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
@@ -47,6 +48,7 @@ import { OmgBrandMark, omgBrandToneClass } from "./components/omg-brand-mark";
 import {
   api,
   isAgentLimitError,
+  isMissingSessionError,
   isPlanLimitError,
   omgAssetUrl,
   omgFetch,
@@ -961,6 +963,14 @@ const ViewerIdentityContext = createContext<string | null>(null);
  * than guessing.
  */
 const SendIdentityContext = createContext<string | null>(null);
+/**
+ * Undo for the optimistic archive. `removeSession` tombstones a sid so the 5s
+ * poll cannot resurrect a card the user just archived. That tombstone has no
+ * expiry, so an archive request that FAILS would otherwise hide a live session
+ * until the page is reloaded. Every archive path calls this on failure to drop
+ * the tombstone; the next refresh then puts the session back.
+ */
+const SessionRestoreContext = createContext<(sid: string) => void>(() => {});
 const BotUnreadContext = createContext<{
   conversations: BotConversationUnread[];
   any: boolean;
@@ -6478,6 +6488,19 @@ export function App() {
     setSessions((prev) => prev.filter((s) => s.sessionId !== sid));
   }, []);
 
+  // Undo for the above. The optimistic archive drops the card before the
+  // server has answered; when the server refuses, the tombstone has to go or
+  // the session stays invisible for the rest of the page's life. Dropping the
+  // sid is enough — the caller's refresh re-adds the session row.
+  const restoreSession = useCallback((sid: string) => {
+    setRemovedSids((prev) => {
+      if (!prev.has(sid)) return prev;
+      const next = new Set(prev);
+      next.delete(sid);
+      return next;
+    });
+  }, []);
+
   const hideToastedFinding = useCallback((id: string) => {
     setToastedFindingIds((prev) => {
       if (prev.has(id)) return prev;
@@ -7416,6 +7439,12 @@ export function App() {
       cancelled = true;
     };
   }, [useWsLive, liveStatus, loadCore]);
+
+  const runtimeReady = computerVersionReport !== null && computerVersionReport.generation === omgTransportGeneration();
+  const runtimeLifecycle = useRuntimeLifecycle(
+    loading || !runtimeReady || !!error || (useWsLive && wsLiveStream.connection.status !== "live"),
+    omgTransportGeneration(),
+  );
 
   const retryRuntime = useCallback(() => {
     if (loading) return;
@@ -8758,6 +8787,7 @@ export function App() {
     <AgentAccessModeContext.Provider
       value={embedded ? "connected-or-opencode" : "configured"}
     >
+    <SessionRestoreContext.Provider value={restoreSession}>
     <CodingAgentsContext.Provider value={codingAgents}>
     <CodingAgentAuthContext.Provider value={codingAgentAuthFlow}>
     <AgentModelCatalogContext.Provider value={modelCatalog}>
@@ -8772,10 +8802,11 @@ export function App() {
     <BotDirectoryContext.Provider value={botDirectory}>
     <ViewerIdentityContext.Provider value={viewerParticipantId}>
     <RuntimeAvailabilityContext.Provider value={{
+      lifecycle: runtimeLifecycle,
       status: useWsLive ? wsLiveStream.connection.status : "live",
       transportLive: useWsLive && wsLiveStream.connection.status === "live",
       loading,
-      ready: computerVersionReport !== null && computerVersionReport.generation === omgTransportGeneration(),
+      ready: runtimeReady,
       error,
       retry: retryRuntime,
     }}>
@@ -9092,7 +9123,9 @@ export function App() {
 
       {embedded ? null : <PwaInstallCallout />}
 
-      {isMobile && isPrimarySurfaceTab(tab) ? null : <RuntimeRecovery />}
+      {/* The desktop workspace shows this in the rail's brand row instead, so
+          the line does not sit unaligned above the layout and push it down. */}
+      {(isMobile && isPrimarySurfaceTab(tab)) || liveDesktopWorkspace ? null : <RuntimeRecovery />}
 
       </div>
       )}
@@ -9706,6 +9739,7 @@ export function App() {
     </AgentModelCatalogContext.Provider>
     </CodingAgentAuthContext.Provider>
     </CodingAgentsContext.Provider>
+    </SessionRestoreContext.Provider>
     </AgentAccessModeContext.Provider>
   );
 }
@@ -11530,8 +11564,10 @@ function LiveView({
   // swapping the list for rail rows dropped it. Same call the session menu
   // makes: drop it from the list now so the gesture feels immediate, then let
   // the refresh reconcile. A session that already ended 404s, which is not an
-  // error the person swiping needs to hear about.
+  // error the person swiping needs to hear about. Any other failure rolls the
+  // row back, because the tombstone has no expiry of its own.
   const appDialog = useAppDialog();
+  const restoreSession = useContext(SessionRestoreContext);
   // A swipe is not consent on its own: the stop-and-archive confirm runs here
   // before the row disappears. The session menus confirm in-place instead
   // (DoubleConfirmAction), so they never route through this callback.
@@ -11549,13 +11585,20 @@ function LiveView({
       onRemove(sid);
       try {
         await closeSessionRequest(sid, "mobile_swipe_archive");
-      } catch {
-        /* already gone — the refresh below is the source of truth */
+      } catch (e) {
+        // A session that already ended answers 404, and the swipe still did
+        // what the person wanted, so that one stays silent. Anything else
+        // means the session is still live: put the row back rather than
+        // leaving it tombstoned until reload.
+        if (!isMissingSessionError(e)) {
+          restoreSession(sid);
+          toast.error(e instanceof Error ? e.message : "Couldn't archive session");
+        }
       } finally {
         await onRefresh().catch(() => {});
       }
     },
-    [appDialog, onRemove, onRefresh],
+    [appDialog, onRemove, onRefresh, restoreSession],
   );
 
   // Opening a session from the list navigates; the view below follows the URL.
@@ -12633,6 +12676,7 @@ function RailStage({
     },
     [bySid, onRefresh],
   );
+  const restoreSession = useContext(SessionRestoreContext);
   const closeSession = useCallback(
     async (sid: string | null) => {
       const session = sid ? bySid.get(sid) : null;
@@ -12645,18 +12689,26 @@ function RailStage({
       });
       if (!confirmed) return;
       closeColumn(sid);
+      // Optimistic: the row goes now, like the swipe and the session menu do.
+      // Waiting for the round trip left the card sitting under a dialog the
+      // user had already dismissed. A 404 means the session had already
+      // ended, so the outcome is the one they asked for; anything else puts
+      // the row back.
+      onRemove(sid);
       try {
         await closeSessionRequest(sid, "live_keyboard_shift_e");
-        onRemove(sid);
       } catch (e) {
-        toast.error(e instanceof Error ? e.message : "Couldn't archive session");
+        if (!isMissingSessionError(e)) {
+          restoreSession(sid);
+          toast.error(e instanceof Error ? e.message : "Couldn't archive session");
+        }
       } finally {
         // Outside the try — an onRefresh rejection here would escape the
         // handler entirely rather than being reported by the catch above.
         await onRefresh().catch(() => {});
       }
     },
-    [appDialog, bySid, closeColumn, onRemove, onRefresh],
+    [appDialog, bySid, closeColumn, onRemove, onRefresh, restoreSession],
   );
 
   const openTerminal = useContext(SessionTerminalContext);
@@ -13182,6 +13234,7 @@ function RailStage({
             >
               <PanelLeftOpen className="size-4" />
             </button>
+            <RuntimeStatusDot />
             <button
               type="button"
               onClick={startNew}
@@ -13202,7 +13255,9 @@ function RailStage({
             {/* Hosted replaces the LFG mark with omg.dev and moves project
                 scope to the action row so the lockup always has room. */}
             <div className="flex items-center gap-1.5">
-              <ProductBrand hosted={hosted} />
+              <RuntimeStatusBrand>
+                <ProductBrand hosted={hosted} />
+              </RuntimeStatusBrand>
               {/* Folders, not a filter. This used to be the scope control and
                   wore the current folder's name, which made it read as "you
                   are here" while also being the only way to add a folder.
@@ -16348,6 +16403,7 @@ function useSessionActions({
   onError: (error: string | null) => void;
 }) {
   const [forkMode, setForkMode] = useState<"fork" | "continue" | null>(null);
+  const restoreSession = useContext(SessionRestoreContext);
   const sid = session.sessionId;
   const assignee = users.find((user) => user.email === session.assignedUser);
 
@@ -16394,7 +16450,13 @@ function useSessionActions({
     try {
       await closeSessionRequest(sid, "session_menu");
     } catch (err) {
-      onError(err instanceof Error ? err.message : String(err));
+      // 404 means the session had already ended, which is the outcome the
+      // user asked for. Any other refusal leaves it live, so undo the
+      // optimistic removal instead of hiding it until the page reloads.
+      if (!isMissingSessionError(err)) {
+        restoreSession(sid);
+        onError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
       await onRefresh().catch((err) =>
         onError(err instanceof Error ? err.message : String(err)),
@@ -17904,6 +17966,8 @@ const SessionCard = memo(function SessionCard({
     return () => ro.disconnect();
   }, []);
 
+  const restoreSession = useContext(SessionRestoreContext);
+
   const setTransform = (pxX: number, pxY: number) => {
     const el = sectionRef.current;
     if (!el) return;
@@ -17922,8 +17986,14 @@ const SessionCard = memo(function SessionCard({
     // wanted — the card is gone and the refresh below reconciles the truth.
     try {
       await closeSessionRequest(sid, "mobile_swipe_archive");
-    } catch {
-      /* already gone — the refresh below is the source of truth */
+    } catch (err) {
+      // 404 is "already gone", which is what the swipe asked for. Any other
+      // refusal means the session is still live, so put the card back — the
+      // tombstone set by onRemove has no expiry of its own.
+      if (!isMissingSessionError(err)) {
+        restoreSession(sid);
+        toast.error(err instanceof Error ? err.message : "Couldn't archive session");
+      }
     } finally {
       await onRefresh().catch(() => {});
     }
@@ -22658,16 +22728,21 @@ function NewSessionDialog({
         />
       )}
 
-      <ThinkingLevelPill
-        agent={agent}
-        value={thinkingLevel}
-        levels={thinkingLevels}
-        onChange={changeComposerThinkingLevel}
-        flat={variant === "inline"}
-        immersive
-      />
+      {/* Tibo mode pins Fast plus High, so its own pill is the single control
+          for both. Showing the thinking and Fast pills next to it would offer
+          two more controls that only restate what Tibo already decided. */}
+      {tiboModeActive ? null : (
+        <ThinkingLevelPill
+          agent={agent}
+          value={thinkingLevel}
+          levels={thinkingLevels}
+          onChange={changeComposerThinkingLevel}
+          flat={variant === "inline"}
+          immersive
+        />
+      )}
 
-      {fastModeAvailable ? (
+      {fastModeAvailable && !tiboModeActive ? (
         <FastModePill
           enabled={fastModeEnabled}
           onToggle={() => setFastMode(!fastModeEnabled)}
@@ -22675,10 +22750,12 @@ function NewSessionDialog({
         />
       ) : null}
 
-      {agent === "codex" || agent === "codex-aisdk" ? (
+      {/* The pill only appears when the agent and the model can actually run
+          Tibo mode. A permanently disabled pill taught nobody which model to
+          pick, so an unsupported model now shows no control at all. */}
+      {tiboModeAvailable ? (
         <TiboModePill
           enabled={tiboModeActive}
-          available={tiboModeAvailable}
           onToggle={() => setTiboMode(!tiboMode)}
           flat={variant === "inline"}
         />
@@ -24126,22 +24203,19 @@ function FastModePill({
   );
 }
 
+// Only rendered when Tibo mode is available, so there is no disabled state.
 function TiboModePill({
   enabled,
-  available,
   onToggle,
   flat = false,
 }: {
   enabled: boolean;
-  available: boolean;
   onToggle: () => void;
   flat?: boolean;
 }) {
-  const description = available
-    ? enabled
-      ? "Tibo mode is on: Fast service tier and High thinking"
-      : "Turn on Tibo mode: Fast service tier and High thinking"
-    : "Tibo mode requires a GPT-5.4, GPT-5.5, or GPT-5.6 Codex model";
+  const description = enabled
+    ? "Tibo mode is on: Fast service tier and High thinking"
+    : "Turn on Tibo mode: Fast service tier and High thinking";
 
   return (
     <button
@@ -24149,10 +24223,9 @@ function TiboModePill({
       aria-label={description}
       aria-pressed={enabled}
       title={description}
-      disabled={!available}
       onClick={onToggle}
       className={cn(
-        "relative inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-xs font-semibold outline-none transition-all duration-200 focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-35",
+        "relative inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-xs font-semibold outline-none transition-all duration-200 focus-visible:ring-2 focus-visible:ring-ring",
         flat && !enabled ? "px-1.5 text-muted-foreground" : "bg-muted text-muted-foreground",
         enabled &&
           "bg-gradient-to-r from-orange-500/22 via-fuchsia-500/20 to-violet-500/22 text-foreground ring-1 ring-inset ring-orange-400/45 shadow-[0_0_18px_rgba(249,115,22,0.22)]",

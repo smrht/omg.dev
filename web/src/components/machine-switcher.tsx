@@ -1,5 +1,7 @@
+import { useState } from "react";
+import { MachineActionsDialog } from "./machine-actions-dialog";
 import { useRuntimeAvailability } from "../lib/runtime-availability";
-import { Check, ChevronsUpDown, Cloud, Laptop } from "lucide-react";
+import { Check, ChevronsUpDown, Cloud, Laptop, Plus, Pencil } from "lucide-react";
 
 import {
   LOCAL_MACHINE_CHOICE,
@@ -17,25 +19,32 @@ import {
   DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
 
-type Entry = { choice: MachineChoice; row: CloudComputerRow | null };
+type Entry = { choice: MachineChoice; row: CloudComputerRow | null; canRename?: boolean };
 
 /** The list the switcher draws and how a pick is applied, from either owner. */
 type MachineSource = {
   entries: Entry[];
   activeId: string;
   select: (choice: MachineChoice) => void;
+  reload?: () => Promise<void>;
+  signIn?: () => Promise<void>;
+  signedIn?: boolean;
+  /** Every connected machine the account lists, whether or not it is reachable from here. */
+  connectedIds?: string[];
 };
 
 /** Present a host-supplied machine as the row shape the menu already renders. */
 function hostEntry(machine: HostMachine): Entry {
   if (machine.kind === "local") {
-    return { choice: { id: machine.id, name: machine.name }, row: null };
+    return { choice: { id: machine.id, name: machine.name }, row: null, canRename: machine.canRename };
   }
   return {
     choice: { id: machine.id, name: machine.name },
+    canRename: machine.canRename,
     row: {
       slug: machine.id,
       name: machine.name,
@@ -48,22 +57,22 @@ function hostEntry(machine: HostMachine): Entry {
 }
 
 /**
- * The box's own account list, used when no host supplies one. Hidden until
- * the box is signed in with a reachable machine.
+ * The box's own account list, used when no host supplies one. Available once the box account routes respond.
  */
 function useBoxMachines(enabled: boolean, onSelect: (choice: MachineChoice) => void): MachineSource | null {
-  const { status, computers } = useCloudMachines(enabled);
+  const { status, computers, thisComputer, reload, signIn } = useCloudMachines(enabled);
   const active = activeMachine();
   if (!enabled) return null;
   const reachable: Entry[] = (computers ?? []).flatMap((row) => {
     const choice = rowMachineChoice(row);
     return choice ? [{ choice, row }] : [];
   });
-  if (!status?.signedIn || reachable.length === 0) return null;
+  if (!status) return null;
   return {
-    entries: [{ choice: LOCAL_MACHINE_CHOICE, row: null }, ...reachable],
+    entries: [{ choice: { ...LOCAL_MACHINE_CHOICE, name: thisComputer?.name || status.localName || LOCAL_MACHINE_CHOICE.name }, row: null }, ...reachable],
     activeId: active.id,
-    select: onSelect,
+    select: onSelect, reload, signIn, signedIn: status.signedIn,
+    connectedIds: (computers ?? []).filter((row) => row.kind === "connected").map((row) => row.bindingId ?? row.slug),
   };
 }
 
@@ -76,8 +85,7 @@ function useBoxMachines(enabled: boolean, onSelect: (choice: MachineChoice) => v
  * icon at the top left of the Live header, because that header has no room
  * for a name.
  *
- * Renders nothing until the box is signed in to omg Cloud with a machine it
- * can reach, so a plain install keeps exactly the layout it had.
+ * A local-only install still offers Add machine and the account sign-in flow.
  */
 export function MachineSwitcher({
   variant,
@@ -89,6 +97,8 @@ export function MachineSwitcher({
   collapsed?: boolean;
   onSelect?: (choice: MachineChoice) => void;
 }) {
+  const [action, setAction] = useState<"add" | "rename" | null>(null);
+  const [editing, setEditing] = useState<MachineChoice | null>(null);
   const { transportLive } = useRuntimeAvailability();
   const host = useEmbeddedHostOptions().machines;
   // One owner per surface: the host's list when it supplies one, else the
@@ -102,6 +112,11 @@ export function MachineSwitcher({
       }
     : box;
   if (!source || source.entries.length === 0) return null;
+  const addMachine = () => {
+    if (host) host.onAdd?.();
+    else if (!box?.signedIn) void box?.signIn?.();
+    else setAction("add");
+  };
 
   const { entries, activeId, select } = source;
   const current = entries.find((entry) => entry.choice.id === activeId) ?? entries[0]!;
@@ -163,36 +178,65 @@ export function MachineSwitcher({
             <DropdownMenuLabel className="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
               Machines
             </DropdownMenuLabel>
-            {entries.map(({ choice, row }) => {
+            {entries.map(({ choice, row, canRename }) => {
               const selected = choice.id === activeId;
               const Icon = row?.kind === "cloud" ? Cloud : Laptop;
               return (
-                <DropdownMenuItem
-                  key={choice.id}
-                  data-machine-option={choice.id}
-                  aria-current={selected ? "true" : undefined}
-                  onClick={() => {
-                    if (!selected) select(choice);
-                  }}
-                  className="flex items-center gap-2.5 rounded-lg px-2 py-2"
-                >
-                  <span className="relative flex size-7 shrink-0 items-center justify-center rounded-[7px] bg-foreground/[0.06]">
-                    <Icon className="size-4 text-foreground/70" />
-                    <StatusDot online={selected ? currentOnline : !row || row.online} className="absolute -bottom-0.5 -right-0.5" />
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[13px] font-medium">{choice.name}</span>
-                    <span className="block truncate text-[11px] text-muted-foreground">
-                      {row ? machineStatusLabel(row) : "The box that served this page"}
+                <div key={choice.id} className="flex items-center gap-0.5">
+                  <DropdownMenuItem
+                    data-machine-option={choice.id}
+                    aria-current={selected ? "true" : undefined}
+                    onClick={() => {
+                      if (!selected) select(choice);
+                    }}
+                    className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2 py-2"
+                  >
+                    <span className="relative flex size-7 shrink-0 items-center justify-center rounded-[7px] bg-foreground/[0.06]">
+                      <Icon className="size-4 text-foreground/70" />
+                      <StatusDot online={selected ? currentOnline : !row || row.online} className="absolute -bottom-0.5 -right-0.5" />
                     </span>
-                  </span>
-                  {selected ? <Check className="size-4 shrink-0 text-primary" /> : null}
-                </DropdownMenuItem>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[13px] font-medium">{choice.name}</span>
+                      <span className="block truncate text-[11px] text-muted-foreground">
+                        {row ? machineStatusLabel(row) : "The box that served this page"}
+                      </span>
+                    </span>
+                    {selected ? <Check className="size-4 shrink-0 text-primary" /> : null}
+                  </DropdownMenuItem>
+                  {(!host || host.onRename) && canRename !== false && row?.status !== "none" ? (
+                    <DropdownMenuItem
+                      aria-label={`Edit ${choice.name}`}
+                      title={`Edit ${choice.name}`}
+                      data-machine-edit={choice.id}
+                      className="size-9 shrink-0 justify-center rounded-lg p-0 text-muted-foreground"
+                      onClick={() => {
+                        if (host) host.onRename?.(choice.id);
+                        else { setEditing(choice); setAction("rename"); }
+                      }}
+                    >
+                      <Pencil className="size-3.5" />
+                    </DropdownMenuItem>
+                  ) : null}
+                </div>
               );
             })}
           </DropdownMenuGroup>
+          {!host || host.onAdd ? <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={addMachine}><Plus className="size-4" />Add machine</DropdownMenuItem>
+          </> : null}
         </DropdownMenuContent>
       </DropdownMenu>
+      {action && !host ? (
+        <MachineActionsDialog
+          action={action}
+          name={editing?.name ?? ""}
+          bindingId={editing?.id}
+          connectedIds={source.connectedIds ?? []}
+          onClose={() => setAction(null)}
+          onSaved={box?.reload ?? (async () => {})}
+        />
+      ) : null}
     </div>
   );
 }

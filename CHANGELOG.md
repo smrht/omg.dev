@@ -2,6 +2,47 @@
 
 Recent product updates and deployment notes.
 
+## September 6, 2026 - Edit names beside each machine (v0.6.53)
+
+- Use the pencil beside a machine to edit its name without switching machines.
+- Save names for cloud, connected, and local machines. Connected names stay in place after reconnecting.
+- The separate Rename cloud machine menu item is removed.
+
+## September 6, 2026 - Keep cloud recovery status clear (v0.6.52)
+
+- The greeting keeps “Connecting…” while a ready cloud computer finishes its client connection. It no longer briefly shows “Connection unavailable” during this handoff.
+
+## September 6, 2026 - Add machines and name your cloud machine (v0.6.51)
+
+- Add a machine from the machine menu. Choose your own computer or omg.dev cloud.
+- Copy install and connection commands, then see when pairing succeeds or expires.
+- Rename your cloud machine and see its saved name across your devices.
+- Opening the machine menu does not create cloud compute. Cloud creation starts after you choose it.
+
+## September 6, 2026 - Cloud startup progress in the greeting (v0.6.50)
+
+- **The greeting shows confirmed cloud startup progress.** It shows “Waking your
+  computer…” or “Starting your computer…” while the cloud backend reports an
+  active startup. A confirmed failure has separate text. Older servers retain
+  the existing connection display.
+
+## September 6, 2026 - Tibo mode shows one control, and archive undoes itself (v0.6.49)
+
+- **The Tibo pill hides when it cannot be used.** An agent or model that
+  cannot run Tibo mode now shows no pill, instead of a permanently disabled
+  one that did not say which model to pick.
+- **Archiving a session is optimistic everywhere, and it can undo itself.**
+  The keyboard path (shift+E) now removes the row immediately, like swipe and
+  the session menu. A failed close request restores the row and reports the
+  error, instead of hiding a session that is still live until you reload.
+
+## September 6, 2026 - Tibo mode is one control, not three (v0.6.48)
+
+- **Tibo mode hides the thinking and Fast pills while it is on.** Tibo mode
+  already pins Fast service and High thinking, so the composer showed three
+  controls for one decision. The Tibo pill is now the only one visible while
+  it is active, and turning it off restores the other two.
+
 ## September 5, 2026 - Free OpenCode default follows what the box can use (v0.6.47)
 
 - **The free OpenCode default is the best free model the box actually
