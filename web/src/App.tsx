@@ -1,3 +1,4 @@
+import { SessionUsageControls } from "./components/session-usage-controls";
 import { LiveHeaderContext } from "./components/live-header-context";
 import { activeMachine } from "./lib/machines";
 import { useHeaderProfile } from "./lib/header-profile";
@@ -1221,6 +1222,7 @@ type SessionUsageProc = {
 };
 
 type SessionUsageRow = {
+  historySessionId?: string;
   key: string;
   sessionId: string | null;
   managedName: string | null;
@@ -26365,7 +26367,7 @@ function useServerStats(active: boolean, intervalMs = 3000): ServerStats | null 
 // snapshot above. It is fetched on expand and refreshed slowly: the panel's job
 // is deciding which session to close, and that answer does not change in 3s.
 // Polling it hard would make the memory-pressure tool a memory-pressure source.
-function useSessionUsage(active: boolean, intervalMs = 15000): SessionUsage | null {
+function useSessionUsage(active: boolean, intervalMs = 15000, revision = 0): SessionUsage | null {
   const [usage, setUsage] = useState<SessionUsage | null>(null);
   useEffect(() => {
     if (!active) return;
@@ -26384,7 +26386,7 @@ function useSessionUsage(active: boolean, intervalMs = 15000): SessionUsage | nu
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [active, intervalMs]);
+  }, [active, intervalMs, revision]);
   return usage;
 }
 
@@ -26828,7 +26830,7 @@ function MetricCard({
 }
 
 function ServerPerformancePanel({ stats }: { stats: ServerStats | null }) {
-  const cpuPct = stats ? Math.min(100, Math.round((stats.cpu.load1 / Math.max(1, stats.cpu.cores)) * 100)) : 0;
+  const cpuPct = stats?.history?.at(-1)?.cpuPct ?? 0;
   const hostUsed = stats ? stats.memory.hostTotalBytes - stats.memory.hostFreeBytes : 0;
   const hostPct = stats && stats.memory.hostTotalBytes > 0
     ? Math.round((hostUsed / stats.memory.hostTotalBytes) * 100)
@@ -26852,7 +26854,7 @@ function ServerPerformancePanel({ stats }: { stats: ServerStats | null }) {
         <div className="overflow-hidden rounded-2xl border border-border bg-card/40 divide-y divide-border">
           <MetricCard
             icon={<Cpu className="size-4" />}
-            label="CPU load"
+            label="CPU"
             value={stats ? `${cpuPct}%` : "—"}
             sub={stats ? `load ${stats.cpu.load1.toFixed(2)} · ${stats.cpu.cores} cores` : undefined}
             values={hist.map((h) => h.cpuPct)}
@@ -26987,14 +26989,14 @@ function SessionUsageComponentBar({ row }: { row: SessionUsageRow }) {
   );
 }
 
-function SessionUsageRowView({ row, hostTotal }: { row: SessionUsageRow; hostTotal: number }) {
+function SessionUsageRowView({ row, hostTotal, onChanged }: { row: SessionUsageRow; hostTotal: number; onChanged: (message: string) => void }) {
   const [open, setOpen] = useState(false);
   const share = hostTotal > 0 ? Math.round((row.memBytes / hostTotal) * 100) : 0;
   const parts = USAGE_COMPONENT_ORDER.filter((c) => (row.byComponent[c] ?? 0) > 0);
   const name = row.managedName ?? row.sessionId?.slice(0, 8) ?? "unknown";
 
   return (
-    <div className="px-4 py-3">
+    <div className="px-4 py-3" data-session-usage-key={row.key}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -27003,7 +27005,7 @@ function SessionUsageRowView({ row, hostTotal }: { row: SessionUsageRow; hostTot
       >
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
-            <span className="truncate text-sm font-medium tabular-nums">{name}</span>
+            <span className="break-words text-sm font-medium">{row.title || name}</span>
             {row.orphan ? (
               <span className="shrink-0 rounded bg-amber-500/15 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-amber-600 dark:text-amber-500">
                 orphaned
@@ -27011,7 +27013,7 @@ function SessionUsageRowView({ row, hostTotal }: { row: SessionUsageRow; hostTot
             ) : null}
           </div>
           {row.title ? (
-            <div className="truncate text-xs text-muted-foreground">{row.title}</div>
+            <div className="text-xs text-muted-foreground">{name} · {row.live ? "Open" : "Gesloten"}</div>
           ) : null}
           <div className="text-xs text-muted-foreground tabular-nums">
             {row.procCount} {row.procCount === 1 ? "process" : "processes"}
@@ -27074,6 +27076,7 @@ function SessionUsageRowView({ row, hostTotal }: { row: SessionUsageRow; hostTot
           ) : null}
         </div>
       ) : null}
+      <SessionUsageControls row={row} request={(path, body) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })} onChanged={onChanged} />
     </div>
   );
 }
@@ -27082,8 +27085,11 @@ function SessionUsageRowView({ row, hostTotal }: { row: SessionUsageRow; hostTot
 // under pressure; this says what to close, which is the only actionable form of
 // that information short of SSHing in and reading `ps`.
 function SessionUsagePanel() {
+  const [revision, setRevision] = useState(0);
+  const [result, setResult] = useState("");
+  const onChanged = (message: string) => { setResult(message); toast(message); setRevision(n => n + 1); };
   const [open, setOpen] = useState(false);
-  const usage = useSessionUsage(open);
+  const usage = useSessionUsage(open, 15000, revision);
   const host = usage?.host;
   const rows = usage?.sessions ?? [];
   const orphanRows = rows.filter((row) => row.orphan);
@@ -27096,6 +27102,7 @@ function SessionUsagePanel() {
       <h2 className="px-4 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
         Per-session breakdown
       </h2>
+      {result && <p role="status" className="px-4 text-sm">{result}</p>}
       <div className="overflow-hidden rounded-2xl border border-border bg-card/40">
         <button
           type="button"
@@ -27153,8 +27160,7 @@ function SessionUsagePanel() {
                     {orphanRows.length === 1 ? "session" : "sessions"}
                   </div>
                   <div className="mt-0.5 text-[11px] text-muted-foreground">
-                    Closing a session stops its agent, tmux and browser, but not the dev
-                    servers it started — those keep running until something reclaims them.
+                    Gesloten sessies kunnen nog processen hebben. Gebruik per sessie Restprocessen stoppen om ze handmatig te controleren.
                   </div>
                 </div>
               ) : null}
@@ -27166,6 +27172,7 @@ function SessionUsagePanel() {
                       key={row.key}
                       row={row}
                       hostTotal={host.memTotalBytes}
+                      onChanged={onChanged}
                     />
                   ))
                 ) : (

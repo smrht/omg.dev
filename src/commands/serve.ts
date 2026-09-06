@@ -73,6 +73,7 @@ import * as pwaBootLog from "../pwa-boot-log.ts";
 import { botRuntimeContract, shortSessionId } from "../omg-capabilities.ts";
 import {
   getCachedResumableSession,
+  queryHistoricalCache,
   hideFromRosterWhenCached,
   setRosterHidden,
   updateResumableUser,
@@ -296,6 +297,7 @@ import {
   listSessionsCached,
   noteListSessionsClientActivity,
 } from "../session-cache.ts";
+import { createCleanupHandler } from "../session-cleanup.ts";
 import { buildSessionUsageReport, findSessionDevServerPids } from "../session-usage.ts";
 import { capReclaimCandidate, memoryReclaimCandidates } from "../idle-archive.ts";
 import { CODING_AGENT_ADAPTERS, resolveActiveSessionAgent, usesCommandFileRuntime } from "../coding-agent-adapters.ts";
@@ -1094,6 +1096,24 @@ async function serverStats() {
 // in would multiply the cost of the cheap panel by the expensive one. Callers
 // fetch it only while the breakdown is expanded, and the short cache below
 // collapses concurrent viewers onto a single scan.
+const manualSessionCleanup = createCleanupHandler({
+  snapshot: async () => {
+    const owners = await listSessions();
+    return { owners, rows: (await buildSessionUsageReport(owners)).sessions };
+  },
+  close: async (id, owner) => {
+    const session = owner as Session;
+    if (!session) throw new Error("Session missing");
+    const result = await closeLiveSession(session, id, { source: "manual-usage" }, true);
+    if (!result.ok) throw new Error(result.reason);
+  },
+  refresh: async () => {
+    sessionUsageCache = null;
+    if (sessionUsageInflight) await sessionUsageInflight;
+    sessionUsageCache = null;
+    return sessionUsage();
+  },
+});
 const SESSION_USAGE_TTL_MS = 2_000;
 let sessionUsageCache: { at: number; value: Awaited<ReturnType<typeof buildSessionUsageReport>> } | null = null;
 let sessionUsageInflight: Promise<Awaited<ReturnType<typeof buildSessionUsageReport>>> | null = null;
@@ -1118,6 +1138,14 @@ async function sessionUsage() {
         managed: session.managed,
       })),
     );
+    for (const row of report.sessions) {
+      if (!row.title && row.worktreePath) {
+        const history = queryHistoricalCache({ project: row.worktreePath, limit: 20 }).sessions;
+        const match = history.find(item => item.sessionId === row.sessionId)
+          ?? history.find(item => item.cwd === row.worktreePath);
+        if (match) { row.title = match.title; row.historySessionId = match.sessionId; }
+      }
+    }
     sessionUsageCache = { at: Date.now(), value: report };
     return report;
   })();
@@ -2057,8 +2085,22 @@ async function closeLiveSession(
   sess: Session,
   id: string,
   closeLog: Record<string, unknown>,
+  alreadyStopped = false,
 ): Promise<CloseOutcome> {
   persistManagedResume(sess);
+  if (alreadyStopped) {
+    if (isAisdkPidAlive(sess.pid)) return { ok: false, status: 409, reason: "Agent draait nog" };
+    const entry = findAisdkEntryByAnyId(id);
+    if (entry && isAisdkPidAlive(entry.harnessPid)) return { ok: false, status: 409, reason: "Sessie is opnieuw gestart" };
+    markClosed(sess.pid);
+    if (entry) removeAisdkEntry(entry.sessionId);
+    if (sess.tmuxName) { removeManaged(sess.tmuxName); assignUser(sess.tmuxName, null); }
+    clearResolved(id);
+    invalidateListSessionsCache();
+    hideFromRosterWhenCached(id);
+    evlog("session_close_done", { ...closeLog, mode: "manual-graceful" });
+    return { ok: true, mode: "manual-graceful" };
+  }
   // Reap headless Chrome for this managed name before killing the agent.
   // agent-browser daemons reparent under user systemd and outlive tmux/harness
   // exit; idle timeout is the backstop, this is the explicit teardown path.
@@ -5108,6 +5150,12 @@ a{color:#60a5fa}
       }
       if (path === "/api/server/wake-tick" && req.method === "POST") {
         return handleWakeTick((l) => console.log(l));
+      }
+      if (path === "/api/server/session-usage/preview" && req.method === "POST") {
+        return manualSessionCleanup(req, "preview");
+      }
+      if (path === "/api/server/session-usage/confirm" && req.method === "POST") {
+        return manualSessionCleanup(req, "confirm");
       }
       if (path === "/api/server/session-usage" && req.method === "GET") {
         return json({ usage: await sessionUsage() });
