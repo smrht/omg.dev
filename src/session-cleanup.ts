@@ -38,7 +38,7 @@ async function listeningPids(procs: ProcInfo[]): Promise<Set<number>> {
 
 export function planCleanup(row: SessionUsageRow, owners: Owner[], procs: ProcInfo[], listeners: Set<number>, serverPid = process.pid): CleanupPlan {
   const byPid = new Map(procs.map(p => [p.pid, p]));
-  const owner = owners.find(s => s.sessionId === row.sessionId || (row.managedName && s.tmuxName === row.managedName));
+  const owner = row.live ? owners.find(s => (row.sessionId && s.sessionId === row.sessionId) || (row.managedName && s.tmuxName === row.managedName)) : undefined;
   const selfAncestors = new Set<number>();
   for (let p = byPid.get(serverPid); p && !selfAncestors.has(p.pid); p = byPid.get(p.ppid)) selfAncestors.add(p.pid);
   selfAncestors.add(serverPid);

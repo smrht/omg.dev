@@ -76,3 +76,9 @@ test('persistent bots and parents with live child sessions cannot close here', (
   expect(planCleanup(liveRow, [{ ...owner, persistent: true }], [proc(10)], new Set(), 999).blocked).toContain('Vaste bots');
   expect(planCleanup(liveRow, [owner, { sessionId: 'child', tmuxName: 'lfg-child', cwd: '/child', parentSessionId: sid }], [proc(10)], new Set(), 999).blocked).toContain('deelsessie');
 });
+test('an orphan with a missing id cannot claim an unrelated id-less live owner', () => {
+  const owners = [{ sessionId: null, tmuxName: null, cwd: '/other', pid: 44 }];
+  const orphan = { ...row(), sessionId: null };
+  const procs = [proc(44, { env: {} }), proc(10, { ppid: 44, env: { managedName: 'lfg-test' } })];
+  expect(planCleanup(orphan, owners, procs, new Set(), 999).targets[0]!.reason).not.toBeNull();
+});
