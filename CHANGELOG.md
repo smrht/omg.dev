@@ -2,6 +2,20 @@
 
 Recent product updates and deployment notes.
 
+## September 7, 2026 - File downloads work on managed machines (v0.6.55)
+
+- Downloading a file from a managed machine stays on the machine. A redirect from the machine no longer sends the browser to the wrong path.
+- Downloads through a managed machine now report their size, so the browser shows real progress.
+- The file card is one click target. Click the file name to download it.
+- On omg.dev hosted sessions the card shows a percentage while a file downloads, and it says when a download fails. Click again to retry.
+- iPad: the session rail shares the phone header, and the composer is the empty pane.
+- Return sends in the session composer. New sessions follow the project filter.
+
+## September 7, 2026 - Tool access works inside omg.dev (v0.6.54)
+
+- Roles and connectors load from your machine when Settings is opened inside omg.dev. The "Unexpected token '<'" error is gone.
+- Hosts can route the Tool access page like Coding agents and Storage, so it opens as its own page with a back link.
+
 ## September 6, 2026 - Edit names beside each machine (v0.6.53)
 
 - Use the pencil beside a machine to edit its name without switching machines.
