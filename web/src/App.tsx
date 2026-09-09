@@ -121,6 +121,7 @@ import {
   clearBotConversationUnread,
   hasUnreadBotConversation,
   type BotConversationUnread,
+  botConversationActivityKey,
 } from "./lib/bot-unread";
 import { resolveRosterUser } from "./lib/roster-user";
 import {
@@ -177,6 +178,7 @@ import {
   AuthenticatedArtifactVideo,
 } from "./components/authenticated-artifact";
 import { ArtifactFileCard } from "./components/artifact-file-card";
+import { ArtifactFilePage } from "./components/artifact-file-page";
 import {
   NativeArtifact,
   NativeArtifactEmbed,
@@ -492,6 +494,7 @@ import { fetchBootstrap } from "./bootstrap";
 import { Toaster } from "@/components/ui/sonner";
 import { Button } from "@/components/ui/button";
 import { ShimmerText } from "@/components/ui/shimmer-text";
+import { MorphText } from "@/components/ui/morph-text";
 import { DoubleConfirmAction } from "@/components/ui/double-confirm-action";
 import { ClearFindingsButton } from "@/components/clear-findings-button";
 import {
@@ -1288,7 +1291,6 @@ type BootstrapPayload = {
   settings?: Partial<GlobalSettings> | null;
   sessions?: Session[] | null;
   sessionPins?: string[] | null;
-  conversations?: ProductConversation[] | null;
   /** Which conversation participant, if any, "I" am — see fetchBootstrap. */
   viewer?: { managed: boolean; participantId: string | null } | null;
   users?: User[] | null;
@@ -1839,7 +1841,12 @@ function ArtifactViewerPage({
   useEffect(() => {
     setFramed(false);
   }, [artifact.url, artifact.cacheKey]);
-  const label = artifact.title || artifact.caption || artifact.name || "Artifact";
+  // A file is titled by its name; the page body shows the caption. The other
+  // kinds keep the caption-first label they always had.
+  const label =
+    artifact.kind === "file"
+      ? artifact.name || artifact.caption || "File"
+      : artifact.title || artifact.caption || artifact.name || "Artifact";
   // z-[100] sits above the mobile bottom composer (z-55), ask-center (z-60),
   // and floating audio chrome (z-75) so the full-page viewer is not clipped
   // by home-shell overlays. Dialogs/drawers remain higher (z-150+).
@@ -1886,15 +1893,14 @@ function ArtifactViewerPage({
             />
           </div>
         ) : artifact.kind === "file" ? (
-          <div className="flex h-full items-start justify-center overflow-auto bg-background p-4">
-            <ArtifactFileCard
-              url={artifact.url}
-              name={artifact.name}
-              mimeType={artifact.mimeType}
-              size={artifact.size}
-              caption={artifact.caption}
-            />
-          </div>
+          <ArtifactFilePage
+            url={artifact.url}
+            name={artifact.name}
+            mimeType={artifact.mimeType}
+            size={artifact.size}
+            caption={artifact.caption}
+            className="bg-background"
+          />
         ) : artifact.kind === "video" ? (
           <div className="flex h-full items-center justify-center bg-black">
             <AuthenticatedArtifactVideo
@@ -4784,6 +4790,21 @@ function removeForcedStreamSid(sid: string): void {
 const SEEDED_SESSION_MAX_AGE_MS = 30_000;
 
 const recentlyCreatedSids = new Set<string>();
+/**
+ * `prev` when `next` serializes to the same JSON, else `next`.
+ *
+ * For the setState calls fed by the periodic REST polls. A poll that finds
+ * nothing changed used to hand React a fresh array anyway, and a fresh array
+ * is a state change: every consumer of `sessions`, `bots`, `autoAgents` and
+ * `findings` re-rendered every five seconds, on every open tab, for nothing.
+ * Returning the previous reference lets React bail out of the update. The
+ * payloads are small (tens of KB) so the stringify is far cheaper than the
+ * render it prevents.
+ */
+function sameJson<T>(prev: T, next: T): T {
+  return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+}
+
 function markCreatedSid(sid: string): void {
   recentlyCreatedSids.add(sid);
   window.setTimeout(() => recentlyCreatedSids.delete(sid), 2000);
@@ -6390,9 +6411,9 @@ export function App() {
       `/api/bots?user=${encodeURIComponent(botUnreadIdentity)}`,
       { cache: "no-store" },
     );
-    setBots(payload.bots ?? []);
-    setBotConversations(payload.conversations ?? []);
-    setBotQuota(payload.quota ?? null);
+    setBots((prev) => sameJson(prev, payload.bots ?? []));
+    setBotConversations((prev) => sameJson(prev, payload.conversations ?? []));
+    setBotQuota((prev) => sameJson(prev, payload.quota ?? null));
   }, [botUnreadIdentity]);
 
   const loadCore = useCallback(async () => {
@@ -6535,9 +6556,9 @@ export function App() {
     // render unconditionally (e.g. findings.length in LiveView), so a missing
     // field must degrade to [] rather than crash the live view.
     const findingList = fd.findings ?? [];
-    setAutoAgents(ag.agents ?? []);
+    setAutoAgents((prev) => sameJson(prev, ag.agents ?? []));
     if (ag.tz) setSchedTz(ag.tz);
-    setFindings(findingList);
+    setFindings((prev) => sameJson(prev, findingList));
     if (!seededAuto.current) {
       findingList.forEach((f) => seenFindings.current.add(f.id));
       seededAuto.current = true;
@@ -6646,7 +6667,7 @@ export function App() {
       }
       sessionList.push(entry.session);
     }
-    setSessions(sessionList);
+    setSessions((prev) => sameJson(prev, sessionList));
     // From the server's payload, not from `sessionList`: the seeded and renamed
     // rows spliced in above were built by this client and carry no watermark.
     applyUnreadSessions(payload.sessions ?? []);
@@ -6668,7 +6689,7 @@ export function App() {
     });
     const next = payload.sessionIds ?? [];
     topPinnedRef.current = next;
-    setTopPinned(next);
+    setTopPinned((prev) => sameJson(prev, next));
   }, []);
 
   const toggleTopPin = useCallback((sessionId: string) => {
@@ -6857,16 +6878,34 @@ export function App() {
   // visibilitychange fires on tab switch, window minimise, and phone lock, and
   // returning runs one immediate refresh so the view is never stale-on-arrival
   // while it waits out the rest of an interval.
+  //
+  // While the live socket is up it already pushes every status change the
+  // roster shows (busy, title, last text, model) the second it happens, so
+  // this REST poll is only reconciliation: sessions that appeared or went
+  // away, unread watermarks, pins, schedules, bots. Reconciliation does not
+  // need to run every five seconds — and on a phone each cycle was ~30 KB
+  // plus four state updates. With the socket live the poll runs every 30 s;
+  // a session that appears on the socket first is picked up at once (see
+  // applyLiveStatusRows). The moment the socket is not live the poll is back
+  // to 5 s, which is what the non-socket transports always had.
+  const wsLiveRef = useRef(false);
   useEffect(() => {
     let id: number | null = null;
+    let cyclesSinceTick = 0;
     const tick = () => {
       refreshSessions().catch(() => {});
       refreshSessionPins().catch(() => {});
       refreshAuto().catch(() => {});
       refreshBots().catch(() => {});
     };
+    const cycle = () => {
+      cyclesSinceTick += 1;
+      if (wsLiveRef.current && cyclesSinceTick < 6) return;
+      cyclesSinceTick = 0;
+      tick();
+    };
     const start = () => {
-      if (id === null) id = window.setInterval(tick, 5000);
+      if (id === null) id = window.setInterval(cycle, 5000);
     };
     const stop = () => {
       if (id !== null) {
@@ -6879,6 +6918,7 @@ export function App() {
         stop();
         return;
       }
+      cyclesSinceTick = 0;
       tick();
       start();
     };
@@ -7259,6 +7299,9 @@ export function App() {
   const liveStatusKey = liveStatusIds.join(",");
   const liveTransport = useMemo(() => liveTransportMode(), []);
   const useWsLive = liveTransport === "ws";
+  const unknownSidRefreshAtRef = useRef(0);
+  const refreshSessionsRef = useRef(refreshSessions);
+  refreshSessionsRef.current = refreshSessions;
   const applyLiveStatusRows = useCallback((rows: Array<
     Pick<
       Session,
@@ -7276,6 +7319,20 @@ export function App() {
     if (!rows.length) return;
     const bySid = new Map(rows.map((row) => [row.sessionId, row]));
     setSessions((prev) => {
+      // A row for a session the list has never seen means a session was
+      // created since the last list read (another device, an agent spawning
+      // a child, a schedule firing). The socket cannot supply the full row,
+      // so ask the list for it now instead of waiting out the poll interval.
+      // Throttled: one list read per 5 s at most, so a socket that keeps
+      // reporting a session the list refuses to return (filtered out, mid-
+      // shutdown) costs no more than the old poll did.
+      if (rows.some((row) => row.sessionId && !prev.some((s) => s.sessionId === row.sessionId))) {
+        const now = Date.now();
+        if (now - unknownSidRefreshAtRef.current >= 5000) {
+          unknownSidRefreshAtRef.current = now;
+          window.setTimeout(() => void refreshSessionsRef.current().catch(() => {}), 0);
+        }
+      }
       let changed = false;
       const next = prev.map((session) => {
         const sid = session.sessionId;
@@ -7385,6 +7442,7 @@ export function App() {
     // managed box ignores it in favour of its verified header.
     viewerIdentity: botUnreadIdentity,
   });
+  wsLiveRef.current = useWsLive && wsLiveStream.connection.status === "live";
   const liveStream = useWsLive ? wsLiveStream : sseLiveStream;
 
   // "Somebody ELSE is typing."
@@ -7530,6 +7588,12 @@ export function App() {
   // existing subscriptions instead of replacing all of them.
   const botUnreadViewRef = useRef({ selectedConversationSid, tab });
   botUnreadViewRef.current = { selectedConversationSid, tab };
+  // Passive: hear the messages of a bot conversation that is open (and so
+  // already streaming) to clear its dot the moment a reply lands in view. It
+  // deliberately holds no subscription of its own — subscribing every bot
+  // transcript from the roster pulled each one's full backlog and send queue
+  // (hundreds of KB) on every socket connect, to compute a dot. Arrivals in
+  // conversations that are NOT open are caught below from the fleet status.
   useEffect(() => {
     if (!useWsLive) return;
     const unsubs = botConversationSids.map((sessionId) =>
@@ -7545,11 +7609,29 @@ export function App() {
         });
         if (action === "mark-read") void markBotConversationVisible(sessionId).catch(() => {});
         if (action === "refresh") void refreshBots().catch(() => {});
-      })
+      }, { passive: true })
     );
     return () => unsubs.forEach((unsubscribe) => unsubscribe());
   }, [botConversationSids, markBotConversationVisible, refreshBots, useWsLive, wsLiveStream.subscribeTranscript]);
 
+  // A bot finished a turn, or a line arrived while it was idle: the server
+  // decides whether that is unread, so ask it. Keyed on the status rows the
+  // socket pushes for every session (see botConversationActivityKey), which
+  // is why no per-bot transcript subscription is needed for this.
+  const botActivityKey = useMemo(
+    () => botConversationActivityKey(botConversationSids, sessions),
+    [botConversationSids, sessions],
+  );
+  const botActivitySeenRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!useWsLive) return;
+    if (botActivitySeenRef.current === null || botActivitySeenRef.current === botActivityKey) {
+      botActivitySeenRef.current = botActivityKey;
+      return;
+    }
+    botActivitySeenRef.current = botActivityKey;
+    void refreshBots().catch(() => {});
+  }, [botActivityKey, refreshBots, useWsLive]);
   function toggleTheme() {
     setThemePreference(!document.documentElement.classList.contains("dark"));
   }
@@ -10814,11 +10896,13 @@ function OnboardingFlow({
                   ) : (
                     <Check className="size-3.5 text-emerald-500" />
                   )}
-                  {installLog.running
-                    ? "Installing agents…"
-                    : installLog.error
-                    ? "Install failed"
-                    : "Install complete"}
+                  <MorphText>
+                    {installLog.running
+                      ? "Installing agents…"
+                      : installLog.error
+                      ? "Install failed"
+                      : "Install complete"}
+                  </MorphText>
                 </div>
                 <pre
                   ref={installLogRef}
@@ -10836,11 +10920,13 @@ function OnboardingFlow({
                 className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-foreground px-3 py-2.5 text-sm font-medium text-background transition-opacity disabled:opacity-50"
               >
                 {busy || agentSetupRunning ? <Loader2 className="size-4 animate-spin" /> : null}
-                {agentSetupRunning
-                  ? "Installing selected agents…"
-                  : selectedInstallableCount > 0
-                    ? `Install ${selectedInstallableCount} selected ${selectedInstallableCount === 1 ? "agent" : "agents"}`
-                    : "Select agents to install"}
+                <MorphText>
+                  {agentSetupRunning
+                    ? "Installing selected agents…"
+                    : selectedInstallableCount > 0
+                      ? `Install ${selectedInstallableCount} selected ${selectedInstallableCount === 1 ? "agent" : "agents"}`
+                      : "Select agents to install"}
+                </MorphText>
               </button>
             )}
             <div className="mt-2 flex items-center gap-2">
@@ -14755,7 +14841,7 @@ function AutoTriageButton({
       title="Group related findings and launch linked agents to execute them"
     >
       {busy ? <Loader2 className="animate-spin" /> : <Sparkles />}
-      {prominent ? (busy ? "Starting…" : "Triage & execute") : null}
+      {prominent ? <MorphText>{busy ? "Starting…" : "Triage & execute"}</MorphText> : null}
     </Button>
   );
 }
@@ -14901,7 +14987,7 @@ function PausedBanner({
             disabled={working}
             className="shrink-0 rounded-lg bg-warning px-3 py-1.5 font-medium text-white disabled:opacity-50"
           >
-            {working ? "Continuing…" : "Continue"}
+            <MorphText>{working ? "Continuing…" : "Continue"}</MorphText>
           </button>
         ) : null}
         {canSwitchClaude ? (
@@ -14911,7 +14997,7 @@ function PausedBanner({
             disabled={working}
             className="shrink-0 rounded-lg bg-warning px-3 py-1.5 font-medium text-white disabled:opacity-50"
           >
-            {working ? "Resuming…" : "Resume on Opus"}
+            <MorphText>{working ? "Resuming…" : "Resume on Opus"}</MorphText>
           </button>
         ) : null}
         {canSwitchOpencode ? (
@@ -14921,7 +15007,7 @@ function PausedBanner({
             disabled={working}
             className="shrink-0 rounded-lg bg-warning px-3 py-1.5 font-medium text-white disabled:opacity-50"
           >
-            {working ? "Switching…" : "Use Big Pickle"}
+            <MorphText>{working ? "Switching…" : "Use Big Pickle"}</MorphText>
           </button>
         ) : null}
         {reconnectKind && !inlineAuth && !reconnected ? (
@@ -14931,7 +15017,7 @@ function PausedBanner({
             disabled={working || !authFlow}
             className="shrink-0 rounded-lg bg-warning px-3 py-1.5 font-medium text-white disabled:opacity-50"
           >
-            {working ? "Opening…" : `Sign in to ${reconnectLabel}`}
+            <MorphText>{working ? "Opening…" : `Sign in to ${reconnectLabel}`}</MorphText>
           </button>
         ) : null}
         {reconnected ? (
@@ -20568,6 +20654,16 @@ const MessageBubble = memo(function MessageBubble({
             mimeType={message.mimeType}
             size={message.size}
             caption={message.caption || message.text || message.alt}
+            onOpen={() =>
+              openArtifact({
+                url: message.url!,
+                kind: "file",
+                name: message.name,
+                mimeType: message.mimeType,
+                size: message.size,
+                caption: message.caption || message.text || message.alt,
+              })
+            }
           />
         </MessageContent>
       </AiMessage>
@@ -20576,35 +20672,41 @@ const MessageBubble = memo(function MessageBubble({
 
   if ((message.kind === "image" || message.kind === "video") && message.url) {
     const isVideo = message.kind === "video";
-    const label =
-      message.caption || message.text || message.name || (isVideo ? "Video" : "Image");
+    const alt = message.alt || message.caption || message.text || message.name || (isVideo ? "Video" : "Image");
+    // Shown under the media only when the agent wrote one. The file name and
+    // byte size are card details, and this is not a card: it reads like a
+    // photo in a chat, with a small line of caption beneath it.
+    const caption = message.caption || message.text || undefined;
     return (
       <AiMessage className={cn("msg", entering && "lfg-msg-in")} from="assistant">
-        <MessageContent className="not-prose inline-flex w-fit max-w-[min(34rem,92vw)] flex-col items-start overflow-hidden rounded-lg border border-border bg-card p-0 shadow-sm">
+        <MessageContent className="not-prose inline-flex w-fit max-w-[min(34rem,92vw)] flex-col items-start gap-1.5 bg-transparent p-0">
           {/* Media renders inline in-app — no navigation away to the raw URL. */}
           {isVideo ? (
             <AuthenticatedArtifactVideo
               path={message.url}
-              label={message.alt || label}
-              className="block max-h-[24rem] w-auto max-w-full self-center bg-black object-contain"
+              label={alt}
+              className="block max-h-[24rem] w-auto max-w-full self-start overflow-hidden rounded-xl bg-black object-contain"
             />
           ) : (
             <AuthenticatedArtifactImage
               path={message.url}
-              alt={message.alt || label}
+              alt={alt}
               width={message.width}
               height={message.height}
               zoomable
-              className="block max-h-[24rem] w-auto max-w-full self-center bg-muted object-contain"
+              className="block max-h-[24rem] w-auto max-w-full self-start overflow-hidden rounded-xl bg-muted object-contain"
             />
           )}
-          {/* w-0 + min-w-full keeps long captions from participating in the
-              shrink-to-fit width calculation. The rendered media owns the
-              card width; this row then conforms to it and truncates. */}
-          <div className="box-border flex w-0 min-w-full items-center justify-between gap-3 px-3 py-2 text-xs text-muted-foreground">
-            <span className="min-w-0 truncate">{label}</span>
-            {message.size ? <span className="shrink-0">{formatBytes(message.size)}</span> : null}
-          </div>
+          {caption ? (
+            // w-0 + min-w-full keeps a long caption from widening the row past
+            // the media; it wraps under the picture instead of stretching it.
+            <p
+              data-slot="media-caption"
+              className="box-border w-0 min-w-full whitespace-pre-wrap break-words px-0.5 text-xs text-muted-foreground"
+            >
+              {caption}
+            </p>
+          ) : null}
         </MessageContent>
       </AiMessage>
     );
