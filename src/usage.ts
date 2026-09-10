@@ -34,6 +34,8 @@ import {
 import { defaultModelForAgent } from "./agent-catalog.ts";
 import { PATHS } from "./config.ts";
 import { museFetchInit } from "./muse-proxy.ts";
+import { cloudApiBaseUrl, createCloudAccount } from "./cloud-account.ts";
+import { isHostedOmgSandbox } from "./omg-provider.ts";
 
 export type UsageWindow = {
   label: string;
@@ -754,6 +756,111 @@ async function opencodeUsage(ref: UsageProviderRef): Promise<ProviderUsage> {
 }
 
 
+// ------------------------------------------------------------------- omg ----
+
+// The omg agent spends the AI credit included in the account's Computer plan.
+// The hosted side owns the ledger; this box reads the same balance the omg.dev
+// Settings page shows, through the CLI gate, with the `omg login` credential.
+export type OmgBalance = {
+  plan?: string | null;
+  build?: {
+    limitUsd: number;
+    usedUsd: number;
+    remainingUsd: number;
+    resetsAt: number | null;
+  } | null;
+};
+
+/** The in-guest router of a hosted omg Computer. No credential: the VM is the identity. */
+const GUEST_BALANCE_URL = "http://169.254.0.1:9090/v1/billing/balance";
+
+/**
+ * The control plane answers in dollars; the in-guest router answers in the
+ * ledger's micro-dollars. Exported for tests.
+ */
+export function normalizeOmgBalance(raw: Record<string, any>): OmgBalance {
+  const build = raw?.build;
+  if (!build || typeof build !== "object") return { plan: raw?.plan ?? null, build: null };
+  const micros = typeof build.limitMicros === "number";
+  const usd = (key: string) => {
+    const value = micros ? build[`${key}Micros`] / 1_000_000 : build[`${key}Usd`];
+    return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  };
+  return {
+    plan: raw?.plan ?? null,
+    build: {
+      limitUsd: usd("limit"),
+      usedUsd: usd("used"),
+      remainingUsd: usd("remaining"),
+      resetsAt: typeof build.resetsAt === "number" ? build.resetsAt : null,
+    },
+  };
+}
+
+const OMG_PLAN_LABELS: Record<string, string> = {
+  computer_s40: "Starter Plus",
+  computer_5: "Personal",
+  computer_10: "Pro",
+};
+
+function usd(value: number): string {
+  return `$${value.toFixed(value >= 100 || Number.isInteger(value) ? 0 : 2)}`;
+}
+
+/** The composer ring for the plan's monthly AI credit. Exported for tests. */
+export function omgUsageFromBalance(
+  ref: UsageProviderRef,
+  balance: OmgBalance,
+): ProviderUsage {
+  const plan = balance.plan ? (OMG_PLAN_LABELS[balance.plan] ?? balance.plan) : null;
+  const build = balance.build;
+  if (!build || build.limitUsd <= 0) {
+    return {
+      ...ref,
+      available: false,
+      plan,
+      note: "Your plan includes no AI credit. Upgrade on omg.dev to use the omg agent.",
+    };
+  }
+  const pct = Math.max(0, Math.min(100, (build.usedUsd / build.limitUsd) * 100));
+  return {
+    ...ref,
+    available: true,
+    plan,
+    windows: [{ label: `Monthly · ${usd(build.limitUsd)}`, pct, resetsAt: build.resetsAt }],
+    note: `AI credit: ${usd(build.remainingUsd)} of ${usd(build.limitUsd)} left`,
+  };
+}
+
+async function omgUsage(ref: UsageProviderRef): Promise<ProviderUsage> {
+  if (isHostedOmgSandbox()) {
+    try {
+      const r = await fetch(GUEST_BALANCE_URL, { signal: AbortSignal.timeout(10_000) });
+      if (!r.ok) return staticProvider(ref, `omg router answered ${r.status}`);
+      return omgUsageFromBalance(ref, normalizeOmgBalance((await r.json()) as Record<string, any>));
+    } catch {
+      return staticProvider(ref, "Could not reach the omg router");
+    }
+  }
+  let token: string | null = null;
+  try {
+    token = await createCloudAccount().getAccessToken();
+  } catch {
+    token = null;
+  }
+  if (!token) return staticProvider(ref, "Sign in with `omg login` to see your AI credit");
+  try {
+    const r = await fetch(`${cloudApiBaseUrl()}/api/cli/billing/balance`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!r.ok) return staticProvider(ref, `omg.dev answered ${r.status}`);
+    return omgUsageFromBalance(ref, normalizeOmgBalance((await r.json()) as Record<string, any>));
+  } catch {
+    return staticProvider(ref, "Could not reach omg.dev");
+  }
+}
+
 // ------------------------------------------------------------------ Muse ----
 
 // Meta ships no usage endpoint for Muse Code. The subscription snapshot rides
@@ -935,6 +1042,7 @@ const STATIC_PROVIDERS: UsageProviderRef[] = [
   { id: "cursor", kind: "cursor", label: "Cursor" },
   { id: "grok", kind: "grok", label: "Grok" },
   { id: "opencode", kind: "opencode", label: "OpenCode" },
+  { id: "omg", kind: "omg", label: "omg agent" },
   { id: "muse", kind: "muse", label: "Muse" },
 ];
 
@@ -966,6 +1074,7 @@ function collect(ref: UsageProviderRef, force = false): Promise<ProviderUsage> {
   if (ref.kind === "cursor") return cursorUsage(ref);
   if (ref.kind === "grok") return grokUsage(ref);
   if (ref.kind === "opencode") return opencodeUsage(ref);
+  if (ref.kind === "omg") return omgUsage(ref);
   if (ref.kind === "muse") return museUsage(ref, force);
   return Promise.resolve(staticProvider(ref, "Usage is unavailable for this provider"));
 }

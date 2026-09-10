@@ -2,6 +2,42 @@
 
 Recent product updates and deployment notes.
 
+## September 10, 2026 - Hosted omg agent balance and models (v0.6.63)
+
+- Hosted Computers can show the omg agent's monthly AI credit ring without asking the sandbox for an `omg login`.
+- The omg agent model list adds Claude Fable 5.1, Claude Opus 4.8, Claude Sonnet 4.6, GPT-5.6 Sol, GPT-5.6 Terra, and GPT-5.6 Luna.
+
+## September 10, 2026 - Rounder sent messages (v0.6.62)
+
+- Sent messages have a rounder bubble.
+- The copy button next to a sent message is gone. Long-press the message (right-click on desktop) and choose Copy message.
+
+## September 10, 2026 - AI credit for the omg agent (v0.6.61)
+
+- The usage rings in the composer now cover the omg agent. One monthly ring shows how much of your plan's AI credit is used and when it resets.
+- Agent icons in the session list are no longer rounded.
+
+## September 10, 2026 - The omg agent has its own icon (v0.6.60)
+
+- The omg agent shows the omg mark in the agent picker and in session lists. It showed a broken image before.
+- Mobile: the machine leads the home bar, as on the web.
+
+## September 10, 2026 - The omg agent (v0.6.59)
+
+- New coding agent: omg agent. It runs OpenCode on models that omg pays for with the AI credit in your Computer plan. Pick it in the agent list, then pick one of 7 models. DeepSeek V4 Flash is the default.
+- On your own machine, the omg agent signs in with your omg account. If you are not signed in, the launch says: Sign in with `omg login` to use the omg agent.
+
+## September 10, 2026 - A run of work is one row (v0.6.58)
+
+- In the transcript, an agent's thoughts and tool calls between two messages are one row. It reads "Working for 4s" while the agent works and "Worked for 21s" when the next message arrives. Open the row to see every step.
+- iOS: the same run rows, with a sheet of every step.
+- iOS: Auto findings are grouped per agent with a count. Open the row to see them.
+- iOS: tap a file in the transcript to open its page. Text files and CSV preview on the page. Download is an icon in the navigation bar and opens the share sheet.
+- iOS: the agent's question card sits above the composer.
+- iOS: the keyboard closes after you send a message.
+- iOS: swipe to archive keeps working when the swipe drifts up or down.
+- iOS: the thinking row has no chevron.
+
 ## September 8, 2026 - Adding a connector opens sign-in (v0.6.57)
 
 - Adding an OAuth connector opens sign-in immediately.

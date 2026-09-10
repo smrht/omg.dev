@@ -323,4 +323,27 @@ describe("Codex model catalog", () => {
       expect(item?.defaultModel).toBe("gpt-5.6-sol");
     },
   );
+
+test("omg agent lists the 13 routed models in hosted picker order", async () => {
+  const { OMG_MODELS } = await import("./agent-catalog.ts");
+  expect(OMG_MODELS).toEqual([
+    "omg/deepseek/deepseek-v4-flash-0731",
+    "omg/deepseek/deepseek-v4-pro",
+    "omg/z-ai/glm-5.3-flash",
+    "omg/z-ai/glm-5.2",
+    "omg/qwen/qwen3.7-plus",
+    "omg/qwen/qwen3-coder-next",
+    "omg/minimax/minimax-m3",
+    "omg/anthropic/claude-fable-5.1",
+    "omg/anthropic/claude-opus-4.8",
+    "omg/anthropic/claude-sonnet-4.6",
+    "omg/openai/gpt-5.6-sol",
+    "omg/openai/gpt-5.6-terra",
+    "omg/openai/gpt-5.6-luna",
+  ]);
+  expect(defaultModelForAgent("omg")).toBe(OMG_MODELS[0]!);
+  expect(modelsForAgent("omg")).toEqual(OMG_MODELS);
+  expect(listModelCatalog().find((item) => item.key === "omg")).toMatchObject({
+    label: "omg agent", models: OMG_MODELS, defaultModel: OMG_MODELS[0], session: true, auto: true,
+  });
 });

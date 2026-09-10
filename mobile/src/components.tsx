@@ -112,6 +112,11 @@ export function SessionStatusDot({
 
   const pulseStyle = useAnimatedStyle(() => ({ opacity: busy ? pulse.value : 1 }));
 
+  // Idle shows nothing, as on the web (App.tsx's SessionStatusDot renders
+  // only working and paused). A green dot on every idle row said "ok" ten
+  // times down the list and made the one working row harder to find.
+  if (!busy) return null;
+
   return (
     <Reanimated.View
       style={[
@@ -979,12 +984,11 @@ export function HomeComposer({
   onStart: () => void;
   starting?: boolean;
   projectLabel?: string | null;
-  /** Empty when this machine has one folder — see session-options.ts. */
   projectOptions: MenuOption[];
   agent?: string | null;
   agentLabel?: string | null;
   agentOptions: MenuOption[];
-  /** Which model, and how hard to think — each its own one-layer menu. */
+  /** Model and thinking choices share the coding-agent menu. */
   modelLabel?: string | null;
   modelOptions?: MenuOption[];
   thinkingLabel?: string | null;
@@ -1012,11 +1016,6 @@ export function HomeComposer({
   bottomInset?: number;
 }) {
   const { colors, isDark, radius, type, space } = useTheme();
-  /**
-   * Which usage the sheet is showing: this agent's, or the whole fleet's.
-   * `null` is closed. See UsageSheet for why the fleet view is a long-press
-   * rather than the default.
-   */
   const [usageSheet, setUsageSheet] = useState<"agent" | "all" | null>(null);
   /** The not-yet-settled words, when a live take is running. */
   const dictationTail =
@@ -1028,6 +1027,20 @@ export function HomeComposer({
     borderWidth: isDark ? StyleSheet.hairlineWidth : 0,
     borderColor: colors.borderSoft,
   };
+  const agentUsage = usage.find(
+    (provider) => provider.kind === providerKindForAgent(agent),
+  );
+  const setupOptions: MenuOption[] = [
+    ...(agentOptions.length
+      ? [{ label: agentLabel ?? "Coding agent", submenu: agentOptions }]
+      : []),
+    ...(modelOptions?.length
+      ? [{ label: modelLabel ?? "Model", submenu: modelOptions }]
+      : []),
+    ...(thinkingOptions?.length
+      ? [{ label: thinkingLabel ?? "Thinking", submenu: thinkingOptions }]
+      : []),
+  ];
   return (
     <View
       /**
@@ -1060,7 +1073,8 @@ export function HomeComposer({
         // session composer — which adds them — floated correctly. Two
         // composers, two heights, on screens you swap between constantly.
         paddingBottom: bottomInset + space.sm,
-        backgroundColor: colors.bg,
+        // The session list continues behind the composer, as it does in chat.
+        backgroundColor: "transparent",
       }}
     >
       {/* Liquid Glass on iOS 26+, a solid card everywhere else. */}
@@ -1097,10 +1111,38 @@ export function HomeComposer({
             label explaining a control that opens the moment you touch it —
             the kind of hint that makes an interface look unsure of itself.
             Pressing it teaches it once and for good. */}
-        {agentOptions.length ? (
-          <DropdownMenu options={agentOptions}>
-            <View accessibilityLabel={`Agent: ${agentLabel ?? "Claude"}. Change`}>
-              <AgentAvatar agent={agent} size={32} />
+        {setupOptions.length ? (
+          <DropdownMenu title="Coding agent" options={setupOptions}>
+            <View
+              accessibilityLabel={`${agentLabel ?? "Coding agent"}, ${modelLabel ?? "default model"}, ${thinkingLabel ?? "default thinking"}. Change`}
+              style={{ width: 38, height: 38, alignItems: "center", justifyContent: "center" }}
+            >
+              {agentUsage ? (
+                <UsageRings
+                  size={38}
+                  windows={agentUsage.available ? orderWindows(agentUsage.windows ?? []) : []}
+                />
+              ) : usageLoading ? (
+                <ActivityIndicator
+                  size="small"
+                  color={colors.textMuted}
+                  style={{ position: "absolute" }}
+                />
+              ) : null}
+              <View
+                style={{
+                  position: "absolute",
+                  zIndex: 1,
+                  width: 30,
+                  height: 30,
+                  borderRadius: 15,
+                  alignItems: "center",
+                  justifyContent: "center",
+                  backgroundColor: colors.bg,
+                }}
+              >
+                <AgentAvatar agent={agent} size={27} plain />
+              </View>
             </View>
           </DropdownMenu>
         ) : (
@@ -1243,6 +1285,10 @@ export function HomeComposer({
           own beats a queue of pills all starting from the left edge. */}
       <View
         style={{
+          // Folder, model, thinking, and usage now live in the folder rail or
+          // the coding-agent control. Keep this old row out of layout while
+          // its picker implementation remains available to older call sites.
+          display: "none",
           flexDirection: "row",
           alignItems: "center",
           justifyContent: "space-between",

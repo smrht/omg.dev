@@ -1,3 +1,6 @@
+import { OMG_MODELS } from "./omg-models.ts";
+export { OMG_MODELS } from "./omg-models.ts";
+
 import type { Agent } from "./agents/registry.ts";
 import type { AutoAgent } from "./auto/store.ts";
 import type { CodingAgentInfo, CodingAgentKind } from "./coding-agents.ts";
@@ -177,6 +180,7 @@ export const AUTO_AGENT_BACKENDS = [
   "fx",
   "muse",
   "opencode",
+  "omg",
 ] as const;
 export type AutoAgentBackend = (typeof AUTO_AGENT_BACKENDS)[number];
 const MODEL_CATALOG_KEYS: CodingAgentKind[] = [
@@ -190,6 +194,7 @@ const MODEL_CATALOG_KEYS: CodingAgentKind[] = [
   "muse",
   "deepseek",
   "opencode",
+  "omg",
   "jcode",
   "pi",
   "copilot",
@@ -239,6 +244,7 @@ const LABELS: Record<CodingAgentKind, string> = {
   codex: "codex",
   "codex-aisdk": "codex",
   opencode: "opencode",
+  omg: "omg agent",
   jcode: "jcode",
   grok: "grok",
   cursor: "cursor",
@@ -262,6 +268,7 @@ export const MODEL_OPTIONS: Record<CodingAgentKind, { defaultModel: string; mode
   deepseek: { defaultModel: "deepseek-v4-flash", models: DEEPSEEK_MODELS },
   hermes: { defaultModel: "nousresearch/hermes-4-405b", models: HERMES_MODELS },
   opencode: { defaultModel: "opencode/nemotron-3.5-lightning-free", models: OPENCODE_MODELS },
+  omg: { defaultModel: OMG_MODELS[0]!, models: OMG_MODELS },
   jcode: { defaultModel: "auto", models: JCODE_MODELS },
   pi: { defaultModel: "sonnet", models: PI_MODELS },
   copilot: { defaultModel: "claude-sonnet-4.5", models: COPILOT_MODELS },
@@ -564,6 +571,7 @@ function curateModels(
 }
 
 export function rawModelsForAgent(agent: CodingAgentKind): string[] {
+  if (agent === "omg") return [...OMG_MODELS];
   const fallback = MODEL_OPTIONS[agent]?.models;
   const provider = readModelDiscoveryCacheSync()?.providers?.[agent];
   // A successful harness query is authoritative. Unioning it with the static

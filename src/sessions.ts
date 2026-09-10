@@ -94,6 +94,7 @@ const DIRECT_INDEX_MANAGED_AGENTS = new Set<ManagedSession["agent"]>([
   "aisdk",
   "codex-aisdk",
   "opencode",
+  "omg",
   "pi",
   "grok",
   "cursor",
@@ -633,7 +634,7 @@ export function managedLaunchRow(
             ? `jcode --model ${m.model ?? ""} repl`.trim()
           : agent === "hermes"
           ? `hermes --model ${m.model ?? ""}`.trim()
-          : agent === "opencode"
+          : (agent === "opencode" || agent === "omg")
             ? `lfg opencode-aisdk-session --model ${m.model ?? ""}`.trim()
             : agent === "pi"
               ? `lfg pi-session --model ${m.model ?? ""}`.trim()
@@ -680,7 +681,7 @@ export function managedLaunchRow(
     managed: true,
     assignedUser: assigns[m.tmuxName] ?? null,
     model:
-      agent === "codex" || agent === "codex-aisdk" || agent === "opencode" || agent === "jcode" || agent === "grok" || agent === "cursor" || agent === "deepseek" || agent === "hermes" || agent === "muse"
+      agent === "codex" || agent === "codex-aisdk" || agent === "opencode" || agent === "omg" || agent === "jcode" || agent === "grok" || agent === "cursor" || agent === "deepseek" || agent === "hermes" || agent === "muse"
         ? model
         : modelAlias(model),
     thinkingLevel: m.thinkingLevel ?? null,
@@ -3170,7 +3171,7 @@ export async function listSessions(): Promise<Session[]> {
   // (send/interrupt route through the command file, not the pane).
   for (const e of aisdkEntries) {
     const isCodex = e.agent === "codex";
-    const isOpencode = e.agent === "opencode";
+    const isOpencode = (e.agent === "opencode" || e.agent === "omg");
     const isPi = e.agent === "pi";
     const publicAgent = isCodex ? "codex-aisdk" : (e.agent ?? "claude") === "claude" ? "aisdk" : e.agent!;
     const codexThreadId = isCodex ? (e.threadId ?? null) : null;
@@ -3602,8 +3603,8 @@ export type ResumableSession = {
   // Which engine the session was recorded with. "claude" resumes via the claude
   // CLI (`claude --resume`); "codex" resumes via a codex-aisdk harness keyed to
   // the rollout's threadId. The serve /resume endpoint branches on this.
-  agent: "claude" | "codex" | "opencode" | "pi" | "grok" | "cursor" | "fx" | "muse" | "copilot" | "jcode";
-  backend?: "aisdk" | "codex-aisdk" | "opencode" | "pi" | "grok" | "cursor" | "fx" | "muse" | "copilot" | "jcode";
+  agent: "claude" | "codex" | "opencode" | "omg" | "pi" | "grok" | "cursor" | "fx" | "muse" | "copilot" | "jcode";
+  backend?: "aisdk" | "codex-aisdk" | "opencode" | "omg" | "pi" | "grok" | "cursor" | "fx" | "muse" | "copilot" | "jcode";
   resumeHandle?: string | null;
   model?: string | null;
   thinkingLevel?: string | null;
@@ -3914,8 +3915,8 @@ async function refreshResumableCacheOnce(focusSessionId?: string): Promise<void>
     );
     const backend = m.agent === "codex-aisdk"
       ? "codex-aisdk"
-      : m.agent === "opencode"
-        ? "opencode"
+      : (m.agent === "opencode" || m.agent === "omg")
+        ? m.agent
         : m.agent === "pi"
           ? "pi"
           : m.agent === "grok" || m.agent === "cursor" || m.agent === "copilot" || m.agent === "jcode"
@@ -3923,8 +3924,8 @@ async function refreshResumableCacheOnce(focusSessionId?: string): Promise<void>
             : "aisdk";
     const agent = backend === "codex-aisdk"
       ? "codex"
-      : backend === "opencode"
-        ? "opencode"
+      : (backend === "opencode" || backend === "omg")
+        ? backend
       : backend === "pi"
         ? "pi"
         : backend === "grok" || backend === "cursor" || backend === "copilot" || backend === "jcode"

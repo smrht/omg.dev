@@ -67,11 +67,13 @@ import {
   sessionStableId,
   type SessionNode,
 } from "./session-tree";
-import { AutoFindingCard } from "./auto-agent-card";
+import { AutoReportRow } from "./auto-agent-card";
+import { canDriveSession, type DriveableSession } from "./session-runtime";
 import { useOverlapWatch } from "./list-overlap-watch";
 import { groupNodesByProject } from "./session-groups";
 import { sessionPreview } from "./session-preview";
 import {
+  groupHomeAutoFindings,
   selectHomeAutoFindings,
   useAutoAgents,
   type AutoFindingRow,
@@ -90,11 +92,7 @@ import { useUsage } from "./usage";
 import { LucideIcon } from "./lucide";
 import { GlassSurface } from "./glass";
 import { DropdownMenu, type MenuOption } from "./menu";
-import {
-  ALL_PROJECTS,
-  useAgentPicker,
-  useProjectPicker,
-} from "./session-options";
+import { useAgentPicker, useProjectPicker } from "./session-options";
 import { useOmg } from "./provider";
 import { useToast } from "./toast";
 import { SessionListSkeleton } from "./skeleton";
@@ -349,11 +347,11 @@ const ELBOW_RADIUS = 9;
 /**
  * A conservative floor for the composer's height, before it has been
  * measured — see `composerHeight` below. The real composer is at least the
- * 44pt field row plus the agent/model/thinking pill row plus their spacing;
+ * 52pt field row plus its outer spacing;
  * this rounds up rather than down so a stale estimate over-clears the list
  * instead of letting a row sit under the glass.
  */
-const MIN_COMPOSER_HEIGHT = 96;
+const MIN_COMPOSER_HEIGHT = 76;
 
 /**
  * How far above the composer the scroll content starts dissolving.
@@ -460,21 +458,65 @@ function LiveWelcome({
  * pages menu. One component, so the phone's nav bar and the iPad rail carry
  * the same row. `navigate` differs: the phone pushes, the rail swaps the pane.
  */
+/**
+ * The machine, as the web's phone header places it: the FIRST thing on the
+ * bar, at the leading edge before the greeting, a bare glyph with the
+ * machine's online dot. It used to sit in the trailing island between the
+ * roster filter and the pages menu; the web keeps that island for the
+ * filter and the pages only, and the machine is where the row starts.
+ */
+function ComputerDisc({
+  computerOptions,
+  machineName,
+  online,
+}: {
+  computerOptions: MenuOption[];
+  machineName: string;
+  online: boolean;
+}) {
+  const { colors } = useTheme();
+  return (
+    <DropdownMenu title="Computer" options={computerOptions}>
+      <View
+        accessibilityRole="button"
+        accessibilityLabel={`Computer: ${machineName}. Change`}
+        style={{
+          width: 36,
+          height: 36,
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        <LucideIcon
+          name="monitor"
+          size={20}
+          color={colors.textSecondary}
+        />
+        <View
+          style={{
+            position: "absolute",
+            // Bottom-trailing of the glyph box, the corner UIKit badges
+            // from, clear of the monitor's stand.
+            right: 6,
+            bottom: 6,
+          }}
+        >
+          <StatusDot busy={online} size={7} />
+        </View>
+      </View>
+    </DropdownMenu>
+  );
+}
+
 function HomeHeaderControls({
   userFilter,
   rosterUsers,
   setUserFilter,
-  computerOptions,
-  machineName,
-  online,
   navigate,
 }: {
   userFilter: string;
   rosterUsers: RosterUser[];
   setUserFilter: (next: string) => void;
-  computerOptions: MenuOption[];
-  machineName: string;
-  online: boolean;
   navigate: (href: Href) => void;
 }) {
   const { colors, space } = useTheme();
@@ -482,52 +524,14 @@ function HomeHeaderControls({
     <View
       style={{ flexDirection: "row", alignItems: "center", gap: space.xs }}
     >
-      {/* The web's island, in the web's order: the roster filter first,
-          then the machine, then one overflow menu for the pages. The
-          bell, the bot and the gear used to be three more discs here;
-          they live in the menu now, as the web's PagesMenu keeps them. */}
+      {/* The web's island, in the web's order: the roster filter, then one
+          overflow menu for the pages. The machine is not here: it leads the
+          bar, before the greeting, as on the web. */}
       <UserFilterMenu
         value={userFilter}
         users={rosterUsers}
         onChange={setUserFilter}
       />
-      {/* TWO BUTTONS, NOT ONE CHIP.
-          The machine name and the gear used to share a single pill, which
-          read as one control and made the name look pressable-adjacent
-          rather than pressable. Split, each is a glyph on its own disc —
-          the shape iOS 26 gives bar items — and the machine's name moves
-          into the menu, where the checkmark already says which one is
-          current. The dot keeps the one thing the name was really
-          carrying: whether that machine is up. */}
-      <DropdownMenu title="Computer" options={computerOptions}>
-        <View
-          accessibilityRole="button"
-          accessibilityLabel={`Computer: ${machineName}. Change`}
-          style={{
-            width: 36,
-            height: 36,
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          <LucideIcon
-            name="monitor"
-            size={20}
-            color={colors.textSecondary}
-          />
-          <View
-            style={{
-              position: "absolute",
-              // Bottom-trailing of the glyph box, the corner UIKit badges
-              // from, clear of the monitor's stand.
-              right: 6,
-              bottom: 6,
-            }}
-          >
-            <StatusDot busy={online} size={7} />
-          </View>
-        </View>
-      </DropdownMenu>
       {/* Pages. The web's PagesMenu: everything that is a screen rather
           than a filter, behind one control, so the island stays three
           wide. Live is this screen and is not listed. */}
@@ -661,6 +665,8 @@ export function SessionsScreen({
    * two open at once push the Recent section off the bottom of a phone.
    */
   const [expandedAuto, setExpandedAuto] = useState<string | null>(null);
+  // Which agent's report is open. One at a time, like the finding cards.
+  const [expandedAgent, setExpandedAgent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const toast = useToast();
   useEffect(() => {
@@ -1010,6 +1016,10 @@ export function SessionsScreen({
       sessions.filter(
         (session) =>
           !(session as BotDrivenSession).botId &&
+          // The web's rule (session-runtime.ts): a session no client can
+          // drive is not listed. The phone used to show them and every
+          // archive on one answered "not in a tmux pane".
+          canDriveSession(session as DriveableSession) &&
           sessionMatchesUserFilter(session, userFilter),
       ),
     [sessions, userFilter],
@@ -1173,15 +1183,11 @@ export function SessionsScreen({
       );
       void (async () => {
         try {
-          await client.transport.request("/api/sessions/close-all", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              source: "mobile_swipe_archive",
-              scope: "idle",
-              sessionIds: [sessionId],
-            }),
-          });
+          await client.transport.request(`/api/sessions/${encodeURIComponent(sessionId)}/close`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ source: "mobile_swipe_archive" }),
+              });
         } catch (e) {
           setError(e instanceof Error ? e.message : String(e));
         } finally {
@@ -1326,11 +1332,19 @@ export function SessionsScreen({
           type: "custom",
           hidesSharedBackground: true,
           element: (
-            <LiveWelcome
-              firstName={firstName}
-              busyCount={flattenNodes(working).length}
-              onPress={() => router.push("/notifications")}
-            />
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 2 }}>
+              {/* Machine first, greeting second: the web's phone header. */}
+              <ComputerDisc
+                computerOptions={computerPicker.options}
+                machineName={machineName}
+                online={currentBinding?.online ?? false}
+              />
+              <LiveWelcome
+                firstName={firstName}
+                busyCount={flattenNodes(working).length}
+                onPress={() => router.push("/notifications")}
+              />
+            </View>
           ),
         },
       ],
@@ -1339,9 +1353,6 @@ export function SessionsScreen({
           userFilter={userFilter}
           rosterUsers={rosterUsers}
           setUserFilter={setUserFilter}
-          computerOptions={computerPicker.options}
-          machineName={machineName}
-          online={currentBinding?.online ?? false}
           navigate={(href) => router.push(href)}
         />
       ),
@@ -1418,13 +1429,7 @@ export function SessionsScreen({
       onChangeText={setDraft}
       onStart={() => void startSession()}
       starting={starting}
-      // null, not the "All projects" label — the pill collapses to a bare
-      // folder when nothing is scoped. See ComposerCaptionButton.
-      projectLabel={
-        projectPicker.filter === ALL_PROJECTS
-          ? null
-          : projectPicker.label
-      }
+      projectLabel={projectPicker.label}
       projectOptions={projectPicker.options}
       agent={agentPicker.agent}
       agentLabel={agentPicker.label}
@@ -1489,7 +1494,12 @@ export function SessionsScreen({
                 gap: space.sm,
               }}
             >
-              <View style={{ flex: 1, flexDirection: "row" }}>
+              <View style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: space.xs }}>
+                <ComputerDisc
+                  computerOptions={computerPicker.options}
+                  machineName={machineName}
+                  online={currentBinding?.online ?? false}
+                />
                 {/* The greeting wears the web's glass island so it earns the
                     header row it sits in. The phone's bar item stays bare:
                     there UIKit already gives the bar its material. */}
@@ -1514,9 +1524,6 @@ export function SessionsScreen({
                 userFilter={userFilter}
                 rosterUsers={rosterUsers}
                 setUserFilter={setUserFilter}
-                computerOptions={computerPicker.options}
-                machineName={machineName}
-                online={currentBinding?.online ?? false}
                 navigate={navigateWorkspace}
               />
             </View>
@@ -1572,6 +1579,49 @@ export function SessionsScreen({
               })}
             </View>
           </>
+        ) : null}
+        {ready && projectPicker.options.length ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            style={{ flexGrow: 0 }}
+            contentContainerStyle={{
+              gap: 8,
+              paddingHorizontal: space.lg,
+              paddingTop: space.xs,
+              paddingBottom: space.sm,
+            }}
+          >
+            {projectPicker.options.map((folder, index) => (
+              <PressableScale
+                key={`${folder.label}:${index}`}
+                onPress={folder.onPress}
+                accessibilityRole="button"
+                accessibilityState={{ selected: folder.selected }}
+                accessibilityLabel={`${folder.label} folder`}
+                scale={0.96}
+                style={{
+                  minHeight: 34,
+                  justifyContent: "center",
+                  paddingHorizontal: 14,
+                  borderRadius: radius.pill,
+                  backgroundColor: folder.selected ? colors.text : colors.secondary,
+                }}
+              >
+                <Text
+                  numberOfLines={1}
+                  style={{
+                    ...type.footnote,
+                    fontWeight: "600",
+                    color: folder.selected ? colors.bg : colors.textSecondary,
+                  }}
+                >
+                  {folder.label}
+                </Text>
+              </PressableScale>
+            ))}
+          </ScrollView>
         ) : null}
         <ScrollView
           style={{ flex: 1 }}
@@ -1811,23 +1861,7 @@ export function SessionsScreen({
                */}
               {projectGroups.map((group) => (
                 <View key={group.key}>
-                  {/* The heading IS the filter: tap to narrow to this folder,
-                    tap the cross to come back out. A group with no folder key
-                    ("No project") cannot be scoped to, so it stays inert. */}
-                  <SectionHeader
-                    label={group.label}
-                    count={group.count}
-                    onPress={
-                      group.project && projectPicker.filter === ALL_PROJECTS
-                        ? () => projectPicker.setFilter(group.project)
-                        : undefined
-                    }
-                    onClear={
-                      projectPicker.filter !== ALL_PROJECTS
-                        ? () => projectPicker.setFilter(ALL_PROJECTS)
-                        : undefined
-                    }
-                  />
+                  {/* The selected folder pill already names this list. */}
                   {/* 2pt, not 8. Rows are a list, not a stack of cards; the
                     fixed row height does the separating. */}
                   <View style={{ gap: 2 }}>
@@ -1894,28 +1928,22 @@ export function SessionsScreen({
                     count={autoRows.length}
                     dotColor={colors.text}
                   />
-                  <View style={{ gap: space.sm }}>
-                    {autoRows.map((row) => (
-                      <OverlapRow
-                        key={row.finding.id}
-                        id={`auto:${row.finding.id}`}
-                      >
-                        <AutoFindingCard
-                          row={row}
-                          expanded={expandedAuto === row.finding.id}
-                          onToggle={() =>
-                            setExpandedAuto((current) =>
-                              current === row.finding.id
-                                ? null
-                                : row.finding.id,
-                            )
-                          }
-                          onDismiss={() => dismissFinding(row.finding.id)}
-                          onStartSession={() =>
-                            void startSessionFromFinding(row)
-                          }
-                          busy={startingFindingId === row.finding.id}
+                  <View style={{ gap: space.xs }}>
+                    {/* One row per agent, as the web's Auto section: the
+                        name, a count when there is more than one, the lead
+                        finding, the worst severity and the newest time.
+                        Tapping opens the agent's report page. */}
+                    {groupHomeAutoFindings(autoRows).map((group) => (
+                      <OverlapRow key={`agent:${group.agentId}`} id={`auto-agent:${group.agentId}`}>
+                        <AutoReportRow
+                          group={group}
                           animateEntry={animateEntry}
+                          onOpen={() => {
+                            void Haptics.selectionAsync();
+                            const href = `/auto/${encodeURIComponent(group.agentId)}` as Href;
+                            if (workspace) navigateWorkspace(href);
+                            else router.push(href);
+                          }}
                         />
                       </OverlapRow>
                     ))}

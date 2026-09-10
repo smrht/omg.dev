@@ -1,3 +1,4 @@
+import { ensureOmgProvider } from "../../omg-provider.ts";
 // Headless interactive session harness for the "opencode" agent kind.
 //
 // This is the long-lived process behind a managed opencode session. Like its
@@ -481,6 +482,7 @@ export async function pipeToOpencodeAiSdk(
 ): Promise<string> {
   const model = opts.model ?? "opencode/big-pickle";
   const cwd = opts.cwd ?? process.cwd();
+  if (model.startsWith("omg/")) ensureOmgProvider();
   ensureOpencodeOnPath();
   const { createOpencodeServer, createOpencodeClient } = await import("@opencode-ai/sdk");
 
@@ -544,6 +546,7 @@ export async function cmdOpencodeAisdkSession(argv: string[]): Promise<void> {
     process.chdir(cwd);
   } catch {}
 
+  if (model.startsWith("omg/")) ensureOmgProvider();
   ensureOpencodeOnPath();
   const { createOpencodeServer, createOpencodeClient } = await import("@opencode-ai/sdk");
 
@@ -642,7 +645,7 @@ export async function cmdOpencodeAisdkSession(argv: string[]): Promise<void> {
   const bootId = currentBootId();
   writeEntry({
     sessionId: key,
-    agent: "opencode",
+    agent: model.startsWith("omg/") ? "omg" : "opencode",
     threadId: ocSessionId,
     harnessPid: process.pid,
     tmuxName,

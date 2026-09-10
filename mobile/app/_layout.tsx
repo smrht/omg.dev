@@ -333,6 +333,9 @@ function RootNavigator() {
             <Stack.Screen name="bots/new" />
             <Stack.Screen name="bots/[id]/index" />
             <Stack.Screen name="bots/[id]/edit" />
+            <Stack.Screen name="artifact/file" />
+            <Stack.Screen name="auto/[agentId]" />
+            <Stack.Screen name="auto/[agentId]/[findingId]" />
           </Stack.Protected>
         </Stack>
       </>
@@ -614,6 +617,9 @@ function RootNavigator() {
               a normal pushed screen rather than a modal so the back gesture
               behaves the same as everywhere else. */}
           <Stack.Screen name="plan" options={{ title: "Subscription", headerLargeTitle: true }} />
+          <Stack.Screen name="artifact/file" options={{ title: "File" }} />
+          <Stack.Screen name="auto/[agentId]" options={{ title: "Report" }} />
+          <Stack.Screen name="auto/[agentId]/[findingId]" options={{ title: "Finding" }} />
         </Stack.Protected>
       </Stack>
     </>
