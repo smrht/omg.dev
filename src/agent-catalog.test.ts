@@ -347,3 +347,4 @@ test("omg agent lists the 13 routed models in hosted picker order", async () => 
     label: "omg agent", models: OMG_MODELS, defaultModel: OMG_MODELS[0], session: true, auto: true,
   });
 });
+});
