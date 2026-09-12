@@ -289,7 +289,7 @@ import {
   type SessionMsg,
 } from "../sessions.ts";
 import { markSessionRead, sessionUnreadMap } from "../session-reads.ts";
-import { countTranscriptRows } from "../transcript-rows.ts";
+import { countTranscriptRows, foldWorkRows, LiveWorkRows, type ChatRenderMessage } from "../transcript-rows.ts";
 import {
   invalidateListSessionsCache,
   listSessionsCached,
@@ -768,7 +768,11 @@ import {
   reconcileQueued,
   getMessage,
   recordCommandFileMessage,
+  holdMessage,
+  removeHeldMessage,
   resumePersistedQueues,
+  setHeldReleaseHandler,
+  updateHeldMessage,
   takeUndeliveredQueue,
 } from "../sendq.ts";
 import { startFleetWatcher } from "../voice-bus.ts";
@@ -2481,24 +2485,35 @@ function withImageArtifacts<T extends { role: string; kind: string; text: string
   );
 }
 
+// The wire shape of a page of transcript, in the order the capabilities apply:
+// what a client may see, then names only, then rows. The fold goes last so
+// the calls inside a row are the deferred ones.
 function transcriptMessagesForClient<T extends { role: string; kind: string; text: string; ts?: number | null; id?: string | null }>(
   sessionId: string,
   messages: T[],
-  opts: { deferToolArgs?: boolean } = {},
+  opts: { deferToolArgs?: boolean; workRows?: boolean } = {},
 ): Array<T | ImageArtifactMessage> {
   const visible = withImageArtifacts(sessionId, visibleTranscriptMessages(messages));
-  return opts.deferToolArgs ? deferToolUseArgs(visible) : visible;
+  const shaped = opts.deferToolArgs ? deferToolUseArgs(visible) : visible;
+  return opts.workRows ? foldWorkRows(shaped) : shaped;
 }
 
+/** One SSE connection's live folder for one session; see LiveWorkRows. */
+type LiveFolder = LiveWorkRows<ChatRenderMessage & { kind: string; text: string }>;
+
 // The live half of transcriptMessagesForClient. A streamed message needs the
-// same two wire filters, but not the artifact hydration: artifacts arrive on
-// their own subscription, already hydrated.
+// same wire filters, but not the artifact hydration: artifacts arrive on
+// their own subscription, already hydrated. With a folder, each message
+// becomes the rows to send for it — the open run re-sent one step longer, or
+// the message that closed it.
 function liveTranscriptMessagesForClient<T extends { kind: string; text: string }>(
   messages: T[],
-  opts: { deferToolArgs?: boolean } = {},
+  opts: { deferToolArgs?: boolean; workRows?: LiveFolder | null } = {},
 ): T[] {
   const visible = visibleTranscriptMessages(messages);
-  return opts.deferToolArgs ? (deferToolUseArgs(visible) as T[]) : visible;
+  const shaped = opts.deferToolArgs ? (deferToolUseArgs(visible) as T[]) : visible;
+  const folder = opts.workRows;
+  return folder ? shaped.flatMap((message) => folder.next(message) as T[]) : shaped;
 }
 
 // The `deferToolArgs` capability, as a query parameter.
@@ -2509,6 +2524,14 @@ function liveTranscriptMessagesForClient<T extends { kind: string; text: string 
 // environment variable and no configuration for it.
 function requestedDeferToolArgs(url: URL): boolean {
   return url.searchParams.get("deferToolArgs") === "1";
+}
+
+// The `workRows` capability, as a query parameter. Same contract: a client
+// that omits it receives every tool call and thought as its own message and
+// folds them itself, exactly as it always has. A client that declares it
+// receives each run as one `work` row (see src/transcript-rows.ts).
+function requestedWorkRows(url: URL): boolean {
+  return url.searchParams.get("workRows") === "1";
 }
 
 // Rows as the client will count them: the shared row model applied to the
@@ -2604,7 +2627,12 @@ function interruptLiveSession(session: Session): { ok: boolean; error?: string; 
 function sendPromptToLiveSession(
   session: Session,
   text: string,
-  opts: { mode?: "steer" | "queue" } = {},
+  // `hold`: a queue-mode send from the composer stays in the send queue as an
+  // editable held row until the agent is idle, instead of being typed into
+  // the harness now (where it either merged into the running turn or vanished
+  // into the TUI's own queue). The held-row release path and agent-to-agent
+  // updates deliver right away.
+  opts: { mode?: "steer" | "queue"; hold?: boolean } = {},
 ): { ok: boolean; msg?: unknown; error?: string } {
   const prompt = text.trim();
   if (!prompt) return { ok: true };
@@ -2615,9 +2643,13 @@ function sendPromptToLiveSession(
     sessionId: sid,
     agent: session.agent,
     mode: opts.mode ?? "steer",
+    hold: !!opts.hold,
     busy: !!session.busy,
     chars: prompt.length,
   });
+  if (opts.mode === "queue" && opts.hold && session.busy) {
+    return { ok: true, msg: holdMessage(sid, prompt) };
+  }
   if ((opts.mode ?? "steer") === "steer" && session.busy) {
     const interrupted = interruptLiveSession(session);
     if (!interrupted.ok) return interrupted;
@@ -4273,7 +4305,9 @@ export async function cmdServe() {
         const wsTag = resolveSessionUserTag(wsRequestedUser);
         const wsViewer = botViewerFromRequest(req, wsTag.ok ? wsTag.user : undefined);
         const ok = server.upgrade(req, {
-          data: liveWs.dataForRequest(viewerConversationParticipantId(wsViewer.identity)),
+          data: liveWs.dataForRequest(viewerConversationParticipantId(wsViewer.identity), {
+            workRows: requestedWorkRows(url),
+          }),
         });
         if (ok) return undefined; // upgraded — Bun takes over the socket
         return err(400, "expected a websocket upgrade");
@@ -5361,6 +5395,11 @@ a{color:#60a5fa}
             if (typeof b.showComposerFastMode !== "boolean")
               return err(400, "showComposerFastMode must be a boolean");
             patch.showComposerFastMode = b.showComposerFastMode;
+          }
+          if (b?.composerSendMode !== undefined) {
+            if (b.composerSendMode !== "steer" && b.composerSendMode !== "queue")
+              return err(400, 'composerSendMode must be "steer" or "queue"');
+            patch.composerSendMode = b.composerSendMode;
           }
           if (b?.customInstructions !== undefined) {
             if (
@@ -7406,33 +7445,24 @@ a{color:#60a5fa}
         // so the voice agent can read them out and answer on the user's behalf.
         // Carry the question in the push itself. A wake-only push would make
         // the worker fetch /api/push/pending, which it can only reach when the
-        // app is served from this box. (Web only — see push-native.ts for why
-        // native never gets `body` verbatim.)
-        void (async () => {
-          const askSession = q.sessionId
-            ? (await listSessions()).find(
-                (s) => s.sessionId === q.sessionId || s.nativeSessionId === q.sessionId,
-              )
-            : undefined;
-          await notifyAll({
-            user: q.user,
-            notification: {
-              title: "omg needs your input",
-              body:
-                q.options?.length
-                  ? `${q.question} — ${q.options.join(" / ")}`
-                  : q.question,
-              // Straight to the session asking, not just the app root, so a
-              // tap — on any platform — lands on the actual question. Asks
-              // are always tied to a running session in practice; "/" is only
-              // ever a fallback for a hand-authored question with none.
-              url: q.sessionId ? `/?session=${encodeURIComponent(q.sessionId)}` : "/",
-              tag: `ask-${q.id}`,
-              requireInteraction: true,
-              project: askSession?.project,
-            },
-          });
-        })().catch(() => {});
+        // app is served from this box.
+        void notifyAll({
+          user: q.user,
+          notification: {
+            title: "omg needs your input",
+            body:
+              q.options?.length
+                ? `${q.question} — ${q.options.join(" / ")}`
+                : q.question,
+            // Straight to the session asking, not just the app root, so a
+            // tap — on any platform — lands on the actual question. Asks
+            // are always tied to a running session in practice; "/" is only
+            // ever a fallback for a hand-authored question with none.
+            url: q.sessionId ? `/?session=${encodeURIComponent(q.sessionId)}` : "/",
+            tag: `ask-${q.id}`,
+            requireInteraction: true,
+          },
+        }).catch(() => {});
         // Pushback asks never block — the answer arrives via session injection.
         if (q.pushback || b.wait === false) return json({ id: q.id, status: q.status });
         // Cap the block so a stuck request can't pin a connection forever.
@@ -9806,7 +9836,6 @@ a{color:#60a5fa}
                   ? `/?session=${encodeURIComponent(post.sessionId)}`
                   : "/notifications",
                 tag: `shipped-${post.id}-${post.rev}`,
-                project: post.project,
               },
             }).catch(() => {});
             // Publishing is not a lifecycle event: the source session stays
@@ -9989,7 +10018,10 @@ a{color:#60a5fa}
               fromSessionId: body?.fromSessionId,
               targetPersistent: sess.persistent,
             });
-            const sent = sendPromptToLiveSession(sess, text, { mode });
+            const sent = sendPromptToLiveSession(sess, text, {
+              mode,
+              hold: mode === "queue" && !body?.fromSessionId,
+            });
             if (!sent.ok) return err(409, sent.error || "couldn't send message");
             sentMsg = sent.msg;
           }
@@ -10293,6 +10325,7 @@ a{color:#60a5fa}
           // because a run of tool calls collapses into one.
           const rows = requestedRows(url);
           const deferToolArgs = requestedDeferToolArgs(url);
+          const workRows = requestedWorkRows(url);
           if (url.searchParams.get("page") === "backward") {
             const rawLimit = parseInt(url.searchParams.get("limit") ?? "220", 10);
             const limit = Number.isFinite(rawLimit) ? rawLimit : 220;
@@ -10311,7 +10344,7 @@ a{color:#60a5fa}
               id: m[1],
               total: page.total,
               nextBefore: page.nextBefore,
-              messages: transcriptMessagesForClient(m[1], page.messages, { deferToolArgs }).map(msgWithHtml),
+              messages: transcriptMessagesForClient(m[1], page.messages, { deferToolArgs, workRows }).map(msgWithHtml),
             });
           }
           const full = url.searchParams.get("full") === "1";
@@ -10331,7 +10364,7 @@ a{color:#60a5fa}
             id: m[1],
             total: page.total,
             nextBefore: page.nextBefore,
-            messages: transcriptMessagesForClient(m[1], page.messages, { deferToolArgs }).map(msgWithHtml),
+            messages: transcriptMessagesForClient(m[1], page.messages, { deferToolArgs, workRows }).map(msgWithHtml),
           });
         }
       }
@@ -10376,6 +10409,27 @@ a{color:#60a5fa}
           if (!query) return err(400, "expected { query }");
           const r = await searchTranscriptIndex(tp, m[1], query, { limit: body?.limit });
           return json({ id: m[1], query, ...r });
+        }
+      }
+
+      // A held row (queue mode while the agent was busy) is the user's text,
+      // still theirs to edit or drop until the idle release sends it.
+      {
+        const m = path.match(/^\/api\/sessions\/([0-9a-fA-F-]{36})\/queue\/([0-9a-f]+)$/);
+        if (m && req.method === "PATCH") {
+          const body = (await req.json().catch(() => null)) as { text?: string } | null;
+          const text = body?.text?.trim();
+          if (!text) return err(400, "expected { text }");
+          const updated = updateHeldMessage(m[1], m[2], text);
+          if (!updated) return err(404, "queued message not found");
+          if (updated === "not-held") return err(409, "only a held message can be edited");
+          return json({ ok: true, msg: updated });
+        }
+        if (m && req.method === "DELETE") {
+          const removed = removeHeldMessage(m[1], m[2]);
+          if (!removed) return err(404, "queued message not found");
+          if (removed === "not-held") return err(409, "only a held message can be removed");
+          return json({ ok: true });
         }
       }
 
@@ -10668,7 +10722,19 @@ a{color:#60a5fa}
         // Per-connection capability, declared on the stream URL. Absent means
         // the old payload, so an older EventSource client is unchanged.
         const deferToolArgs = requestedDeferToolArgs(url);
-        evlog("live_stream_request", { rid, ids, idsCount: ids.length, deferToolArgs });
+        const workRows = requestedWorkRows(url);
+        // One live folder per session on this connection, or none at all.
+        const workFolders = new Map<string, LiveFolder>();
+        const folderFor = (sid: string): LiveFolder | null => {
+          if (!workRows) return null;
+          let folder = workFolders.get(sid);
+          if (!folder) {
+            folder = new LiveWorkRows();
+            workFolders.set(sid, folder);
+          }
+          return folder;
+        };
+        evlog("live_stream_request", { rid, ids, idsCount: ids.length, deferToolArgs, workRows });
         type LivePane = { sid: string; tp: string | null; target: string | null; agent: Session["agent"] | null };
         let panes: LivePane[] = [];
 
@@ -10715,7 +10781,10 @@ a{color:#60a5fa}
             artifactUnsub = subscribeIndexedArtifactMessages(({ sessionId, message }) => {
               if (closed || !ids.includes(sessionId)) return;
               markMessage(sessionId);
-              send(`event: msg\ndata: ${JSON.stringify({ sid: sessionId, m: msgWithHtml(message) })}\n\n`);
+              const messages = liveTranscriptMessagesForClient([message], { deferToolArgs, workRows: folderFor(sessionId) });
+              for (const msg of messages) {
+                send(`event: msg\ndata: ${JSON.stringify({ sid: sessionId, m: msgWithHtml(msg) })}\n\n`);
+              }
             });
             const subscribeTranscriptOne = (p: LivePane, tp: string) => {
               if (transcriptUnsubs.has(p.sid)) return;
@@ -10724,7 +10793,10 @@ a{color:#60a5fa}
                 p.sid,
                 subscribeChatTranscript(tp, p.sid, (event) => {
                   if (closed) return;
-                  const messages = liveTranscriptMessagesForClient(event.messages, { deferToolArgs });
+                  const messages = liveTranscriptMessagesForClient(event.messages, {
+                    deferToolArgs,
+                    workRows: folderFor(p.sid),
+                  });
                   if (messages.length) markMessage(p.sid);
                   for (const msg of messages) {
                     send(`event: msg\ndata: ${JSON.stringify({ sid: p.sid, m: msgWithHtml(msg) })}\n\n`);
@@ -10882,7 +10954,11 @@ a{color:#60a5fa}
                   const renderT0 = performance.now();
                   const msgs = transcriptMessagesForClient(p.sid, page.messages, {
                     deferToolArgs,
+                    workRows,
                   }).map(msgWithHtml);
+                  // A run at the end of the backlog is still open: the next
+                  // step re-sends it, so the folder must know about it.
+                  folderFor(p.sid)?.seed(msgs);
                   evlog("live_stream_backlog", {
                     rid,
                     sid: p.sid,
@@ -10964,8 +11040,9 @@ a{color:#60a5fa}
           const tp = await resolveTranscript(m[1]);
           if (!tp) return err(404, "session transcript not found");
           const target = session?.tmuxTarget ?? null;
-          // Same per-connection capability as /api/live/stream.
+          // Same per-connection capabilities as /api/live/stream.
           const deferToolArgs = requestedDeferToolArgs(url);
+          const workFolder: LiveFolder | null = requestedWorkRows(url) ? new LiveWorkRows() : null;
           let iv: ReturnType<typeof setInterval> | null = null;
           let pi: ReturnType<typeof setInterval> | null = null;
           let di: ReturnType<typeof setInterval> | null = null;
@@ -11005,7 +11082,8 @@ a{color:#60a5fa}
               artifactUnsub = subscribeIndexedArtifactMessages(({ sessionId, message }) => {
                 if (closed || sessionId !== sid) return;
                 lastMessageAt = Date.now();
-                send(`event: msg\ndata: ${JSON.stringify(msgWithHtml(message))}\n\n`);
+                const messages = liveTranscriptMessagesForClient([message], { deferToolArgs, workRows: workFolder });
+                for (const msg of messages) send(`event: msg\ndata: ${JSON.stringify(msgWithHtml(msg))}\n\n`);
               });
               const ensureTranscript = async () => {
                 if (closed) return;
@@ -11013,7 +11091,10 @@ a{color:#60a5fa}
                   if (!transcriptUnsub) {
                     transcriptUnsub = subscribeChatTranscript(tp, sid, (event) => {
                       if (closed) return;
-                      const messages = liveTranscriptMessagesForClient(event.messages, { deferToolArgs });
+                      const messages = liveTranscriptMessagesForClient(event.messages, {
+                        deferToolArgs,
+                        workRows: workFolder,
+                      });
                       if (messages.length) lastMessageAt = Date.now();
                       for (const msg of messages) send(`event: msg\ndata: ${JSON.stringify(msgWithHtml(msg))}\n\n`);
                     });
@@ -11043,8 +11124,9 @@ a{color:#60a5fa}
                 const msgs = transcriptMessagesForClient(
                   sid,
                   page.messages,
-                  { deferToolArgs },
+                  { deferToolArgs, workRows: !!workFolder },
                 ).map(msgWithHtml);
+                workFolder?.seed(msgs);
                 for (const msg of msgs)
                   send(`event: msg\ndata: ${JSON.stringify(msg)}\n\n`);
                 await ensureTranscript();
@@ -11177,6 +11259,17 @@ a{color:#60a5fa}
     console.log(`[session-recovery] adopted=${recovered.adopted} recovered=${recovered.recovered} recoveredTmux=${recovered.recoveredTmux} failed=${recovered.failed} skippedLegacy=${recovered.skippedLegacy}`);
     invalidateListSessionsCache();
   }
+  // Held rows are released through the same path a composer send takes, minus
+  // `hold`: the session is idle when this runs, and a second held row must
+  // not be re-held behind the first one's turn.
+  setHeldReleaseHandler(async (sessionId, text) => {
+    const sess = (await listSessionsCached()).find(
+      (s) => s.sessionId === sessionId || s.nativeSessionId === sessionId,
+    );
+    if (!sess) return { ok: false, error: "session not found" };
+    const sent = sendPromptToLiveSession(sess, text, { mode: "queue" });
+    return sent.ok ? { ok: true } : { ok: false, error: sent.error };
+  });
   const resumedQueueMessages = resumePersistedQueues();
   if (resumedQueueMessages) {
     console.log(`[sendq] resumed=${resumedQueueMessages}`);

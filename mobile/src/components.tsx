@@ -42,6 +42,8 @@ import {
 } from "./omg/usage";
 import type { OmgColors } from "./omg/palette";
 import { DropdownMenu, type MenuOption } from "./omg/menu";
+import { AgentSetupSheet } from "./omg/agent-setup-sheet";
+import { SkillSuggest } from "./omg/skill-suggest";
 import { PressableScale, useListItemMotion } from "./omg/motion";
 import { useSwipeToCommit } from "./omg/swipe-row";
 import { useTheme } from "./omg/theme";
@@ -708,9 +710,9 @@ export const SESSION_ROW = {
   /** Fixed, not minimum — see the note on the row's own height. */
   height: 60,
   /** Horizontal margin between the row and the edge of its column. */
-  inset: 8,
+  inset: 12,
   /** Inset from the row's own edge to the mark. */
-  padding: 8,
+  padding: 10,
   /** The agent mark's box. */
   avatar: 22,
 } as const;
@@ -925,11 +927,12 @@ export function SessionCard({
                 {timestamp}
               </Text>
             ) : null}
+            {/* No amber dot while busy: the agent mark beside the row already
+                wears the working ring, and two live indicators on one row read
+                as two different things happening. Blocked keeps its pause. */}
             {blocked ? (
               <Icon ios="pause.fill" android="pause" size={12} color={colors.warning} />
-            ) : (
-              <SessionStatusDot busy={busy} ended={ended} />
-            )}
+            ) : null}
           </View>
         </PressableScale>
       </Reanimated.View>
@@ -1030,17 +1033,10 @@ export function HomeComposer({
   const agentUsage = usage.find(
     (provider) => provider.kind === providerKindForAgent(agent),
   );
-  const setupOptions: MenuOption[] = [
-    ...(agentOptions.length
-      ? [{ label: agentLabel ?? "Coding agent", submenu: agentOptions }]
-      : []),
-    ...(modelOptions?.length
-      ? [{ label: modelLabel ?? "Model", submenu: modelOptions }]
-      : []),
-    ...(thinkingOptions?.length
-      ? [{ label: thinkingLabel ?? "Thinking", submenu: thinkingOptions }]
-      : []),
-  ];
+  const hasSetup = Boolean(
+    agentOptions.length || modelOptions?.length || thinkingOptions?.length,
+  );
+  const [setupOpen, setSetupOpen] = useState(false);
   return (
     <View
       /**
@@ -1077,6 +1073,8 @@ export function HomeComposer({
         backgroundColor: "transparent",
       }}
     >
+      {/* "/" lists the box's skills above the field, as on the web. */}
+      <SkillSuggest value={value} onChangeText={onChangeText} />
       {/* Liquid Glass on iOS 26+, a solid card everywhere else. */}
       <GlassSurface
         variant="regular"
@@ -1103,51 +1101,41 @@ export function HomeComposer({
             change it are the same object, rather than adding a second
             affordance that says the same thing.
 
-            No PressableScale: the menu owns the press (the trigger lives
-            inside a SwiftUI Menu, so React Native never sees the touch), and a
-            spring that cannot fire is worse than none. The menu's own
-            appearance is the feedback. */}
+            It opens AgentSetupSheet: one card with agent, model and thinking
+            all visible, instead of a native menu with a submenu per row. */}
         {/* No affordance badge. A chevron tucked under the avatar was a 14pt
             label explaining a control that opens the moment you touch it —
             the kind of hint that makes an interface look unsure of itself.
             Pressing it teaches it once and for good. */}
-        {setupOptions.length ? (
-          <DropdownMenu title="Coding agent" options={setupOptions}>
-            <View
-              accessibilityLabel={`${agentLabel ?? "Coding agent"}, ${modelLabel ?? "default model"}, ${thinkingLabel ?? "default thinking"}. Change`}
-              style={{ width: 38, height: 38, alignItems: "center", justifyContent: "center" }}
-            >
-              {agentUsage ? (
-                <UsageRings
-                  size={38}
-                  windows={agentUsage.available ? orderWindows(agentUsage.windows ?? []) : []}
-                />
-              ) : usageLoading ? (
-                <ActivityIndicator
-                  size="small"
-                  color={colors.textMuted}
-                  style={{ position: "absolute" }}
-                />
-              ) : null}
-              <View
-                style={{
-                  position: "absolute",
-                  zIndex: 1,
-                  width: 30,
-                  height: 30,
-                  borderRadius: 15,
-                  alignItems: "center",
-                  justifyContent: "center",
-                  backgroundColor: colors.bg,
-                }}
-              >
-                <AgentAvatar agent={agent} size={27} plain />
-              </View>
-            </View>
-          </DropdownMenu>
+        {hasSetup ? (
+          <PressableScale
+            onPress={() => setSetupOpen(true)}
+            scale={0.94}
+            accessibilityRole="button"
+            accessibilityLabel={`${agentLabel ?? "Coding agent"}, ${modelLabel ?? "default model"}, ${thinkingLabel ?? "default thinking"}. Change`}
+            style={{ width: 38, height: 38, alignItems: "center", justifyContent: "center" }}
+          >
+            <AgentAvatar agent={agent} size={32} />
+          </PressableScale>
         ) : (
           <AgentAvatar agent={agent} size={32} />
         )}
+        <AgentSetupSheet
+          visible={setupOpen}
+          onClose={() => setSetupOpen(false)}
+          agentOptions={agentOptions}
+          modelOptions={modelOptions}
+          thinkingOptions={thinkingOptions}
+          usageRing={
+            agentUsage ? (
+              <UsageRings
+                size={28}
+                windows={agentUsage.available ? orderWindows(agentUsage.windows ?? []) : []}
+              />
+            ) : null
+          }
+          usageLoading={usageLoading}
+        />
         <TextInput
           /**
            * THE LIVE TRANSCRIPT GOES IN THE FIELD, not above it.
@@ -1723,17 +1711,43 @@ export function AttachmentStrip({
     <View style={{ flexDirection: "row", gap: space.sm, paddingBottom: space.sm }}>
       {items.map((item) => (
         <View key={item.id}>
-          <Image
-            source={{ uri: item.uri }}
-            style={{
-              width: 56,
-              height: 56,
-              borderRadius: radius.md,
-              opacity: item.path ? 1 : 0.5,
-              borderWidth: StyleSheet.hairlineWidth,
-              borderColor: item.failed ? colors.danger : colors.border,
-            }}
-          />
+          {item.kind === "image" ? (
+            <Image
+              source={{ uri: item.uri }}
+              style={{
+                width: 56,
+                height: 56,
+                borderRadius: radius.md,
+                opacity: item.path ? 1 : 0.5,
+                borderWidth: StyleSheet.hairlineWidth,
+                borderColor: item.failed ? colors.danger : colors.border,
+              }}
+            />
+          ) : (
+            /* A video or a document has no picture to stand in for it: a
+               glyph on the same 56pt tile, the name for accessibility. */
+            <View
+              accessibilityLabel={item.name}
+              style={{
+                width: 56,
+                height: 56,
+                borderRadius: radius.md,
+                alignItems: "center",
+                justifyContent: "center",
+                backgroundColor: colors.card,
+                opacity: item.path ? 1 : 0.5,
+                borderWidth: StyleSheet.hairlineWidth,
+                borderColor: item.failed ? colors.danger : colors.border,
+              }}
+            >
+              <Icon
+                ios={item.kind === "video" ? "video" : "doc"}
+                android={item.kind === "video" ? "videocam" : "description"}
+                size={20}
+                color={colors.textSecondary}
+              />
+            </View>
+          )}
           {!item.path && !item.failed ? (
             <View
               style={{

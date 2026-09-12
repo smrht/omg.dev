@@ -12,28 +12,18 @@
 // one of those fields would become "optional and meaningless for this row",
 // which is worse for both shapes than one extra module.
 //
-// PAYLOAD, revised. First pass here sent `notification.title`/`.body`
-// straight to Expo's relay, the same way almost every Expo app does it. That
-// was wrong for this product: the payload-less-on-wake design on the web side
-// is preferred there NOT because it's a fallback (it's the fallback only in
-// the sense that encrypted-in-payload is available and this isn't) but
-// because a browser subscription's encryption keys mean the relay literally
-// cannot read the notice — nothing about this app's actual notifications
-// (an agent asking whether to force-push over a release branch, a finding's
-// suggested fix, a ship post's summary) was ever designed to be legible to a
-// third party in transit. Native has no equivalent of that encryption without
-// a Notification Service Extension — a second Xcode target, the same
-// category of native-build work as the Live Activity widget extension this
-// phase deliberately punts on (see mobile/docs/LIVE-ACTIVITY.md) — so instead
-// of matching the web's cryptography, this matches its GUARANTEE by other
-// means: the alert Expo/APNs actually carries is built from `notification.tag`
-// and `notification.project` only (see `safeAlert` below), never from
-// `.title`/`.body`. Those still travel to push.ts's web subscriptions (a
-// browser's own encrypted channel, or same-origin same-box fetch) — this file
-// just never forwards them onward to Expo. The real text is one tap away,
-// fetched from the machine over the account's own authenticated transport
-// once the app is open — the same shape as the web's payload-less path, just
-// without a background wake driving the fetch.
+// PAYLOAD. The alert carries the real `notification.title` and `.body`,
+// trimmed to what iOS shows on the lock screen. An earlier pass sent only a
+// generic line ("omg shipped something / in lfg") so Expo's relay and Apple
+// never saw the text. Benny reversed that on 2026-09-11: a notification
+// that does not say WHAT shipped or WHICH question is waiting is not worth
+// the buzz. The folder name does not belong on the alert — title and body
+// already say the thing. The trade is explicit: Expo and APNs can read the
+// alert in transit. Web push still carries the same text end-to-end
+// encrypted (push.ts); native accepts the relay. The text itself is
+// agent-authored at every call site: a ship's `summary`, the agent's last
+// line for a finished session, the question for an ask. What the agent
+// writes there is what the phone shows.
 //
 // USER SCOPING mirrors push.ts exactly: a token is bound to a `user` string
 // at register time, and a targeted send filters to tokens for that user only
@@ -130,38 +120,41 @@ function chunk<T>(rows: T[], size: number): T[][] {
 
 type ExpoTicket = { status: "ok" | "error"; message?: string; details?: { error?: string } };
 
-/**
- * Every call site's `tag` follows a `<kind>-<id>` convention (see push.ts's
- * callers: `ask-`, `session-`, `shipped-`, `finding-`). Reading the kind back
- * out of it means this needs no change when a new call site is added with the
- * same convention, and no second enum kept in sync with push.ts by hand.
- */
-function alertTitleFor(tag?: string | null): string {
-  if (tag?.startsWith("ask-")) return "omg needs your input";
-  if (tag?.startsWith("session-")) return "omg finished a session";
-  if (tag?.startsWith("shipped-")) return "omg shipped something";
-  if (tag?.startsWith("finding-")) return "omg found something";
-  return "omg";
+// Lock-screen budget. Benny's phone showed a four-line body on 2026-09-12
+// and he called it too many words. One sentence, two lines at most.
+const TITLE_MAX = 60;
+const BODY_MAX = 90;
+
+function clip(text: string, max: number): string {
+  const one = text.replace(/\s+/g, " ").trim();
+  if (one.length <= max) return one;
+  const cut = one.slice(0, max - 1);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > max / 2 ? cut.slice(0, space) : cut).trimEnd()}…`;
 }
 
-/**
- * The alert this device actually receives — see the file header for why this
- * is built from `tag`/`project` and never from `notification.title`/`.body`.
- */
-function safeAlert(notification: PushNotification): { title: string; body?: string } {
+/** First sentence of an agent's message, then clipped — the verdict, not the essay. */
+function firstSentence(text: string): string {
+  const one = text.replace(/\s+/g, " ").trim();
+  const m = one.match(/^.+?[.!?](?=\s|$)/);
+  return m ? m[0] : one;
+}
+
+/** The alert this device receives: the real title and body. No folder name. */
+export function alertFor(notification: PushNotification): { title: string; body?: string } {
+  const body = notification.body ? clip(firstSentence(notification.body), BODY_MAX) : undefined;
   return {
-    title: alertTitleFor(notification.tag),
-    body: notification.project ? `in ${notification.project}` : undefined,
+    title: clip(notification.title, TITLE_MAX) || "omg",
+    ...(body ? { body } : {}),
   };
 }
 
 async function sendBatch(tokens: NativeToken[], notification: PushNotification): Promise<void> {
   if (!tokens.length) return;
-  const alert = safeAlert(notification);
+  const alert = alertFor(notification);
   const messages = tokens.map((t) => ({
     to: t.token,
-    title: alert.title,
-    body: alert.body,
+    ...alert,
     sound: "default",
     // requireInteraction has no APNs equivalent; "time-sensitive" is the
     // closest analogue (breaks through Focus/Do Not Disturb) and needs no

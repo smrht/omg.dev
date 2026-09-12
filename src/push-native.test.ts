@@ -106,7 +106,6 @@ describe("notifyNativeAll", () => {
         body: "Should I force-push over the release branch in acme/payments?",
         url: "/?session=abc",
         tag: "ask-q1",
-        project: "acme/payments",
       },
     });
 
@@ -116,38 +115,58 @@ describe("notifyNativeAll", () => {
     expect((message.data as { url: string }).url).toBe("/session/abc");
   });
 
-  test("never forwards the real title/body to Expo's relay — only a generic alert plus the project", async () => {
+  test("forwards the real title and body, with no folder name", async () => {
     await saveNativeToken({ token: "ExponentPushToken[benny]", user: "benny@example.com" });
-    const privateQuestion = "Should I force-push over the release branch in acme/payments?";
+    const question = "Should I force-push over the release branch in acme/payments?";
 
     await notifyNativeAll({
       user: "benny@example.com",
       notification: {
         title: "omg needs your input",
-        body: privateQuestion,
+        body: question,
         url: "/?session=abc",
         tag: "ask-q1",
-        project: "acme/payments",
         requireInteraction: true,
       },
     });
 
     const [message] = sent[0].body as Array<Record<string, unknown>>;
     expect(message.title).toBe("omg needs your input");
-    expect(message.body).toBe("in acme/payments");
-    expect(JSON.stringify(message)).not.toContain(privateQuestion);
+    expect(message.subtitle).toBeUndefined();
+    expect(message.body).toBe(question);
   });
 
-  test("without a project, the body says nothing at all — never falls back to the real text", async () => {
+  test("keeps only the first sentence of a long body and clips at a word boundary", async () => {
     await saveNativeToken({ token: "ExponentPushToken[benny]", user: "benny@example.com" });
     await notifyNativeAll({
       user: "benny@example.com",
-      notification: { title: "omg found something", body: "Leaks the DB password in a log line", tag: "finding-f1" },
+      notification: {
+        title: "I wanted to rework a bit on message attachments and the transcript view",
+        body:
+          "Nothing else to request now. The only pending item is the release workflow result, and that is a tracked background task.",
+        tag: "session-s1",
+      },
     });
 
     const [message] = sent[0].body as Array<Record<string, unknown>>;
-    expect(message.title).toBe("omg found something");
-    expect(message.body).toBeUndefined();
+    expect(message.body).toBe("Nothing else to request now.");
+    expect(message.title).toBe("I wanted to rework a bit on message attachments and the…");
+    expect(message.subtitle).toBeUndefined();
+  });
+
+  test("a single run-on sentence is clipped to the body budget without splitting a word", async () => {
+    await saveNativeToken({ token: "ExponentPushToken[benny]", user: "benny@example.com" });
+    const words = Array.from({ length: 40 }, (_, i) => `word${i}`).join(" ");
+    await notifyNativeAll({
+      user: "benny@example.com",
+      notification: { title: "Shipped: Native push", body: words, tag: "shipped-p1" },
+    });
+
+    const [message] = sent[0].body as Array<Record<string, unknown>>;
+    const body = message.body as string;
+    expect(body.length).toBeLessThanOrEqual(90);
+    expect(body.endsWith("\u2026")).toBe(true);
+    expect(body.slice(0, -1).trimEnd()).toMatch(/word\d+$/);
   });
 
   test("prunes a token Expo reports as DeviceNotRegistered", async () => {

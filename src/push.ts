@@ -66,17 +66,6 @@ export type PushNotification = {
   tag?: string;
   /** Keep the notice on screen until acted on — used for questions. */
   requireInteraction?: boolean;
-  /**
-   * The project/repo this notice is about, e.g. "vibes" or "acme/payments" —
-   * a label, never a question or a body of text. Web push never needed this
-   * (title/body already carry the real content, delivered end-to-end
-   * encrypted to a subscription only this box's VAPID key can address); it
-   * exists so push-native.ts can build a native alert that names WHAT without
-   * quoting the private text of the question/finding/ship post it's about.
-   * See push-native.ts's file header for why that distinction matters there
-   * and not here.
-   */
-  project?: string;
 };
 
 type VapidFile = {

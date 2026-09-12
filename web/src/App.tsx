@@ -236,6 +236,7 @@ import {
   DEFAULT_GLOBAL_SETTINGS,
   DEFAULT_VIEW_PREFS,
   resolveGlobalSettings,
+  type ComposerSendMode,
   type GlobalSettings,
   type ViewPrefs,
 } from "./lib/global-settings";
@@ -261,13 +262,16 @@ import {
   omgMessagesToUIMessages,
   omgUIMessagesToMessages,
   type OmgChatMessage,
+  type OmgQueueMessage,
   type OmgTranscriptSubscribe,
 } from "./lib/omg-chat-transport";
 import {
+  heldQueueRows,
   queueRowHydration,
   reconcileQueueMessages,
   retryQueuedMessage,
 } from "./lib/queue-reconcile";
+import { HeldQueueCards } from "./components/held-queue-cards";
 import { canDriveSession } from "./lib/session-runtime";
 import {
   prefetchTranscripts,
@@ -442,7 +446,7 @@ import {
 } from "./lib/chat-render-items";
 import { isDeferredToolUse, useDeferredToolArgs } from "./lib/deferred-tool-args";
 import {
-  DEFER_TOOL_ARGS_PARAM,
+  TRANSCRIPT_WIRE_PARAMS,
   loadOlderIntent,
   toolArgsPath,
   transcriptOlderPagePath,
@@ -1070,6 +1074,12 @@ type Message = {
   // the word-by-word streaming reveal. See DRAFT_CATCHUP_MIN_CHARS.
   catchUp?: boolean;
   author?: MessageAuthorRef;
+  // Kind `work`: the steps of one run, folded by the server (the workRows
+  // capability, src/transcript-rows.ts). The row is re-sent under the same
+  // id as the run grows; an empty list withdraws it.
+  steps?: Message[];
+  // An artifact: the display tool call that produced it.
+  tool?: Message;
 };
 
 type AiStreamPart = {
@@ -1103,7 +1113,7 @@ type SessionPrompt = { question?: string; options: PromptOption[] };
 type QueueMsg = {
   id: string;
   text: string;
-  status: "pending" | "sending" | "queued" | "failed" | "delivered";
+  status: "pending" | "sending" | "queued" | "held" | "failed" | "delivered";
   error?: string;
   createdAt?: number;
   updatedAt?: number;
@@ -1355,6 +1365,9 @@ const OPENCODE_MODELS = [
 // catalog overrides this fallback at bootstrap).
 const PI_MODELS_FALLBACK = ["fable", "opus", "sonnet", "haiku", "deepseek/deepseek-v4-flash"];
 const DEEPSEEK_MODELS = ["deepseek-v4-flash", "deepseek-v4-pro"];
+// Kept in sync with DEVIN_MODELS in src/agent-catalog.ts (the server catalog
+// overrides this fallback at bootstrap).
+const DEVIN_MODELS = ["adaptive", "swe", "opus", "gpt", "sonnet", "gemini", "codex"];
 // Kept in sync with COPILOT_MODELS in src/agent-catalog.ts (the server catalog
 // overrides this fallback at bootstrap).
 const COPILOT_MODELS = ["claude-sonnet-4.5", "claude-sonnet-4", "gpt-5"];
@@ -1419,6 +1432,7 @@ const AGENT_MODELS: Record<AgentKind, string[]> = {
   fx: FX_MODELS,
   muse: MUSE_MODELS,
   deepseek: DEEPSEEK_MODELS,
+  devin: DEVIN_MODELS,
   opencode: OPENCODE_MODELS,
   omg: OMG_MODELS,
   jcode: JCODE_MODELS,
@@ -1435,6 +1449,7 @@ const AGENT_DEFAULT_MODEL: Record<AgentKind, string> = {
   fx: "auto",
   muse: "muse-spark-1.2",
   deepseek: "deepseek-v4-flash",
+  devin: "adaptive",
   opencode: "opencode/nemotron-3.5-lightning-free",
   omg: OMG_MODELS[0]!,
   jcode: "auto",
@@ -1455,6 +1470,9 @@ const AGENT_THINKING_LEVELS: Record<AgentKind, string[]> = {
   // Muse accepts its reasoningEffort vocabulary live per turn over MSP.
   muse: ["none", "minimal", "low", "medium", "high", "xhigh", "ultra"],
   deepseek: [],
+  // Devin exposes reasoning levels only inside a running session (Alt+T), not
+  // as a launch flag, so the selector stays hidden.
+  devin: [],
   opencode: [],
   omg: [],
   jcode: ["low", "medium", "high", "xhigh", "max"],
@@ -3046,7 +3064,13 @@ function collapseThinkingRuns(messages: Message[]) {
 
 // Media order is owned by the server transcript index. Append live media at the
 // tail; never re-sort by timestamp (that raced a second artifact poll stream).
+// A work row that is already in the list is the same run one step longer:
+// replace it in place.
 function appendLiveMessage(messages: Message[], message: Message): Message[] {
+  if (message.kind === "work" && message.id) {
+    const index = messages.findIndex((item) => item.id === message.id);
+    if (index >= 0) return messages.map((item, at) => (at === index ? message : item));
+  }
   return [...messages, message];
 }
 
@@ -4475,21 +4499,28 @@ const MicButton = forwardRef<
 // call site), so voice capture is no longer this button's job — the adjacent
 // MicButton is a strict superset of the push-to-talk gesture this used to carry
 // inline, and splitting the two affordances is the point: this control now only
-// answers "is there a message". A quick tap steers with the current message; a
-// long press queues it without interrupting. The keyboard twin of the long
-// press is Cmd/Ctrl+Enter, handled on the composer textarea — a pointer-only
-// gesture left desktop with no way to reach queueing at all.
+// answers "is there a message". A quick tap sends in the box's default mode
+// (Settings > View > "Send while the agent is working"); a long press sends in
+// the other mode. The keyboard twin of the long press is Cmd/Ctrl+Enter,
+// handled on the composer textarea — a pointer-only gesture left desktop with
+// no way to reach the second mode at all.
 function ComposerSendButton({
   sending,
+  defaultMode,
   onSend,
   onQueue,
   className,
 }: {
   sending: boolean;
+  defaultMode: ComposerSendMode;
   onSend: () => void;
   onQueue: () => void;
   className?: string;
 }) {
+  const label =
+    defaultMode === "queue"
+      ? { aria: "Queue — hold to steer", title: "Tap to queue · hold (or ⌘/Ctrl+Enter) to steer" }
+      : { aria: "Send — hold to queue", title: "Tap to send · hold (or ⌘/Ctrl+Enter) to queue" };
   const holdTimer = useRef<number | null>(null);
   const holdFired = useRef(false);
   const pointerDown = useRef(false);
@@ -4574,8 +4605,8 @@ function ComposerSendButton({
       onPointerCancel={onPointerCancel}
       onClick={onClick}
       onContextMenu={(e) => e.preventDefault()}
-      aria-label="Send — hold to queue"
-      title="Tap to send · hold (or ⌘/Ctrl+Enter) to queue"
+      aria-label={label.aria}
+      title={label.title}
       className={cn(
         "flex shrink-0 touch-none select-none items-center justify-center rounded-full font-semibold shadow-sm transition active:scale-[0.97]",
         "bg-foreground/[0.08] text-foreground/80 hover:bg-foreground/[0.12] hover:text-foreground",
@@ -4958,7 +4989,7 @@ function useLiveSessionStream(sessions: Session[], streamIds: string[]) {
     const draftSeen = new Set<string>();
     evlog("live_stream_client_start", { rid, ids, idsCount: ids.length });
     const es = new EventSource(
-      `/api/live/stream?ids=${ids.join(",")}&rid=${encodeURIComponent(rid)}&${DEFER_TOOL_ARGS_PARAM}`,
+      `/api/live/stream?ids=${ids.join(",")}&rid=${encodeURIComponent(rid)}&${TRANSCRIPT_WIRE_PARAMS}`,
     );
     es.onopen = () => {
       evlog("live_stream_client_open", {
@@ -5002,7 +5033,9 @@ function useLiveSessionStream(sessions: Session[], streamIds: string[]) {
         });
       }
       setLoadingBySid((prev) => ({ ...prev, [sid]: false }));
-      if (message.id && message.kind !== "thinking") {
+      // A work row is re-sent under the same id each time its run grows, so
+      // seeing the id again is the point, not a duplicate.
+      if (message.id && message.kind !== "thinking" && message.kind !== "work") {
         const seen = seenRef.current[sid] || (seenRef.current[sid] = new Set());
         if (seen.has(message.id)) return;
         seen.add(message.id);
@@ -15742,6 +15775,44 @@ function SessionChatBody({
   const [liveBusy, setLiveBusy] = useState(false);
   const [inspectionOpening, setInspectionOpening] = useState(false);
   const chatBusy = busy || liveBusy || chatStatus === "submitted" || chatStatus === "streaming";
+  const { composerSendMode } = useContext(ViewPrefsContext);
+  const alternateSendMode: ComposerSendMode = composerSendMode === "queue" ? "steer" : "queue";
+  const sendIdentity = useContext(SendIdentityContext);
+  // Held sends: queue-mode text the server keeps back until this turn ends.
+  // Not part of the message chain — the cards under the composer own it, and
+  // the user can still edit or drop each one. The server's queue frame is the
+  // source of truth; the fetch below covers a transport with no live queue
+  // frames, and the optimistic updates in the card actions bridge the second
+  // until the next frame.
+  const [heldQueue, setHeldQueue] = useState<OmgQueueMessage[]>([]);
+  useEffect(() => {
+    setHeldQueue([]);
+    if (!sid) return;
+    let cancelled = false;
+    void api<{ queue: OmgQueueMessage[] }>(`/api/sessions/${encodeURIComponent(sid)}/queue`, {
+      cache: "no-store",
+    })
+      .then((res) => {
+        if (!cancelled) setHeldQueue(heldQueueRows(Array.isArray(res.queue) ? res.queue : []));
+      })
+      .catch(() => null);
+    return () => {
+      cancelled = true;
+    };
+  }, [sid]);
+  // Without live queue frames (the SSE transport) the cards would outlive
+  // their release. Poll only while there is something held.
+  useEffect(() => {
+    if (!sid || onSubscribeTranscript || !heldQueue.length) return;
+    const timer = window.setInterval(() => {
+      void api<{ queue: OmgQueueMessage[] }>(`/api/sessions/${encodeURIComponent(sid)}/queue`, {
+        cache: "no-store",
+      })
+        .then((res) => setHeldQueue(heldQueueRows(Array.isArray(res.queue) ? res.queue : [])))
+        .catch(() => null);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [sid, onSubscribeTranscript, heldQueue.length]);
   const setMessageText = useCallback(
     (text: string) => {
       setMessageTextState(text);
@@ -15918,6 +15989,7 @@ function SessionChatBody({
         return;
       }
       if (event.type === "busy") setLiveBusy(event.busy);
+      if (event.type === "queue") setHeldQueue(heldQueueRows(event.queue));
       setMessages((current) => {
         const next = appendOmgTranscriptEvent(current, event, {
           streamActive: ownedChatStreams.owns(sid),
@@ -15955,9 +16027,12 @@ function SessionChatBody({
   async function sendMessage(
     e?: FormEvent,
     overrideText?: string,
-    mode: "steer" | "queue" = "steer",
+    requestedMode?: ComposerSendMode,
   ) {
     e?.preventDefault();
+    // A plain send (Enter, tap, form submit) takes the box default; the
+    // alternate gesture passes the other mode explicitly.
+    const mode: ComposerSendMode = requestedMode ?? composerSendMode;
     const text = (overrideText ?? messageText).trim();
     const files = attachments;
     if (!sid || (!text && !files.length)) return;
@@ -15993,13 +16068,13 @@ function SessionChatBody({
       }
       return;
     }
-    // A queued send is a genuinely different state from a steered one: the agent
-    // is still on the previous turn and has not read this text yet. The bubble
-    // carries that state itself (waiting style, pinned under the
-    // running turn) instead of a toast that is gone before the distinction
-    // becomes visible. Only real queueing counts — an idle session cannot be interrupted,
-    // so both modes deliver immediately there and the bubble is an ordinary
-    // send.
+    // A queued send while the agent is busy never enters the message chain
+    // here: the server holds it as an editable card until the turn ends (see
+    // heldQueue), and only then does it become a real send. On an idle session
+    // both modes deliver immediately and the bubble is an ordinary send. The
+    // busy read can lag the server by a poll; reconcileOmgQueueMessages drops
+    // an optimistic bubble the server turned into a held row instead.
+    const holdOnServer = mode === "queue" && chatBusy && !bot && !reviewingShipped;
     const queuedBehindTurn = mode === "queue" && chatBusy;
     // Dismiss a real soft keyboard so the newly-sent turn has room to read.
     // Keep focus when iPadOS only shows its compact hardware-keyboard helper:
@@ -16032,6 +16107,31 @@ function SessionChatBody({
       // Pulse the composer so the send visibly launches into the transcript.
       setLaunching(true);
       window.setTimeout(() => setLaunching(false), 480);
+      if (holdOnServer) {
+        const res = await api<{ msg?: OmgQueueMessage }>(`/api/sessions/${sid}/send`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text: outgoingText,
+            mode: "queue",
+            ...(sendIdentity ? { user: sendIdentity } : {}),
+          }),
+        });
+        setPromptStashStatus(stashed?.id, "sent");
+        if (res.msg?.status === "held") {
+          const held = res.msg;
+          setHeldQueue((current) =>
+            current.some((item) => item.id === held.id) ? current : [...current, held],
+          );
+        }
+        for (const q of sessionQuestions) void answerInSession(q, text);
+        for (const att of files) {
+          if (att.previewUrl) URL.revokeObjectURL(att.previewUrl);
+        }
+        setAttachments([]);
+        forgetAllUploads();
+        return;
+      }
       if (reviewingShipped) {
         await api<{ sessionId?: string }>("/api/sessions/resume", {
           method: "POST",
@@ -16196,6 +16296,18 @@ function SessionChatBody({
             onRemove={removeAttachment}
             onToggleHd={files.setAttachmentHd}
           />
+          {/* Held sends rise out of the bar as a narrow island docked to its
+              top edge: the next one to go is always visible, the rest fold
+              behind a count until tapped. */}
+          {sid && heldQueue.length ? (
+            <HeldQueueCards
+              sessionId={sid}
+              items={heldQueue}
+              busy={chatBusy}
+              onChange={setHeldQueue}
+              onError={onError}
+            />
+          ) : null}
           {/* The bar itself (not just the textarea) is the field now: attach, type,
               mic and send all live inside one lfg-gfield pill, matching the
               wrapper pattern NewSessionDialog/ForkSessionDialog already use. That
@@ -16210,7 +16322,9 @@ function SessionChatBody({
               // lets the bar agree with what is inside it. Not rounded-full:
               // the bar grows with the text, and a pill three lines tall bows
               // outward instead of looking round.
-              "lfg-gfield relative flex gap-1 rounded-3xl px-2 py-1.5 transition-[background-color,border-color,box-shadow] duration-300 ease-ios md:gap-0.5 md:px-1.5 md:py-1",
+              // z-[1]: the held-queue card above docks under this bar's
+              // top edge, so the bar has to paint over it.
+              "lfg-gfield relative z-[1] flex gap-1 rounded-3xl px-2 py-1.5 transition-[background-color,border-color,box-shadow] duration-300 ease-ios md:gap-0.5 md:px-1.5 md:py-1",
               messageMultiline ? "items-end" : "items-center",
             )}
           >
@@ -16263,10 +16377,9 @@ function SessionChatBody({
                 if (e.key !== "Enter" || e.shiftKey) return;
                 e.preventDefault();
                 // Cmd/Ctrl+Enter is the keyboard twin of holding the send
-                // button: queue behind the running turn instead of
-                // interrupting it. Plain Enter still steers.
+                // button: the other send mode. Plain Enter takes the default.
                 if (e.metaKey || e.ctrlKey) {
-                  void sendMessage(undefined, undefined, "queue");
+                  void sendMessage(undefined, undefined, alternateSendMode);
                   return;
                 }
                 e.currentTarget.form?.requestSubmit();
@@ -16341,8 +16454,9 @@ function SessionChatBody({
               <ComposerSendButton
                 className="size-10 shrink-0 md:size-8"
                 sending={sending}
+                defaultMode={composerSendMode}
                 onSend={() => void sendMessage()}
-                onQueue={() => void sendMessage(undefined, undefined, "queue")}
+                onQueue={() => void sendMessage(undefined, undefined, alternateSendMode)}
               />
             ) : null}
           </div>
@@ -20058,46 +20172,85 @@ const ToolGroup = memo(function ToolGroup({
     setOpen(next);
   };
 
+  // Every step starts folded to one line: its name and the first stretch of
+  // its arguments. A run of eighty calls used to open as eighty full argument
+  // blocks, which no popover height can hold. The line is enough to find the
+  // step you want; one click opens it.
+  const [expandedSteps, setExpandedSteps] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleStep = (key: string) =>
+    setExpandedSteps((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  const resultCount = items.filter((entry) => entry.kind === "tool_result").length;
+
   const details = (
-    <div className="space-y-3">
+    <div className="space-y-0.5">
       {items.map((item, index) => {
         const isUse = item.kind === "tool_use";
         const isThought = item.kind === "thinking";
+        const key = item.id ?? `${item.kind}-${item.ts}-${index}`;
+        const expanded = expandedSteps.has(key);
         // Thinking folded in from between the calls (see buildChatRenderItems).
         // Prose, not a command, so it is not set in mono and keeps no colon
         // split — the whole message is the body.
-        if (isThought) {
-          return (
-            <div key={item.id ?? `thinking-${item.ts}-${index}`} className="min-w-0">
-              <div className="mb-1 flex items-center gap-2 text-xs font-semibold text-foreground">
-                <span className="size-1.5 rounded-full bg-muted-foreground/60" />
-                <span className="truncate">Thought</span>
-              </div>
-              <div className="max-h-52 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-muted/60 p-2.5 text-[11px] leading-relaxed text-muted-foreground">
-                {item.text || "thinking..."}
-              </div>
-            </div>
-          );
-        }
         const text = item.text || (isUse ? "No command details" : "No result details");
         const separator = isUse ? text.indexOf(":") : -1;
-        const title = isUse
-          ? (separator >= 0 ? text.slice(0, separator) : text) || "Command"
-          : `Result${items.filter((entry) => entry.kind === "tool_result").length > 1 ? ` ${index + 1}` : ""}`;
-        const inlineBody = isUse && separator >= 0 ? text.slice(separator + 1).trim() : isUse ? "" : text;
+        const title = isThought
+          ? "Thought"
+          : isUse
+            ? (separator >= 0 ? text.slice(0, separator) : text) || "Command"
+            : `Result${resultCount > 1 ? ` ${index + 1}` : ""}`;
+        const inlineBody = isThought
+          ? item.text || "thinking..."
+          : isUse && separator >= 0
+            ? text.slice(separator + 1).trim()
+            : isUse
+              ? ""
+              : text;
         // A deferred call has no inline arguments at all: the server sent the
         // name only. Whatever the fetch has reached is the body instead.
-        const deferred = isDeferredToolUse(item) ? toolArgs[item.id!] : undefined;
+        const deferred = !isThought && isDeferredToolUse(item) ? toolArgs[item.id!] : undefined;
         const body = deferred?.status === "ready" ? deferred.args : inlineBody;
+        const preview = body
+          ? body.replace(/\s+/g, " ").trim().slice(0, 200)
+          : deferred?.status === "loading"
+            ? "Loading..."
+            : deferred?.status === "error"
+              ? deferred.error
+              : "";
         return (
-          <div key={item.id ?? `${item.kind}-${item.ts}-${index}`} className="min-w-0">
-            <div className="mb-1 flex items-center gap-2 text-xs font-semibold text-foreground">
-              <span className={cn("size-1.5 rounded-full", isUse ? "bg-primary" : "bg-muted-foreground/60")} />
-              <span className="truncate font-mono">{title}</span>
-            </div>
-            {deferred?.status === "loading" ? (
+          <div key={key} className="min-w-0">
+            <button
+              type="button"
+              aria-expanded={expanded}
+              onClick={() => toggleStep(key)}
+              className="flex w-full min-w-0 cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1 text-left text-xs outline-none transition-colors hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <ChevronRight
+                className={cn("size-3 shrink-0 text-muted-foreground transition-transform", expanded && "rotate-90")}
+                aria-hidden="true"
+              />
+              <span
+                className={cn("size-1.5 shrink-0 rounded-full", isUse ? "bg-primary" : "bg-muted-foreground/60")}
+                aria-hidden="true"
+              />
+              <span className={cn("shrink-0 font-semibold text-foreground", !isThought && "font-mono")}>{title}</span>
+              {!expanded && preview ? (
+                <span className={cn("min-w-0 truncate text-[11px] text-muted-foreground", !isThought && "font-mono")}>
+                  {preview}
+                </span>
+              ) : null}
+            </button>
+            {!expanded ? null : isThought ? (
+              <div className="mb-2 ml-6 max-h-52 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-muted/60 p-2.5 text-[11px] leading-relaxed text-muted-foreground">
+                {body}
+              </div>
+            ) : deferred?.status === "loading" ? (
               <div
-                className="rounded-xl bg-muted/60 p-2.5 text-[11px] leading-relaxed text-muted-foreground"
+                className="mb-2 ml-6 rounded-xl bg-muted/60 p-2.5 text-[11px] leading-relaxed text-muted-foreground"
                 role="status"
                 data-testid="tool-args-loading"
               >
@@ -20105,14 +20258,14 @@ const ToolGroup = memo(function ToolGroup({
               </div>
             ) : deferred?.status === "error" ? (
               <div
-                className="rounded-xl bg-destructive/10 p-2.5 text-[11px] leading-relaxed text-destructive"
+                className="mb-2 ml-6 rounded-xl bg-destructive/10 p-2.5 text-[11px] leading-relaxed text-destructive"
                 role="alert"
                 data-testid="tool-args-error"
               >
                 {deferred.error}
               </div>
             ) : body ? (
-              <pre className="max-h-52 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-muted/60 p-2.5 font-mono text-[11px] leading-relaxed text-muted-foreground">
+              <pre className="mb-2 ml-6 max-h-52 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-muted/60 p-2.5 font-mono text-[11px] leading-relaxed text-muted-foreground">
                 {body}
               </pre>
             ) : null}
@@ -20175,10 +20328,14 @@ const ToolGroup = memo(function ToolGroup({
           <Popover.Popup
             onMouseEnter={keepHoverOpen}
             onMouseLeave={scheduleHoverClose}
-            className="w-[min(28rem,calc(100vw-1rem))] rounded-2xl border border-border bg-popover p-3 text-popover-foreground shadow-2xl ring-1 ring-foreground/5 outline-none"
+            // A run of thirty calls used to stack every step at full height and
+            // run the card off both ends of the screen. The card is capped to
+            // half the viewport, or the room the positioner reports if that is
+            // less, and the steps scroll inside it with the summary pinned.
+            className="flex max-h-[min(var(--available-height),50vh)] w-[min(28rem,calc(100vw-1rem))] flex-col rounded-2xl border border-border bg-popover p-3 text-popover-foreground shadow-2xl ring-1 ring-foreground/5 outline-none"
           >
-            <div className="mb-2 text-xs font-semibold text-muted-foreground">{summary}</div>
-            {details}
+            <div className="mb-2 shrink-0 text-xs font-semibold text-muted-foreground">{summary}</div>
+            <div className="min-h-0 overflow-y-auto">{details}</div>
           </Popover.Popup>
         </Popover.Positioner>
       </Popover.Portal>
@@ -28850,6 +29007,39 @@ function ViewSettingsSection({
                     Reset
                   </button>
                 ) : null}
+              </div>
+            </div>
+            <div className="flex items-center justify-between gap-4 px-4 py-2.5">
+              <div className="min-w-0">
+                <div className="text-sm font-medium">Send while the agent is working</div>
+                <div className="text-xs text-muted-foreground">
+                  {settings.composerSendMode === "queue"
+                    ? "Enter queues the message as a card under the composer; it sends when the turn ends. Hold the send button or press ⌘/Ctrl+Enter to steer."
+                    : "Enter interrupts the turn with the message. Hold the send button or press ⌘/Ctrl+Enter to queue."}
+                </div>
+              </div>
+              <div
+                role="radiogroup"
+                aria-label="Send while the agent is working"
+                className="flex shrink-0 overflow-hidden rounded-full border border-border text-xs"
+              >
+                {(["steer", "queue"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    role="radio"
+                    aria-checked={settings.composerSendMode === mode}
+                    onClick={() => void onChange({ composerSendMode: mode })}
+                    className={cn(
+                      "px-3 py-1 capitalize transition-colors",
+                      settings.composerSendMode === mode
+                        ? "bg-foreground text-background"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {mode}
+                  </button>
+                ))}
               </div>
             </div>
             {rows.map((row) => {

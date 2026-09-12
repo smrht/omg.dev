@@ -45,12 +45,13 @@
  * transcript is what should dominate the screen.
  */
 
-import { useLocalSearchParams, useNavigation, useRouter } from "expo-router";
+import { useFocusEffect, useLocalSearchParams, useNavigation, useRouter } from "expo-router";
 import * as Haptics from "expo-haptics";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  AppState,
   Animated,
   FlatList,
   Keyboard,
@@ -68,8 +69,30 @@ import Reanimated, {
   useAnimatedStyle,
   useSharedValue,
   withTiming,
+  Easing,
 } from "react-native-reanimated";
 import { Text, TextInput } from "../../src/omg/text";
+import type { OmgConnectionStatus } from "@omg-dev/client";
+import { AgentSetupSheet } from "../../src/omg/agent-setup-sheet";
+import { HeldQueue, type HeldRow } from "../../src/omg/held-queue";
+
+/** What a send does while the agent is working. Mirrors the web's ComposerSendMode. */
+type SendMode = "steer" | "queue";
+
+/** An open row from GET /api/ask — the shape the web's ask center reads. */
+type AskQuestion = {
+  id: string;
+  question: string;
+  options?: string[];
+  sessionId?: string | null;
+  createdAt: number;
+};
+/** Same cadence as the web's ask center. */
+const ASK_POLL_MS = 5000;
+import { useKeyCommand } from "../../src/omg/key-commands";
+import { useAgentPicker } from "../../src/omg/session-options";
+import { COMPOSER_FADE_HEIGHT, EdgeFade, TOP_FADE_HEIGHT } from "../../src/omg/edge-fade";
+import { SkillSuggest } from "../../src/omg/skill-suggest";
 import * as Clipboard from "expo-clipboard";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { OmgSession, OmgSessionPrompt } from "@omg-dev/protocol";
@@ -88,7 +111,7 @@ import type { Bot } from "../../src/omg/bots";
 import { useDictation } from "../../src/omg/dictation";
 import { GlassSurface, LIQUID_GLASS } from "../../src/omg/glass";
 import { DropdownMenu, type MenuOption } from "../../src/omg/menu";
-import { agentIcon, agentLabel as agentDisplayName } from "../../src/omg/agent-icons";
+import { agentLabel as agentDisplayName } from "../../src/omg/agent-icons";
 import { useOmg } from "../../src/omg/provider";
 import { useTheme } from "../../src/omg/theme";
 import { useToast } from "../../src/omg/toast";
@@ -190,7 +213,7 @@ export function SessionScreenBody({
    * any backing session exists (`sessionId` is null) — so this is what makes
    * that legal; see the guard at the top of `submit`.
    */
-  onDeliver?: (text: string, mode: "steer" | "queue") => Promise<{ sessionId?: string } | undefined>;
+  onDeliver?: (text: string, mode: SendMode) => Promise<{ sessionId?: string } | undefined>;
 }) {
   const id = sessionId;
   const navigation = useNavigation();
@@ -238,7 +261,124 @@ export function SessionScreenBody({
 
   const [messages, setMessages] = useState<Entry[]>([]);
   const [streamText, setStreamText] = useState("");
+  /**
+   * A THOUGHT BEING STREAMED. The machine streams reasoning as `ai_part`
+   * deltas with `kind: "thinking"`, the same channel as the reply. Appended
+   * to `streamText` it was drawn as the answer: a Grok session showed "The
+   * user is asking about a notification..." as a paragraph of prose. It is
+   * kept apart here and shown as the newest step of the live run (see the
+   * `data` memo), the same row it lands in once it is done.
+   */
+  const [streamThought, setStreamThought] = useState("");
   const [busy, setBusy] = useState(false);
+  /**
+   * HELD SENDS. A queue-mode send while the agent is busy is kept on the
+   * machine (status "held") until the turn ends; it is not in the message
+   * chain, so the transcript socket never carries it. Fetched on open and
+   * whenever busy flips, and polled every two seconds while the screen is
+   * active, including an empty queue so sends from other clients appear.
+   */
+  const [held, setHeld] = useState<HeldRow[]>([]);
+  /**
+   * THE MACHINE'S SEND MODE, same setting the web composer reads
+   * (`composerSendMode`). "steer": a tap interrupts the turn, a hold queues.
+   * "queue": a tap queues behind the turn, a hold steers. Read once per
+   * open; the setting page lives on the web, so it does not change under
+   * this screen. A failed read leaves the historical default.
+   */
+  const [sendMode, setSendMode] = useState<SendMode>("steer");
+  const alternateSendMode: SendMode = sendMode === "queue" ? "steer" : "queue";
+  useEffect(() => {
+    if (!client || !id) return;
+    let cancelled = false;
+    client.transport
+      .request<{ settings?: { composerSendMode?: unknown } }>("/api/settings")
+      .then((res) => {
+        if (cancelled) return;
+        setSendMode(res?.settings?.composerSendMode === "queue" ? "queue" : "steer");
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [client, id]);
+  const refreshHeld = useCallback(async (): Promise<HeldRow[]> => {
+    if (!client || !id) return [];
+    try {
+      const res = await client.transport.request<{ queue?: HeldRow[] }>(
+        `/api/sessions/${encodeURIComponent(id)}/queue`,
+      );
+      const rows = (Array.isArray(res?.queue) ? res.queue : []).filter((m) => m.status === "held");
+      setHeld(rows);
+      return rows;
+    } catch {
+      return [];
+    }
+  }, [client, id]);
+  useEffect(() => {
+    void refreshHeld();
+  }, [refreshHeld, busy]);
+  useFocusEffect(
+    useCallback(() => {
+      const refresh = () => {
+        if (AppState.currentState === "active") void refreshHeld();
+      };
+      refresh();
+      const timer = setInterval(refresh, 2000);
+      const subscription = AppState.addEventListener("change", (state) => {
+        if (state === "active") refresh();
+      });
+      return () => {
+        clearInterval(timer);
+        subscription.remove();
+      };
+    }, [refreshHeld]),
+  );
+  const editHeld = useCallback(
+    async (mid: string, text: string) => {
+      if (!client || !id) return;
+      setHeld((prev) => prev.map((m) => (m.id === mid ? { ...m, text } : m)));
+      await client.transport.request(`/api/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(mid)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      await refreshHeld();
+    },
+    [client, id, refreshHeld],
+  );
+  const removeHeld = useCallback(
+    async (mid: string) => {
+      if (!client || !id) return;
+      setHeld((prev) => prev.filter((m) => m.id !== mid));
+      await client.transport.request(`/api/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(mid)}`, {
+        method: "DELETE",
+      });
+      await refreshHeld();
+    },
+    [client, id, refreshHeld],
+  );
+  /**
+   * Live-socket health, for the title capsule. The transcript socket owns its
+   * own reconnect; this is only so the header can SAY "Reconnecting…" while
+   * it does, the way the web's status text does, instead of a chat that
+   * silently stops moving.
+   */
+  const [connection, setConnection] = useState<OmgConnectionStatus>("live");
+  useEffect(() => {
+    if (!client) return;
+    return client.live.subscribeConnection((state) => setConnection(state.status));
+  }, [client]);
+  const dropped = connection === "reconnecting" || connection === "offline";
+  /**
+   * Whether the transcript socket has said anything about busy yet. Until
+   * it has, the session list's `busy` is the only word on the matter, and
+   * the screen used to ignore it: the Live card read "Working" while the
+   * chat behind it sat idle until the first socket event, which on a slow
+   * reconnect could be a long time. Once the socket speaks, it is the
+   * authority and the list is no longer consulted.
+   */
+  const socketBusySeen = useRef(false);
   const [prompt, setPrompt] = useState<OmgSessionPrompt | null>(null);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
@@ -297,7 +437,70 @@ export function SessionScreenBody({
   /** Set while the reader is away from the bottom and the agent says something. */
   const [unseen, setUnseen] = useState(false);
   const [atBottom, setAtBottom] = useState(true);
-  const [sessionInfo, setSessionInfo] = useState<{ title: string; agent: string } | null>(null);
+  const [sessionInfo, setSessionInfo] = useState<{
+    title: string;
+    agent: string;
+    /** Every id the machine files this session under: its own and the native one. */
+    aliases: string[];
+  } | null>(null);
+  /**
+   * ASK-USER QUESTIONS RAISED BY THIS SESSION. An agent that calls
+   * `omg_input` ends its turn and waits; the question is not in the
+   * transcript, it is a row in `/api/ask`. The web shows it above the
+   * composer and treats the composer as the reply box. The phone only
+   * listed it under Notifications, so from inside the very chat that asked,
+   * nothing was visible. Same card as a native prompt: question, one-tap
+   * options; typing in the composer answers it too.
+   */
+  const [asks, setAsks] = useState<AskQuestion[]>([]);
+  const askAliases = useMemo(() => {
+    const set = new Set<string>(sessionInfo?.aliases ?? []);
+    if (id) set.add(id);
+    return set;
+  }, [id, sessionInfo?.aliases]);
+  const refreshAsks = useCallback(async () => {
+    if (!client || !id) return;
+    try {
+      const res = await client.transport.request<{ questions?: AskQuestion[] }>("/api/ask?status=open");
+      const rows = (Array.isArray(res?.questions) ? res.questions : [])
+        .filter((q) => !!q.sessionId && askAliases.has(q.sessionId))
+        .sort((a, b) => a.createdAt - b.createdAt);
+      setAsks(rows);
+    } catch {
+      /* keep what we have */
+    }
+  }, [client, id, askAliases]);
+  useEffect(() => {
+    void refreshAsks();
+    const timer = setInterval(() => void refreshAsks(), ASK_POLL_MS);
+    return () => clearInterval(timer);
+  }, [refreshAsks, busy]);
+  /**
+   * Answer by tapping an option: the machine delivers the reply into the
+   * session itself (the pushback path), and the echo arrives as a normal
+   * message. Answering from the composer passes `deliver: false`, because
+   * the typed message is already on its way.
+   */
+  const answerAsk = useCallback(
+    async (q: AskQuestion, answer: string, deliver: boolean) => {
+      if (!client) return;
+      setAsks((prev) => prev.filter((x) => x.id !== q.id));
+      try {
+        await client.transport.request(`/api/ask/${encodeURIComponent(q.id)}/answer`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ answer, via: "web", deliver }),
+        });
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        void refreshAsks();
+      }
+    },
+    [client, refreshAsks],
+  );
+  /** "Continue with" picker: agent, model and level for the replacement session. */
+  const [continueOpen, setContinueOpen] = useState(false);
+  const continuePicker = useAgentPicker({ initialAgent: sessionInfo?.agent });
   /**
    * Whether an agent is attached to this session right now. `null` until the
    * machine has answered — the composer says nothing about resuming while it
@@ -371,7 +574,9 @@ export function SessionScreenBody({
       setSessionInfo({
         title: found.title?.trim() || found.lastUserText?.trim() || "Session",
         agent: found.agent?.trim() || found.agentLabel?.trim() || "omg",
+        aliases: [found.sessionId, found.nativeSessionId].filter((v): v is string => !!v),
       });
+      if (!socketBusySeen.current) setBusy(!!found.busy);
       setLive(true);
       return true;
     };
@@ -402,6 +607,7 @@ export function SessionScreenBody({
           setSessionInfo({
             title: row.title?.trim() || row.lastUserText?.trim() || "Session",
             agent: row.agent?.trim() || "omg",
+            aliases: [row.sessionId],
           });
         }
       })
@@ -418,8 +624,14 @@ export function SessionScreenBody({
     let cancelled = false;
     if (!client || !id) return;
     setLoading(true);
-    client
-      .getMessages(id, limit)
+    // Not `client.getMessages`: the page declares `workRows=1`, the same
+    // capability transport.ts puts on the socket, so history and the live
+    // stream arrive in one shape.
+    client.transport
+      .request<{ messages?: Entry[] }>(
+        `/api/sessions/${encodeURIComponent(id)}/messages?limit=${limit}&workRows=1`,
+        { cache: "no-store" },
+      )
       .then((res) => {
         if (cancelled) return;
         setMessages(res.messages ?? []);
@@ -446,25 +658,9 @@ export function SessionScreenBody({
         case "message":
           if (!atBottomRef.current) setUnseen(true);
           setMessages((prev) => {
-            /**
-             * Drop the optimistic copy this message confirms, de-dupe on id,
-             * and CARRY `queued` ACROSS.
-             *
-             * Two things were wrong here. The optimistic row was identified by
-             * `m.pending`, which conflated "this row is a local placeholder"
-             * with "the request is still in the air" — so the moment the
-             * success path stopped setting `pending`, the row stopped matching
-             * and the message rendered twice. It is matched on the `local-`
-             * id prefix now, which is what actually makes a row optimistic.
-             *
-             * And `queued` lived only on the optimistic row, so the echo — which
-             * the machine sends as soon as it accepts the message, long before
-             * the agent gets to it — replaced the row with a plain server
-             * message and the "Queued" badge vanished almost immediately. That
-             * is why a held send looked identical to a tapped one. The flag is
-             * a local fact about how it was sent, so it is carried onto the
-             * echo rather than expected back from the server.
-             */
+            // A held send lives in the queue card, not the transcript. A server
+            // echo confirms delivery, so do not carry its local queued badge
+            // onto a message the agent can already answer.
             /**
              * `stripBotLaunchEnvelope` here (not just at render time) is what
              * keeps a bot's very first message from showing up twice. Its
@@ -477,13 +673,16 @@ export function SessionScreenBody({
              */
             const echoText = stripBotLaunchEnvelope(event.message.text ?? "");
             const confirmed = prev.find((m) => isOptimisticId(m.id) && m.text === echoText);
-            const incoming: Entry = confirmed?.queued
-              ? { ...event.message, queued: true }
+            // The echo keeps the optimistic row's key (see Entry.localKey), so
+            // the list sees one row settling rather than one leaving and one
+            // arriving — and it is NOT marked fresh, for the same reason.
+            const incoming: Entry = confirmed
+              ? { ...event.message, queued: undefined, localKey: confirmed.id ?? undefined }
               : event.message;
             const withoutOptimistic = prev.filter(
               (m) => !(isOptimisticId(m.id) && m.text === echoText),
             );
-            if (incoming.id) liveKeysRef.current.add(incoming.id);
+            if (incoming.id && !confirmed) liveKeysRef.current.add(incoming.id);
             if (incoming.id && withoutOptimistic.some((m) => m.id === incoming.id)) {
               return withoutOptimistic.map((m) => (m.id === incoming.id ? incoming : m));
             }
@@ -491,17 +690,26 @@ export function SessionScreenBody({
           });
           // A completed message supersedes whatever was streaming.
           setStreamText("");
+          setStreamThought("");
           break;
-        case "ai_part":
+        case "ai_part": {
+          // Reasoning and reply share the delta channel; `kind` tells them
+          // apart, and an older machine that omits it is sending a reply.
+          // `kind` is on the wire (packages/protocol) but not yet in the
+          // protocol package this app pins, hence the narrow cast.
+          const kind = (event.part as { kind?: string }).kind;
+          const setStream = kind === "thinking" ? setStreamThought : setStreamText;
           if (event.part.type === "text-start" || event.part.reset) {
-            setStreamText(event.part.text ?? "");
+            setStream(event.part.text ?? "");
           } else if (event.part.type === "text-delta") {
-            setStreamText((prev) => prev + (event.part.delta ?? ""));
+            setStream((prev) => prev + (event.part.delta ?? ""));
           } else if (event.part.type === "text-end") {
             // Leave the text on screen; the real message replaces it.
           }
           break;
+        }
         case "busy":
+          socketBusySeen.current = true;
           setBusy(event.busy);
           /**
            * "Queued" means WAITING BEHIND THE TURN IN FLIGHT. When that turn
@@ -512,6 +720,9 @@ export function SessionScreenBody({
            * claim to be waiting.
            */
           if (!event.busy) {
+            // A thought with no turn behind it is over, whether or not its
+            // final message ever arrived.
+            setStreamThought("");
             setMessages((prev) =>
               prev.some((m) => m.queued)
                 ? prev.map((m) => (m.queued ? { ...m, queued: false } : m))
@@ -532,19 +743,30 @@ export function SessionScreenBody({
   // Tool traffic is grouped into single rows here rather than in renderItem, so
   // a call and the result it produced stay one cell of the list.
   const data = useMemo<TranscriptItem[]>(() => {
-    const entries: Entry[] = streamText
-      ? [
-          ...messages,
-          { id: "__streaming__", role: "assistant", text: streamText, streaming: true },
-        ]
-      : messages;
+    const entries: Entry[] = [...messages];
+    // A streaming thought is a `work` row of one step at the tail. It joins
+    // the open run above it (buildTranscriptItems merges adjacent rows), so
+    // the reasoning reads as "Working for 4s" and opens into the sheet, and
+    // never as a paragraph of the reply.
+    if (streamThought) {
+      entries.push({
+        id: "__thinking__",
+        role: "assistant",
+        kind: "work",
+        text: "",
+        steps: [{ id: "__thinking_step__", role: "assistant", kind: "thinking", text: streamThought }],
+      });
+    }
+    if (streamText) {
+      entries.push({ id: "__streaming__", role: "assistant", text: streamText, streaming: true });
+    }
     // Bot chat reads as a conversation, not a session log — tool calls,
     // results and thinking blocks are hidden, and the launch envelope
     // folded into the first turn is stripped back to what the human
     // actually typed. See bot-transcript.ts. A normal session (bot === null)
     // never runs this filter.
     return buildTranscriptItems(bot ? filterBotChatEntries(entries) : entries, { busy });
-  }, [messages, streamText, bot, busy]);
+  }, [messages, streamText, streamThought, bot, busy]);
 
   const onScroll = useCallback(
     (e: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -714,6 +936,16 @@ export function SessionScreenBody({
    * somewhere the reader did not ask to go.
    */
   const lastContentHeight = useRef(0);
+  /**
+   * THE REAL BOTTOM, for animated scrolls. The absurd-offset jump is right
+   * for an instant snap, but animated it asks UIKit to travel ten million
+   * points and the ease reads as a linear whip. Content height comes from
+   * onContentSizeChange (always current), viewport height from the list's
+   * own layout, so the animated target is the true last offset and UIKit
+   * gives it its standard scroll curve.
+   */
+  const viewportHeight = useRef(0);
+  const bottomOffset = () => Math.max(0, lastContentHeight.current - viewportHeight.current);
   const handleContentSizeChange = useCallback((_width: number, height: number) => {
     const delta = height - lastContentHeight.current;
     lastContentHeight.current = height;
@@ -727,7 +959,7 @@ export function SessionScreenBody({
     // never while their finger is on the glass — see touchingRef.
     if (!atBottomRef.current || touchingRef.current) return;
     const glide = delta > 24 && delta < 600;
-    listRef.current?.scrollToOffset({ offset: 10 ** 7, animated: glide });
+    listRef.current?.scrollToOffset({ offset: glide ? bottomOffset() : 10 ** 7, animated: glide });
   }, []);
 
   /**
@@ -794,6 +1026,7 @@ export function SessionScreenBody({
       // its first turn) always has both, unchanged from before.
       if (!trimmed || !client || (!id && !onDeliver)) return;
       void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      for (const q of asks) void answerAsk(q, trimmed, false);
       const optimisticId = `local-${++localSeq}`;
       const optimistic: Entry = {
         id: optimisticId,
@@ -832,7 +1065,7 @@ export function SessionScreenBody({
           // owns that session id as its own state, re-rendering this one
           // with it. See app/bots/[id]/index.tsx.
           setMessages((prev) =>
-            prev.map((m) => (m.id === optimistic.id ? { ...m, pending: false } : m)),
+            prev.map((m) => (m.id === optimistic.id ? { ...m, pending: false, queued: undefined } : m)),
           );
           return;
         }
@@ -880,24 +1113,22 @@ export function SessionScreenBody({
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ text: trimmed, mode: "queue" }),
           });
+          // If the machine HELD it (agent busy), the row above the composer
+          // is now the message; a second copy in the chain would sit there
+          // dimmed until the release echo, saying the same thing twice.
+          const rows = await refreshHeld();
+          if (rows.some((m) => m.text === trimmed)) {
+            setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
+            return;
+          }
         } else {
           await client.sendMessage(id, trimmed);
         }
         setError(null);
-        /**
-         * The request has landed. A queued message is no longer in flight, but
-         * it IS still waiting behind the current turn — so drop `pending` and
-         * keep `queued`.
-         *
-         * THIS BELONGS ON THE SUCCESS PATH. It used to sit in the `catch`
-         * below, underneath the line that removes the optimistic message
-         * entirely, which made it two bugs at once: dead code on failure (it
-         * mapped over a list the row had just been filtered out of) and
-         * missing on success, so a delivered message kept `pending: true` and
-         * stayed dimmed at 0.6 opacity for as long as it survived.
-         */
+        // Held sends returned above. Everything reaching this point has been
+        // delivered, including queue-mode sends to an idle agent.
         setMessages((prev) =>
-          prev.map((m) => (m.id === optimistic.id ? { ...m, pending: false } : m)),
+          prev.map((m) => (m.id === optimistic.id ? { ...m, pending: false, queued: undefined } : m)),
         );
       } catch (e) {
         // Roll the message back AND give the person their words back — losing
@@ -910,7 +1141,7 @@ export function SessionScreenBody({
         setResuming(false);
       }
     },
-    [client, id, live, router, onDeliver],
+    [client, id, live, router, onDeliver, asks, answerAsk, refreshHeld],
   );
 
   /** Shown for a beat after a long-press send, so the gesture confirms itself. */
@@ -940,13 +1171,14 @@ export function SessionScreenBody({
     (mode: "steer" | "queue" = "steer", spoken?: string) => {
       const text = attachments.compose((spoken ?? draft).trim());
       if (!text || sending) return;
-      if (mode === "queue") {
+      if (mode === "queue" && busy) {
         /**
-         * A DIFFERENT WEIGHT FOR A DIFFERENT ACT. A tap steers; a long press
-         * puts the message behind the work in flight. Success feedback rather
-         * than the light impact of a normal send, because the whole point of
-         * the gesture is that something other than the obvious thing happened
-         * and you did not see the message go.
+         * A DIFFERENT WEIGHT FOR A DIFFERENT ACT. Queueing puts the message
+         * behind the work in flight instead of into it. Success feedback
+         * rather than the light impact of a normal send, because the whole
+         * point is that something other than the obvious thing happened and
+         * you did not see the message go. Only while the agent is busy: a
+         * queue-mode send to an idle agent is just a send.
          */
         void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         setQueuedHint(true);
@@ -959,13 +1191,40 @@ export function SessionScreenBody({
       Keyboard.dismiss();
       void submit(text, mode);
     },
-    [attachments, draft, sending, submit],
+    [attachments, busy, draft, sending, submit],
   );
 
   // Kept current for the dictation callback declared above it.
   useEffect(() => {
-    submitRef.current = (text: string) => send("steer", text);
-  }, [send]);
+    submitRef.current = (text: string) => send(sendMode, text);
+  }, [send, sendMode]);
+
+  /**
+   * STOP WAITING. A held message can be steered into the running turn: it
+   * leaves the queue (DELETE) and goes through the plain send path, which
+   * interrupts the agent the way a tapped steer does. Two requests, because
+   * the machine has no "release now" for a held row; the delete comes first
+   * so a failure leaves a message you can still see, never one sent twice.
+   */
+  const steerHeld = useCallback(
+    async (mid: string) => {
+      if (!client || !id) return;
+      const row = held.find((m) => m.id === mid);
+      if (!row) return;
+      setHeld((prev) => prev.filter((m) => m.id !== mid));
+      try {
+        await client.transport.request(`/api/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(mid)}`, {
+          method: "DELETE",
+        });
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        await refreshHeld();
+        return;
+      }
+      await submit(row.text, "steer");
+    },
+    [client, id, held, refreshHeld, submit],
+  );
 
   /**
    * Answering the agent's question SENDS the answer. It used to drop the label
@@ -990,6 +1249,8 @@ export function SessionScreenBody({
       setError(e instanceof Error ? e.message : String(e));
     }
   }, [client, id]);
+  // ⌘. interrupts, as on the web and in every terminal.
+  useKeyCommand({ key: "." }, busy ? () => void stop() : null);
 
   /** This session's own sent messages, newest last — the composer's history. */
   /**
@@ -1085,7 +1346,7 @@ export function SessionScreenBody({
    * the source. Unlike resume, this can deliberately switch agent backends.
    */
   const continueWithAgent = useCallback(
-    (agent?: string) => {
+    (agent?: string, model?: string | null, thinkingLevel?: string | null) => {
       if (!client || !id) return;
       void (async () => {
         try {
@@ -1099,6 +1360,8 @@ export function SessionScreenBody({
             body: JSON.stringify({
               archiveSource: true,
               agent: agent || undefined,
+              model: model || undefined,
+              thinkingLevel: thinkingLevel || undefined,
             }),
           });
           if (res?.sourceArchived === false) {
@@ -1165,39 +1428,18 @@ export function SessionScreenBody({
         : sessionInfo?.agent
           ? [{ key: sessionInfo.agent, label: agentDisplayName(sessionInfo.agent) }]
           : [];
-      if (launchableAgents.length > 1) {
-        /**
-         * A submenu, not a flat section — build 26 feedback: with the
-         * account's full roster this flattened into 6+ rows sharing one
-         * overflow menu with Rename/Fork/Copy/Archive, which read as too
-         * long. `menu.tsx`'s own doc on `MenuOption.submenu` says a
-         * submenu's TRIGGER row cannot carry a bundled image (confirmed
-         * still true 2026-08-17 on iPhone 17 Pro Simulator / iOS 26.0 —
-         * see the retest note in renderRows, IMG_1316) — but says nothing
-         * against the rows behind it. So the trigger here is text + an SF
-         * Symbol only, never `image`, and each agent keeps its own mark on
-         * its own leaf row inside the submenu, same as the flat version
-         * carried. Verified clean with the full 6-agent roster, light and
-         * dark mode, before shipping this.
-         */
-        options.push({
-          label: "Continue with",
-          icon: "arrow.forward.circle",
-          submenu: launchableAgents.map((agent) => ({
-            label: agent.label || agentDisplayName(agent.key),
-            image: agentIcon(agent.key),
-            onPress: () => continueWithAgent(agent.key),
-          })),
-        });
-      } else {
-        options.push({
-          label: launchableAgents[0]?.label
-            ? `Continue with ${launchableAgents[0].label}`
-            : "Continue",
-          icon: "arrow.forward.circle",
-          onPress: () => continueWithAgent(launchableAgents[0]?.key),
-        });
-      }
+      /**
+       * ONE ROW, ONE SHEET. This was a submenu of agents, which could name
+       * the agent but not the model or the thinking level, so continuing as
+       * Codex always meant Codex's default model. The row now opens the same
+       * picker the composer uses, started on this session's agent, with a
+       * Continue button at the bottom.
+       */
+      options.push({
+        label: launchableAgents.length > 1 ? "Continue with…" : `Continue with ${launchableAgents[0]?.label ?? "agent"}…`,
+        icon: "arrow.forward.circle",
+        onPress: () => setContinueOpen(true),
+      });
     }
     options.push({ label: "Fork", icon: "arrow.triangle.branch", onPress: fork });
     options.push({ label: "Copy reference", icon: "link", onPress: copyReference });
@@ -1377,15 +1619,15 @@ export function SessionScreenBody({
           style={{
             ...type.subhead,
             fontWeight: "600",
-            color: colors.text,
+            color: dropped ? colors.warning : colors.text,
             maxWidth: 210,
           }}
         >
-          {bot ? bot.name : title}
+          {dropped ? "Reconnecting…" : bot ? bot.name : title}
         </Text>
       </GlassSurface>
     ),
-    [agentLabel, bot, busy, colors, radius.pill, space, title, type],
+    [agentLabel, bot, busy, colors, dropped, radius.pill, space, title, type],
   );
 
   /**
@@ -1426,13 +1668,20 @@ export function SessionScreenBody({
     );
   }
 
-  const thinking = busy && !streamText;
+  // ONE INDICATOR. While a run row at the end of the transcript is live it
+  // already says "Working for 12s" and counts up; a second "Working" under it
+  // said the same thing twice. The footer shows only when nothing else does.
+  const liveRun = data.some((item) => item.type === "tools" && item.live);
+  const thinking = busy && !streamText && !liveRun;
   // An attachment with no words is still a message — "look at this" is the
   // most common thing a screenshot is sent for.
   const canSend =
     (draft.trim().length > 0 || attachments.items.some((item) => item.path)) &&
     !sending &&
     !attachments.uploading;
+  // ⌘↩ sends the other way: steer on a queue-mode machine, queue on a
+  // steer-mode one. The same key the web binds to its alternate send.
+  useKeyCommand({ key: { special: "enter" } }, canSend ? () => send(alternateSendMode) : null);
 
   /**
    * Track the keyboard on the UI thread instead of using KeyboardAvoidingView.
@@ -1477,6 +1726,8 @@ export function SessionScreenBody({
     transform: [{ translateY: -Math.max(0, keyboard.height.value - insets.bottom) }],
   }));
   const [composerHeight, setComposerHeight] = useState(0);
+  /** The field has the keyboard: a little more room around the text while typing. */
+  const [composerFocused, setComposerFocused] = useState(false);
 
   /**
    * THE LIFT ALONE IS NOT ENOUGH — the list has to follow it.
@@ -1494,7 +1745,7 @@ export function SessionScreenBody({
    */
   useEffect(() => {
     const show = Keyboard.addListener("keyboardDidShow", () => {
-      if (atBottomRef.current) listRef.current?.scrollToOffset({ offset: 10 ** 7, animated: true });
+      if (atBottomRef.current) listRef.current?.scrollToOffset({ offset: bottomOffset(), animated: true });
     });
     return () => show.remove();
   }, []);
@@ -1532,6 +1783,9 @@ export function SessionScreenBody({
         ref={listRef}
         data={data}
         keyExtractor={(item) => item.key}
+        onLayout={(e) => {
+          viewportHeight.current = e.nativeEvent.layout.height;
+        }}
         /**
          * THE WHOLE FIRST PAGE, IN ONE BATCH — not RN's default of 10.
          *
@@ -1696,6 +1950,20 @@ export function SessionScreenBody({
        * The list reserves room for it in its own top padding, so nothing
        * starts underneath the chevron.
        */}
+      {/* The transcript passes UNDER the bar and dissolves as it goes: the
+          page colour fades over it from the top edge, the same paint the
+          Live view puts above its composer. The bar itself is transparent. */}
+      <EdgeFade
+        edge="top"
+        color={colors.bg}
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          right: 0,
+          height: insets.top + BAR_ITEM + space.xs + TOP_FADE_HEIGHT,
+        }}
+      />
       <View
         style={{
           position: "absolute",
@@ -1708,7 +1976,7 @@ export function SessionScreenBody({
           flexDirection: "row",
           alignItems: "center",
           gap: 6,
-          backgroundColor: colors.bg,
+          backgroundColor: "transparent",
         }}
       >
         <BackDisc />
@@ -1718,6 +1986,42 @@ export function SessionScreenBody({
         {menuOptions.length ? <OverflowDisc /> : null}
       </View>
 
+
+      {/* THE BOTTOM FADE, behind the composer: the transcript dissolves into
+          the page before it reaches the field, as it does on Live. Sized off
+          `composerHeight` and carried by the same `composerLift`, so the
+          dissolve always ends at the field, keyboard up or down. Paint only. */}
+      <Reanimated.View
+        pointerEvents="none"
+        style={[
+          {
+            position: "absolute",
+            left: 0,
+            right: 0,
+            bottom: 0,
+            height: composerHeight + COMPOSER_FADE_HEIGHT,
+          },
+          composerLift,
+        ]}
+      >
+        <EdgeFade edge="bottom" color={colors.bg} style={{ flex: 1 }} />
+      </Reanimated.View>
+
+      <AgentSetupSheet
+        visible={continueOpen}
+        onClose={() => setContinueOpen(false)}
+        title="Continue with"
+        agentOptions={continuePicker.options}
+        modelOptions={continuePicker.modelOptions}
+        thinkingOptions={continuePicker.thinkingOptions}
+        action={{
+          label: `Continue with ${continuePicker.label}`,
+          onPress: () => {
+            setContinueOpen(false);
+            continueWithAgent(continuePicker.agent, continuePicker.model, continuePicker.thinking);
+          },
+        }}
+      />
 
       {/* The bar itself draws NOTHING.
  *
@@ -1734,6 +2038,9 @@ export function SessionScreenBody({
  * surface — the same rule the home composer follows. */}
       <Reanimated.View
         onLayout={(e) => setComposerHeight(e.nativeEvent.layout.height)}
+        // Reserve the measured height immediately. A separate layout animation
+        // made the field and transcript padding disagree during queue expansion
+        // and delayed the collapse after clearing a multiline draft.
         style={[
           {
             position: "absolute",
@@ -1741,8 +2048,8 @@ export function SessionScreenBody({
             right: 0,
             bottom: 0,
             paddingHorizontal: space.md,
-            paddingTop: space.sm,
-            paddingBottom: insets.bottom + space.sm,
+            paddingTop: space.md,
+            paddingBottom: insets.bottom + space.md,
             gap: space.sm,
           },
           composerLift,
@@ -1769,7 +2076,12 @@ export function SessionScreenBody({
                 // linger over the message you just asked to see.
                 atBottomRef.current = true;
                 setAtBottom(true);
-                listRef.current?.scrollToEnd({ animated: true });
+                // The same absurd offset the auto-scroll uses (see the
+                // "scrollToOffset WITH AN ABSURD OFFSET" note above):
+                // scrollToEnd aims at a content height that is stale while
+                // markdown is still laying out, so "Latest" stopped short of
+                // the bottom by exactly the part that had not measured yet.
+                listRef.current?.scrollToOffset({ offset: bottomOffset(), animated: true });
               }}
               accessibilityRole="button"
               accessibilityLabel={unseen ? "New activity. Jump to the latest" : "Jump to the latest"}
@@ -1809,53 +2121,25 @@ export function SessionScreenBody({
           </View>
         ) : null}
 
-        {/* The agent asked something — answering has to be one tap, and that tap
-            has to actually answer. It lives INSIDE the floating composer: laid
-            out in the normal flow it landed under the absolutely positioned bar,
-            where the field covered the question and most of its answers. Here
-            it sits above the field, lifts with the keyboard, and is part of the
-            height the transcript reserves at its end. */}
-        {prompt ? (
-          <View
-            style={{
-              padding: space.md,
-              backgroundColor: colors.card,
-              borderRadius: radius.lg,
-              borderWidth: StyleSheet.hairlineWidth,
-              // borderStrong: this is a card the transcript can hand you at any
-              // moment, asking for a tap that unblocks the agent — it needs to
-              // read as a distinct surface immediately, not the .35-alpha
-              // border that "reads as a rumour against black" everywhere else
-              // it was tried (see SessionCard's own note on the home screen).
-              borderColor: colors.borderStrong,
-              gap: space.sm,
+        {/* Questions for the person, inside the floating composer — see
+            QuestionCard. Ask-user rows first, then a native prompt. */}
+        {asks.map((q) => (
+          <QuestionCard
+            key={q.id}
+            question={q.question}
+            options={(q.options ?? []).map((label, index) => ({ index, label }))}
+            onAnswer={(label) => {
+              void Haptics.selectionAsync();
+              void answerAsk(q, label, true);
             }}
-          >
-            {prompt.question ? (
-              <Text style={{ ...type.callout, color: colors.text }}>{prompt.question}</Text>
-            ) : null}
-            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
-              {prompt.options?.map((opt) => (
-                <Pressable
-                  key={opt.index}
-                  onPress={() => answerPrompt(opt.label)}
-                  accessibilityRole="button"
-                  style={({ pressed }) => ({
-                    minHeight: 36,
-                    justifyContent: "center",
-                    paddingHorizontal: space.md,
-                    paddingVertical: space.sm,
-                    borderRadius: radius.pill,
-                    backgroundColor: pressed ? colors.cardPressed : colors.secondary,
-                    borderWidth: StyleSheet.hairlineWidth,
-                    borderColor: colors.borderStrong,
-                  })}
-                >
-                  <Text style={{ ...type.footnote, color: colors.text }}>{opt.label}</Text>
-                </Pressable>
-              ))}
-            </View>
-          </View>
+          />
+        ))}
+        {prompt ? (
+          <QuestionCard
+            question={prompt.question}
+            options={prompt.options ?? []}
+            onAnswer={answerPrompt}
+          />
         ) : null}
 
         {/**
@@ -1894,6 +2178,12 @@ export function SessionScreenBody({
         ) : null}
 
         <AttachmentStrip items={attachments.items} onRemove={attachments.remove} />
+        {/* "/" lists the box's skills above the field, as on the web. */}
+        <SkillSuggest value={draft} onChangeText={setDraft} />
+        {/* Held sends, tucked under the field row that follows: the row paints
+            over the card's bottom edge, as the web's HeldQueueCards sit under
+            its composer bar. */}
+        <HeldQueue items={held} busy={busy} onEdit={editHeld} onRemove={removeHeld} onSendNow={steerHeld} />
 
         {/**
          * THE FIELD GETS THE WHOLE WIDTH, and the buttons get their own row.
@@ -1916,7 +2206,7 @@ export function SessionScreenBody({
             control of its own — the plus button's place in Messages. Its own
             glass circle, bottom-aligned so it stays level with the last line
             as the field grows. */}
-        <View style={{ flexDirection: "row", alignItems: "flex-end", gap: space.sm }}>
+        <View style={{ flexDirection: "row", alignItems: "flex-end", gap: space.sm, zIndex: 1 }}>
         <GlassSurface
           variant="regular"
           fallbackColor={colors.card}
@@ -1939,9 +2229,11 @@ export function SessionScreenBody({
             minHeight: 44,
             // The attach button lives inside the field now, so the text no
             // longer starts at the field's own inset — the button provides it.
-            paddingLeft: space.xs,
+            paddingLeft: space.sm,
             paddingRight: space.sm,
-            paddingVertical: 6,
+            // A touch taller while typing, so the caret line does not sit
+            // tight against the glass edge under the keyboard.
+            paddingVertical: composerFocused ? 11 : 8,
             overflow: "hidden",
             // Only when the OS cannot draw glass: the fallback is a flat fill,
             // and a flat fill with no edge disappears into the page.
@@ -1998,7 +2290,11 @@ export function SessionScreenBody({
              * discover that from the spinner.
              */
             placeholder={
-              live === false ? "Message to resume…" : busy ? "Queue a follow-up…" : "Message"
+              live === false
+                ? "Message to resume…"
+                : busy && sendMode === "queue"
+                  ? "Queue a follow-up…"
+                  : "Message"
             }
             placeholderTextColor={colors.textMuted}
             multiline
@@ -2013,14 +2309,22 @@ export function SessionScreenBody({
             returnKeyType="send"
             submitBehavior="submit"
             onSubmitEditing={() => {
-              if (canSend) send("steer");
+              if (canSend) send(sendMode);
             }}
+            onFocus={() => setComposerFocused(true)}
+            onBlur={() => setComposerFocused(false)}
             style={{
               flex: 1,
               maxHeight: 120,
               // No vertical padding of its own: the box centres it, and
               // padding here would fight that and push the text low again.
               minHeight: 24,
+              // EMPTY IS ONE LINE, NOW. A multiline field keeps its last
+              // measured height after its value is cleared until the next
+              // content-size event, so a sent three-line message left a
+              // three-line box for a beat. Pin the height while there is
+              // nothing in it; the auto-size takes over on the first key.
+              ...(draft.length || dictationTail ? {} : { height: 24 }),
               paddingTop: 0,
               paddingBottom: 0,
               color: colors.text,
@@ -2088,11 +2392,17 @@ export function SessionScreenBody({
                   hold.timer = null;
                 }
               }}
-              onPress={() => send(queueHoldRef.current?.armed ? "queue" : "steer")}
+              onPress={() => send(queueHoldRef.current?.armed ? alternateSendMode : sendMode)}
               disabled={!canSend}
               accessibilityRole="button"
-              accessibilityLabel={busy ? "Queue the message" : "Send the message"}
-              accessibilityHint="Press and hold to queue it behind the current turn"
+              accessibilityLabel={
+                !busy ? "Send the message" : sendMode === "queue" ? "Queue the message" : "Send the message now"
+              }
+              accessibilityHint={
+                sendMode === "queue"
+                  ? "Press and hold to send it into the current turn"
+                  : "Press and hold to queue it behind the current turn"
+              }
               accessibilityState={{ disabled: !canSend }}
               style={({ pressed }) => ({
                 width: 32,
@@ -2104,12 +2414,15 @@ export function SessionScreenBody({
                 opacity: !canSend ? 0.3 : pressed ? 0.75 : 1,
               })}
             >
+              {/* Always the arrow. A "+" while the agent worked read as
+                  "attach", and the hold-to-queue affordance was never in
+                  the glyph anyway — it is in the hold. */}
               {sending ? (
                 <ActivityIndicator size="small" color={colors.bg} />
               ) : (
                 <Icon
-                  ios={busy ? "plus" : "arrow.up"}
-                  android={busy ? "add" : "arrow_upward"}
+                  ios="arrow.up"
+                  android="arrow_upward"
                   size={15}
                   weight="semibold"
                   color={colors.bg}
@@ -2210,6 +2523,67 @@ export function SessionScreenBody({
  * over-spec call), only here, where the header's identity is not enough
  * because the header cannot say "happening right now".
  */
+/**
+ * The agent asked something — answering has to be one tap, and that tap has
+ * to actually answer. It lives INSIDE the floating composer: laid out in the
+ * normal flow it landed under the absolutely positioned bar, where the field
+ * covered the question and most of its answers. Here it sits above the field,
+ * lifts with the keyboard, and is part of the height the transcript reserves
+ * at its end. Used for a native prompt from the transcript socket and for an
+ * ask-user question from /api/ask alike.
+ */
+function QuestionCard({
+  question,
+  options,
+  onAnswer,
+}: {
+  question?: string | null;
+  options: { index: number; label: string }[];
+  onAnswer: (label: string) => void;
+}) {
+  const { colors, type, space, radius } = useTheme();
+  return (
+    <View
+      style={{
+        padding: space.md,
+        backgroundColor: colors.card,
+        borderRadius: radius.lg,
+        borderWidth: StyleSheet.hairlineWidth,
+        // borderStrong: this is a card the transcript can hand you at any
+        // moment, asking for a tap that unblocks the agent — it needs to
+        // read as a distinct surface immediately, not the .35-alpha
+        // border that "reads as a rumour against black" everywhere else
+        // it was tried (see SessionCard's own note on the home screen).
+        borderColor: colors.borderStrong,
+        gap: space.sm,
+      }}
+    >
+      {question ? <Text style={{ ...type.callout, color: colors.text }}>{question}</Text> : null}
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
+        {options.map((opt) => (
+          <Pressable
+            key={opt.index}
+            onPress={() => onAnswer(opt.label)}
+            accessibilityRole="button"
+            style={({ pressed }) => ({
+              minHeight: 36,
+              justifyContent: "center",
+              paddingHorizontal: space.md,
+              paddingVertical: space.sm,
+              borderRadius: radius.pill,
+              backgroundColor: pressed ? colors.cardPressed : colors.secondary,
+              borderWidth: StyleSheet.hairlineWidth,
+              borderColor: colors.borderStrong,
+            })}
+          >
+            <Text style={{ ...type.footnote, color: colors.text }}>{opt.label}</Text>
+          </Pressable>
+        ))}
+      </View>
+    </View>
+  );
+}
+
 function BotWorkingIndicator({ bot }: { bot: Bot }) {
   return (
     <View style={{ alignSelf: "flex-start", marginTop: 16, marginLeft: 4 }}>
@@ -2233,7 +2607,7 @@ function BotWorkingIndicator({ bot }: { bot: Bot }) {
  * everybody already reads as "something is coming".
  */
 function ThinkingPill() {
-  const { colors, type, radius } = useTheme();
+  const { colors, type } = useTheme();
   const dots = useRef([new Animated.Value(0.3), new Animated.Value(0.3), new Animated.Value(0.3)])
     .current;
 
@@ -2262,12 +2636,10 @@ function ThinkingPill() {
         marginTop: 16,
         marginLeft: 4,
         minHeight: 26,
-        paddingHorizontal: 10,
+        // No chip: the tool rows around it lost their capsules, so a bordered
+        // "Working" was the last card in a column of lines.
+        paddingHorizontal: 4,
         paddingVertical: 5,
-        borderRadius: radius.pill,
-        backgroundColor: colors.card,
-        borderWidth: 1,
-        borderColor: colors.border,
       }}
     >
       {dots.map((value, i) => (

@@ -35,10 +35,12 @@
  */
 
 import * as Clipboard from "expo-clipboard";
+import MenuView, { type MenuAction } from "@expo/ui/community/menu";
 import * as Haptics from "expo-haptics";
 import type { AndroidSymbol, SFSymbol } from "expo-symbols";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
+  Animated,
   Modal,
   Platform,
   Pressable,
@@ -48,6 +50,7 @@ import {
   View,
 } from "react-native";
 import Reanimated, {
+  Easing,
   FadeIn,
   FadeInDown,
   LinearTransition,
@@ -61,7 +64,7 @@ import type { OmgMessage } from "@omg-dev/protocol";
 import { Icon } from "../components";
 import { formatFileSize } from "./file-preview";
 import { workLabel } from "./work-label";
-import { relativeTime } from "./format";
+import { stampTime } from "./format";
 import { CodeBlock, Markdown, useBodyText } from "./markdown";
 import {
   parseMessageAttachments,
@@ -83,6 +86,23 @@ export type Entry = OmgMessage & {
    * is happening.
    */
   queued?: boolean;
+  /**
+   * THE ROW KEY THE MESSAGE WAS BORN WITH. A sent message starts as an
+   * optimistic row keyed `local-N`; the machine's echo arrives with the real
+   * id. Re-keying the row on that swap unmounted and remounted it, with the
+   * arrival animation firing a second time: the "glitch on send". The echo
+   * keeps the optimistic key here, so it is the same row settling, not a new
+   * one arriving. Set only on confirmed echoes; never persisted.
+   */
+  localKey?: string;
+  /**
+   * Kind `work`: the steps of one run — thoughts and tool calls, in order —
+   * folded by the machine. The row is re-sent under the same id as the run
+   * grows; an empty list withdraws it.
+   */
+  steps?: Entry[];
+  /** An artifact: the display tool call that produced it. */
+  tool?: Entry;
 };
 
 /**
@@ -98,6 +118,16 @@ type ToolPair = { key: string; call: Entry | null; result: Entry | null };
  * column of cards separated by the list's paragraph-sized gap.
  */
 export type TranscriptItem =
+  | {
+      /**
+       * A TIME BETWEEN GROUPS, not under every bubble. Messages writes one
+       * stamp when a conversation resumes after a pause; a per-message "1h"
+       * under each sent bubble said the same thing many times over.
+       */
+      type: "stamp";
+      key: string;
+      ts: number;
+    }
   | {
       type: "message";
       key: string;
@@ -139,6 +169,7 @@ export type TranscriptItem =
  * voice — a system notice interrupting a turn should read as an interruption.
  */
 export function transcriptSpeaker(item: TranscriptItem): string {
+  if (item.type === "stamp") return "stamp";
   if (item.type === "tools") return "assistant";
   const role = item.message.role;
   if (role === "user") return "user";
@@ -175,22 +206,26 @@ const COLLAPSED_LINES = 10;
 const LONG_MESSAGE_CHARS = 460;
 
 const ATTACHMENT_MAX = 240;
+/** Widest an agent-displayed image gets, whatever the pane offers. */
+const DISPLAY_MAX_WIDTH = 560;
 const ATTACHMENT_TILE = 150;
 
 const isThought = (message?: Entry) => message?.kind === "thinking";
-const isWork = (message?: Entry) => isCall(message) || isResult(message) || isThought(message);
 
+/** A pause long enough to earn a stamp between groups. Messages uses about an hour; this is a working chat. */
+const STAMP_GAP_MS = 15 * 60_000;
 /**
- * A RUN IS THE THOUGHTS AND THE TOOL CALLS TOGETHER. The agent thinks, calls
- * something, thinks about the result, calls again: one stretch of work, and
- * one row — "Worked for 12s" — that opens into every step. Split by kind it
- * read as "Thought", "2 × shell", "Thought", "1 × shell", none of which say
- * anything until opened. Same rule as the web's buildChatRenderItems.
+ * A RUN ARRIVES FOLDED. The machine sends every stretch of thoughts and tool
+ * calls as one message of kind `work` carrying its `steps` — the `workRows`
+ * capability, declared on the socket URL in transport.ts and on the page
+ * fetch in app/session/[id].tsx. The rule is src/transcript-rows.ts in the
+ * lfg repository, and it runs there: this screen no longer decides what a run
+ * is. A `work` row is a run, two adjacent ones are one run (a page seam), and
+ * a row with no steps was withdrawn and draws nothing.
  *
- * Two exceptions, both because the thought is the only thing on screen:
- *   - a thought with no tool call anywhere near it stays a row of its own;
- *   - the thought still streaming at the END of the transcript stays out of
- *     the run above it, so the live reasoning is readable without a tap.
+ * A raw tool call or thought — from a machine whose server predates the
+ * capability — lands on its own readable row rather than being folded here,
+ * so there is one copy of the rule and it is not this one.
  *
  * `busy` marks the run at the end of the transcript as live: its label counts
  * up until the agent moves on.
@@ -201,11 +236,22 @@ export function buildTranscriptItems(
 ): TranscriptItem[] {
   const items: TranscriptItem[] = [];
   let index = 0;
+  let lastStampTs: number | null = null;
+
+  /** One stamp per pause: the first row, then any row more than STAMP_GAP_MS after the last stamp. */
+  const stamp = (ts: number | null | undefined, key: string) => {
+    if (!ts) return;
+    if (lastStampTs !== null && ts - lastStampTs < STAMP_GAP_MS) return;
+    lastStampTs = ts;
+    items.push({ type: "stamp", key: `stamp-${key}`, ts });
+  };
 
   const pushMessage = (message: Entry, at: number) => {
+    const key = entryKey(message, at);
+    stamp(message.ts, key);
     items.push({
       type: "message",
-      key: entryKey(message, at),
+      key,
       message,
       nextTs: messages[at + 1]?.ts ?? null,
     });
@@ -213,38 +259,36 @@ export function buildTranscriptItems(
 
   while (index < messages.length) {
     const message = messages[index];
-    if (!isWork(message)) {
+    // Claude's steering marker carries no words a person wrote. It used to be
+    // an "Interrupted" line; now it is not a row at all.
+    if (isInterruptedTurn(message)) {
+      index += 1;
+      continue;
+    }
+    if (message.kind !== "work") {
       pushMessage(message, index);
       index += 1;
       continue;
     }
     let end = index;
-    while (end < messages.length && isWork(messages[end])) end += 1;
-    // The streaming tail: trailing thoughts at the very end of the transcript
-    // are not part of the run they follow.
-    let runEnd = end;
-    if (end === messages.length) {
-      while (runEnd > index && isThought(messages[runEnd - 1])) runEnd -= 1;
+    const run: Entry[] = [];
+    while (end < messages.length && messages[end].kind === "work") {
+      run.push(...(messages[end].steps ?? []));
+      end += 1;
     }
-    const run = messages.slice(index, runEnd);
-    const hasTools = run.some((entry) => isCall(entry) || isResult(entry));
-    if (!hasTools) {
-      // Thoughts alone. Each is its own row, as before.
-      for (let at = index; at < end; at += 1) pushMessage(messages[at], at);
-      index = end;
-      continue;
+    if (run.length) {
+      const tools = run.filter((entry) => !isThought(entry));
+      const key = `tools-${entryKey(message, index)}`;
+      stamp(message.ts, key);
+      items.push({
+        type: "tools",
+        key,
+        pairs: buildToolPairs(tools, index),
+        entries: run,
+        nextTs: messages[end]?.ts ?? null,
+        live: !!options.busy && end === messages.length,
+      });
     }
-    const tools = run.filter((entry) => !isThought(entry));
-    items.push({
-      type: "tools",
-      key: `tools-${entryKey(message, index)}`,
-      pairs: buildToolPairs(tools, index),
-      entries: run,
-      nextTs: messages[runEnd]?.ts ?? null,
-      live: !!options.busy && runEnd === messages.length,
-    });
-    // Trailing thoughts that were held out of the run.
-    for (let at = runEnd; at < end; at += 1) pushMessage(messages[at], at);
     index = end;
   }
 
@@ -274,7 +318,7 @@ function buildToolPairs(run: Entry[], offset: number): ToolPair[] {
 
 /** Ids are nullable on the wire, so position is the fallback that keeps keys unique. */
 function entryKey(message: Entry, index: number): string {
-  return message.id ?? `${message.kind ?? message.role ?? "msg"}-${index}`;
+  return message.localKey ?? message.id ?? `${message.kind ?? message.role ?? "msg"}-${index}`;
 }
 
 /**
@@ -307,15 +351,42 @@ export function TranscriptRow({
 }) {
   return (
     <Reanimated.View
-      entering={fresh ? FadeInDown.springify().damping(18).mass(0.6) : undefined}
-      layout={LinearTransition.springify().damping(20).mass(0.7)}
+      // Eased, not sprung. The spring overshot on arrival and on every
+      // layout change, so a new row and everything under it visibly
+      // wobbled — it read as a shake, not an arrival.
+      entering={
+        fresh
+          ? item.type === "message" && item.message.role === "user"
+            ? // A SENT MESSAGE RISES OUT OF THE COMPOSER: it starts low and a
+              // touch small, where the field is, and settles into its slot,
+              // so the words you just typed travel to where they now live
+              // instead of appearing there.
+              FadeInDown.duration(300)
+                .easing(Easing.out(Easing.cubic))
+                .withInitialValues({ opacity: 0.4, transform: [{ translateY: 72 }] })
+            : FadeInDown.duration(180).easing(Easing.out(Easing.cubic))
+          : undefined
+      }
+      layout={LinearTransition.duration(160).easing(Easing.out(Easing.quad))}
     >
-      {item.type === "message" ? (
+      {item.type === "stamp" ? (
+        <Stamp ts={item.ts} />
+      ) : item.type === "message" ? (
         <TranscriptEntry message={item.message} nextTs={item.nextTs} bot={bot} />
       ) : (
         <ToolRun pairs={item.pairs} entries={item.entries} nextTs={item.nextTs} live={item.live} />
       )}
     </Reanimated.View>
+  );
+}
+
+/** The centred time between groups of rows. */
+function Stamp({ ts }: { ts: number }) {
+  const { colors, type, space } = useTheme();
+  return (
+    <View style={{ alignSelf: "stretch", alignItems: "center", paddingVertical: space.sm }}>
+      <Text style={{ ...type.caption, color: colors.textMuted }}>{stampTime(ts)}</Text>
+    </View>
   );
 }
 
@@ -395,6 +466,35 @@ function ToolSheet({
   );
 }
 
+/** Three dots breathing in sequence: the one animation everybody reads as "something is coming". */
+function WorkingDots({ color }: { color: string }) {
+  const dots = useRef([new Animated.Value(0.3), new Animated.Value(0.3), new Animated.Value(0.3)]).current;
+  useEffect(() => {
+    const loops = dots.map((value, i) =>
+      Animated.loop(
+        Animated.sequence([
+          Animated.delay(i * 160),
+          Animated.timing(value, { toValue: 1, duration: 340, useNativeDriver: true }),
+          Animated.timing(value, { toValue: 0.3, duration: 340, useNativeDriver: true }),
+          Animated.delay((dots.length - 1 - i) * 160),
+        ]),
+      ),
+    );
+    loops.forEach((loop) => loop.start());
+    return () => loops.forEach((loop) => loop.stop());
+  }, [dots]);
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 4, marginRight: 2 }}>
+      {dots.map((value, i) => (
+        <Animated.View
+          key={i}
+          style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: color, opacity: value }}
+        />
+      ))}
+    </View>
+  );
+}
+
 /** One call's arguments and result, as the blocks a reader can copy. */
 function ToolDetail({ call, result }: { call: Entry | null; result: Entry | null }) {
   const { colors, type, space } = useTheme();
@@ -450,15 +550,6 @@ function ToolRun({
     return () => clearInterval(timer);
   }, [live]);
 
-  if (pairs.length < 2 && thoughts.length === 0) {
-    return (
-      <View style={{ alignSelf: "stretch" }}>
-        {pairs.map((pair) => (
-          <ToolEntry key={pair.key} call={pair.call} result={pair.result} />
-        ))}
-      </View>
-    );
-  }
 
   // The row says how long; the sheet says what. "Thought · 4 × shell" is the
   // sheet's title, the same summary the web's popover carries.
@@ -471,6 +562,7 @@ function ToolRun({
   ]
     .filter(Boolean)
     .join(" · ");
+  // The sheet's title still carries the tool's mark; only the row lost it.
   const symbol: Symbols =
     unique.length === 1 ? toolSymbol(unique[0]) : { ios: "wrench.and.screwdriver", android: "build" };
 
@@ -513,7 +605,12 @@ function ToolRun({
           opacity: pressed ? 0.6 : 1,
         })}
       >
-        <Icon ios={symbol.ios} android={symbol.android} size={12} color={colors.textMuted} />
+        {/* No tool glyph at the head of the row: the label already says what
+            kind of row this is, and the mark was one more thing in the
+            gutter. A LIVE run carries the breathing dots instead — the same
+            ones the footer used to show on its own — so the run row is the
+            working indicator, not a second one under it. */}
+        {live ? <WorkingDots color={colors.textSecondary} /> : null}
         <Text style={{ ...type.caption, fontWeight: "500", color: colors.textSecondary }}>{label}</Text>
         <Icon ios="chevron.right" android="chevron_right" size={10} color={colors.textMuted} />
       </Pressable>
@@ -612,11 +709,9 @@ function ToolStepHeader({
  * is the same rule, matched to `isRequestInterruptedMessage` in
  * web/src/lib/transcript-status.ts so the two cannot drift.
  */
-const INTERRUPTED = /^\[Request interrupted by user(?: for tool use)?\]$/i;
-
 function isInterruptedTurn(message: Entry): boolean {
   if (message.role !== "user") return false;
-  return INTERRUPTED.test((message.text ?? "").trim());
+  return /^\[Request interrupted by user(?: for tool use)?\]$/i.test((message.text ?? "").trim());
 }
 
 export function TranscriptEntry({
@@ -631,15 +726,8 @@ export function TranscriptEntry({
   const { colors, type, space, radius } = useTheme();
   const isUser = message.role === "user";
 
-  if (isInterruptedTurn(message)) {
-    return (
-      <View style={{ alignSelf: "stretch", alignItems: "center", paddingVertical: 2 }}>
-        <Text style={{ ...type.caption, fontSize: 11, color: colors.textMuted }}>
-          Interrupted
-        </Text>
-      </View>
-    );
-  }
+  // buildTranscriptItems drops these; this guards a caller that did not go through it.
+  if (isInterruptedTurn(message)) return null;
   const isSystem = message.role !== "user" && message.role !== "assistant";
 
   // A message carrying only a file or an image has no text to fall back on, and
@@ -823,13 +911,14 @@ function ToolEntry({ call, result }: { call: Entry | null; result: Entry | null 
        * Opening it is what asks to see it: the box stretches, the arguments
        * and the result appear, and the badge becomes the header of that panel.
        */
+      /**
+       * NO PILL, collapsed or open. Same call as ToolRun above: a tool call
+       * is a line in the transcript, not a card in it. Opened, the
+       * arguments and result get their own inset panel below the row.
+       */
       style={{
         alignSelf: "flex-start",
         maxWidth: "100%",
-        backgroundColor: colors.card,
-        borderRadius: radius.pill,
-        borderWidth: 1,
-        borderColor: colors.border,
         overflow: "hidden",
       }}
     >
@@ -1279,7 +1368,10 @@ function DisplayedImage({ message }: { message: Entry }) {
       <AuthenticatedImage
         path={path}
         accessibilityLabel={message.alt ?? (caption || "Image")}
-        maxWidth={screen.width - space.lg * 2 - space.xs * 2}
+        // Capped: on an iPad the pane is 700pt wide and a screenshot that
+        // stretched to fill it was a poster, not evidence. 560 keeps a phone
+        // screenshot readable and stops a landscape one from owning the pane.
+        maxWidth={Math.min(DISPLAY_MAX_WIDTH, screen.width - space.lg * 2 - space.xs * 2)}
         maxHeight={420}
         // The artifact tells us its own dimensions, so the tile is the right
         // shape before the bytes arrive.
@@ -1510,7 +1602,7 @@ function OmgInstructionsChip({ instructions, version }: { instructions: string; 
 }
 
 export function UserMessage({ message }: { message: Entry }) {
-  const { colors, type, space, radius } = useTheme();
+  const { colors, type, space, isDark } = useTheme();
   const body = useBodyText();
   const [copied, setCopied] = useState(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1529,21 +1621,36 @@ export function UserMessage({ message }: { message: Entry }) {
   // goes to the agent; this is presentation only (see omg-prompt-envelope.ts).
   const rawText = envelope?.task ?? message.text ?? "";
 
+  /**
+   * COPY IS A LONG PRESS, not a button. The little doc-on-doc glyph under
+   * every sent message was chrome on a thing you rarely act on; holding
+   * the bubble is what a phone user already does to copy a message. The
+   * hold opens a native popup menu on the bubble (UIMenu, the same
+   * component the app's other menus use), not an action sheet.
+   */
   const copy = () => {
     if (!rawText) return;
     void Haptics.selectionAsync();
-    // expo-clipboard, not RN's core Clipboard — the core one is deprecated and
-    // slated for removal. expo-clipboard is a direct dependency with several
-    // callers here, in markdown.tsx and in session/[id].tsx, so this is not
-    // pulling in a package for one copy button.
+    // expo-clipboard, not RN's core Clipboard — the core one is deprecated
+    // and slated for removal.
     void Clipboard.setStringAsync(rawText);
     setCopied(true);
     if (copyTimer.current) clearTimeout(copyTimer.current);
     copyTimer.current = setTimeout(() => setCopied(false), 1500);
   };
+  const bubbleActions: MenuAction[] = [{ id: "copy", title: "Copy", image: "doc.on.doc" }];
 
-  const stamp = relativeTime(message.ts);
   const [expanded, setExpanded] = useState(false);
+
+  const unsettled = !!(message.pending || message.queued);
+  const settleOpacity = useSharedValue(unsettled ? 0.55 : 1);
+  useEffect(() => {
+    settleOpacity.value = withTiming(unsettled ? 0.55 : 1, {
+      duration: 260,
+      easing: Easing.out(Easing.quad),
+    });
+  }, [unsettled, settleOpacity]);
+  const settle = useAnimatedStyle(() => ({ opacity: settleOpacity.value }));
 
   // Attachments ride along in the user's text as absolute upload paths, because
   // that is how the agent receives them. Split them back out so the transcript
@@ -1567,7 +1674,29 @@ export function UserMessage({ message }: { message: Entry }) {
       {/* A caption is optional: attach an image with nothing typed and the
           picture is the whole message, with no empty bubble under it. */}
       {text ? (
+        <Reanimated.View
+          /**
+           * SETTLING, NOT SWAPPING. The bubble is drawn dim while the request
+           * is in the air (or queued behind a turn) and fades up to full when
+           * the machine has it. Animating opacity on the same row is what
+           * replaced the old "Sending…" caption: a caption appearing and then
+           * vanishing changed the row's height, and the height change plus
+           * the key swap read as the message being re-inserted.
+           */
+          style={settle}
+        >
+        <MenuView
+          actions={bubbleActions}
+          shouldOpenOnLongPress
+          colorScheme={isDark ? "dark" : "light"}
+          onPressAction={({ nativeEvent }) => {
+            if (nativeEvent.event === "copy") copy();
+          }}
+          style={{ alignSelf: "flex-end", maxWidth: "85%" }}
+        >
         <View
+          accessibilityRole="text"
+          accessibilityHint="Press and hold to copy"
           /**
            * SIZED TO ITS TEXT, and on the RIGHT. A sent message stretched to
            * the full column looked like another section of the page rather
@@ -1577,10 +1706,8 @@ export function UserMessage({ message }: { message: Entry }) {
            * the edge instead of becoming a full-width block again.
            */
           style={{
-            alignSelf: "flex-end",
-            maxWidth: "85%",
             backgroundColor: colors.card,
-            borderRadius: radius.xl,
+            borderRadius: 22,
             borderWidth: StyleSheet.hairlineWidth,
             // borderStrong. The comment above says it plainly: this border is
             // the ONLY thing telling a sent message apart from the reply
@@ -1589,14 +1716,16 @@ export function UserMessage({ message }: { message: Entry }) {
             // decorative — the one card in the whole app that most needs the
             // edge you can actually see.
             borderColor: colors.borderStrong,
-            paddingHorizontal: space.lg,
-            paddingVertical: space.md,
-            // Both states are "not acted on yet", so both sit back a little.
-            opacity: message.pending || message.queued ? 0.6 : 1,
+            paddingHorizontal: space.md,
+            // 5, not 8: the body style's line height already carries ~3pt of
+            // leading above and below the glyphs, so 8 read as 11 and the
+            // bubble looked padded out of proportion to its one line.
+            paddingVertical: 5,
           }}
         >
           <Text
-            selectable
+            // Not `selectable`: the native selection gesture is a long press
+            // too, and it would take this one before the copy menu could.
             // The SAME body style the assistant's markdown uses. On the web
             // both roles resolve to `.msg-text.markdown`, so a sent message and
             // a reply read at one size and one rhythm; the bubble is the only
@@ -1634,6 +1763,8 @@ export function UserMessage({ message }: { message: Entry }) {
             </Pressable>
           ) : null}
         </View>
+        </MenuView>
+        </Reanimated.View>
       ) : null}
       <View
         style={{
@@ -1645,40 +1776,17 @@ export function UserMessage({ message }: { message: Entry }) {
           marginRight: space.sm,
         }}
       >
-        <Pressable
-          onPress={copy}
-          hitSlop={10}
-          accessibilityRole="button"
-          accessibilityLabel="Copy message"
-          style={({ pressed }) => ({
-            flexDirection: "row",
-            alignItems: "center",
-            gap: 4,
-            paddingVertical: 4,
-            opacity: pressed ? 0.5 : 1,
-          })}
-        >
-          <Icon
-            ios={copied ? "checkmark" : "doc.on.doc"}
-            android={copied ? "check" : "content_copy"}
-            size={12}
-            color={colors.textMuted}
-          />
-          {copied ? (
-            <Text style={{ ...type.caption, color: colors.textMuted }}>Copied</Text>
-          ) : null}
-        </Pressable>
+        {copied ? (
+          <Text style={{ ...type.caption, color: colors.textMuted }}>Copied</Text>
+        ) : null}
+        {/* No "Sending…" caption: the bubble's own dimness says it, and a
+            caption that appears and vanishes moved the row. Queued stays,
+            because it can sit for minutes and deserves a word. */}
         {message.queued ? (
           <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
             <Icon ios="clock" android="schedule" size={11} color={colors.textMuted} />
-            <Text style={{ ...type.caption, color: colors.textMuted }}>
-              Queued{stamp ? ` · ${stamp}` : ""}
-            </Text>
+            <Text style={{ ...type.caption, color: colors.textMuted }}>Queued</Text>
           </View>
-        ) : message.pending ? (
-          <Text style={{ ...type.caption, color: colors.textMuted }}>Sending…</Text>
-        ) : stamp ? (
-          <Text style={{ ...type.caption, color: colors.textMuted }}>{stamp}</Text>
         ) : null}
       </View>
     </View>

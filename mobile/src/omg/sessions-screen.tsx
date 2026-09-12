@@ -41,6 +41,11 @@ import Reanimated, {
   useAnimatedStyle,
 } from "react-native-reanimated";
 import { LinearGradient } from "expo-linear-gradient";
+import { COMPOSER_FADE_HEIGHT, EdgeFade, fadeStops, TOP_FADE_HEIGHT } from "./edge-fade";
+import { keyCommandsAvailable, useKeyCommand } from "./key-commands";
+import { ShortcutsSheet } from "./shortcuts-sheet";
+import { FolderRailSheet } from "./folder-rail-sheet";
+import { CreateSheet } from "./create-sheet";
 import { Text } from "./text";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { OmgSession } from "@omg-dev/protocol";
@@ -57,7 +62,6 @@ import {
   SectionHeader,
   SessionCard,
   StatusDot,
-  withAlpha,
 } from "../components";
 import { useAttachments } from "./attachments";
 import {
@@ -90,7 +94,6 @@ import { useDictation } from "./dictation";
 import { PressableScale } from "./motion";
 import { useUsage } from "./usage";
 import { LucideIcon } from "./lucide";
-import { GlassSurface } from "./glass";
 import { DropdownMenu, type MenuOption } from "./menu";
 import { useAgentPicker, useProjectPicker } from "./session-options";
 import { useOmg } from "./provider";
@@ -141,7 +144,11 @@ function SessionFamily({
 }) {
   const { colors, space, radius } = useTheme();
   const session = node.session;
-  const selected = usePathname() === `/session/${session.sessionId}`;
+  // Only the iPad rail has a current row: the list stays on screen beside
+  // the open session. On a phone the list is a screen you come BACK to, and
+  // a row still tinted then reads as a stuck press, not a selection.
+  const pathname = usePathname();
+  const selected = Platform.OS === "ios" && Platform.isPad && pathname === `/session/${session.sessionId}`;
 
   return (
     <View style={{ alignSelf: "stretch" }}>
@@ -354,53 +361,6 @@ const ELBOW_RADIUS = 9;
 const MIN_COMPOSER_HEIGHT = 76;
 
 /**
- * How far above the composer the scroll content starts dissolving.
- *
- * Borrowed from Claude's iOS app: the transcript doesn't stop at a hard edge
- * above the input bar, it fades into the page background first, so scrolling
- * text never collides with the glass. 120pt is roughly two lines of body text
- * plus breathing room — enough to read as a dissolve, not so much that the
- * last visible row looks half-erased.
- */
-const COMPOSER_FADE_HEIGHT = 120;
-
-/**
- * Gradient stops for the composer fade, eased rather than linear.
- *
- * A straight transparent-to-opaque ramp reads as a flat grey smudge sliding
- * over the content — the eye is very sensitive to linear alpha ramps. These
- * stops follow an ease-in curve (roughly t^2, sampled at six points) so the
- * fade starts almost imperceptibly at the top and only does most of its work
- * in the last third, near the composer itself. `hex` is always `colors.bg` —
- * a plain hex token, never an rgba string — so `withAlpha` can parse it.
- */
-function composerFadeStops(hex: string): {
-  colors: [string, string, ...string[]];
-  locations: [number, number, ...number[]];
-} {
-  const steps: Array<[number, number]> = [
-    [0, 0],
-    [0.15, 0.02],
-    [0.35, 0.12],
-    [0.55, 0.3],
-    [0.75, 0.56],
-    [1, 1],
-  ];
-  return {
-    locations: steps.map(([location]) => location) as [
-      number,
-      number,
-      ...number[],
-    ],
-    colors: steps.map(([, alpha]) => withAlpha(hex, alpha)) as [
-      string,
-      string,
-      ...string[],
-    ],
-  };
-}
-
-/**
  * The greeting the web Live view carries, in the bar slot the removed
  * "Sessions" title left empty.
  *
@@ -417,14 +377,18 @@ function composerFadeStops(hex: string): {
 function LiveWelcome({
   firstName,
   busyCount,
+  connection,
   onPress,
 }: {
   firstName: string;
   busyCount: number;
+  /** Live-socket health. A drop takes over the greeting, as the web's status text does. */
+  connection?: OmgConnectionStatus;
   /** The greeting is the door to the Notification Center, as on the web. */
   onPress?: () => void;
 }) {
   const { colors, type } = useTheme();
+  const dropped = connection === "reconnecting" || connection === "offline";
   const [showActivity, setShowActivity] = useState(false);
 
   useEffect(() => {
@@ -445,9 +409,9 @@ function LiveWelcome({
     <Pressable onPress={onPress} accessibilityRole="button" hitSlop={8}>
       <Text
         numberOfLines={1}
-        style={{ ...type.headline, color: colors.text, maxWidth: 210 }}
+        style={{ ...type.headline, color: dropped ? colors.warning : colors.text, maxWidth: 210 }}
       >
-        {busyCount > 0 && showActivity ? activity : welcome}
+        {dropped ? "Reconnecting…" : busyCount > 0 && showActivity ? activity : welcome}
       </Text>
     </Pressable>
   );
@@ -513,11 +477,14 @@ function HomeHeaderControls({
   rosterUsers,
   setUserFilter,
   navigate,
+  onShortcuts,
 }: {
   userFilter: string;
   rosterUsers: RosterUser[];
   setUserFilter: (next: string) => void;
   navigate: (href: Href) => void;
+  /** Opens the keyboard shortcuts card; listed only when the binary can deliver key commands. */
+  onShortcuts?: () => void;
 }) {
   const { colors, space } = useTheme();
   return (
@@ -553,6 +520,9 @@ function HomeHeaderControls({
             icon: "gearshape",
             onPress: () => navigate("/settings"),
           },
+          ...(onShortcuts && keyCommandsAvailable()
+            ? [{ label: "Keyboard shortcuts", icon: "keyboard" as const, onPress: onShortcuts }]
+            : []),
         ]}
       >
         <View
@@ -1092,6 +1062,51 @@ export function SessionsScreen({
   };
 
   /**
+   * HARDWARE KEYBOARD, mostly the iPad. The bindings mirror the web's where
+   * a phone-sized screen has the same object: ⌘N new, ⌘↑/⌘↓ step through
+   * the list, ⌘1…9 open the nth, ⌘, settings, ⌘/ the card that lists them.
+   * Every hook is a no-op on a binary without the native module, so an OTA
+   * carrying this is safe on older installs. The list order is the rail's.
+   */
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [railSheetOpen, setRailSheetOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const orderedSessionIds = useMemo(
+    () => flattenNodes(roots).map((session) => session.sessionId),
+    [roots],
+  );
+  const currentSessionId = pathname.startsWith("/session/") ? pathname.slice("/session/".length) : null;
+  const goTo = (href: Href) => {
+    if (workspace) navigateWorkspace(href);
+    else router.push(href);
+  };
+  const stepSession = (delta: 1 | -1) => {
+    const ids = orderedSessionIds;
+    if (!ids.length) return;
+    const at = currentSessionId ? ids.indexOf(currentSessionId) : -1;
+    const next = at < 0 ? (delta > 0 ? 0 : ids.length - 1) : Math.min(ids.length - 1, Math.max(0, at + delta));
+    if (ids[next] && ids[next] !== currentSessionId) openSession(ids[next]);
+  };
+  useKeyCommand({ key: "n" }, () => goTo("/"));
+  useKeyCommand({ key: { special: "up" } }, () => stepSession(-1));
+  useKeyCommand({ key: { special: "down" } }, () => stepSession(1));
+  useKeyCommand({ key: "1" }, () => openSession(orderedSessionIds[0] ?? null));
+  useKeyCommand({ key: "2" }, () => openSession(orderedSessionIds[1] ?? null));
+  useKeyCommand({ key: "3" }, () => openSession(orderedSessionIds[2] ?? null));
+  useKeyCommand({ key: "4" }, () => openSession(orderedSessionIds[3] ?? null));
+  useKeyCommand({ key: "5" }, () => openSession(orderedSessionIds[4] ?? null));
+  useKeyCommand({ key: "6" }, () => openSession(orderedSessionIds[5] ?? null));
+  useKeyCommand({ key: "7" }, () => openSession(orderedSessionIds[6] ?? null));
+  useKeyCommand({ key: "8" }, () => openSession(orderedSessionIds[7] ?? null));
+  useKeyCommand({ key: "9" }, () => openSession(orderedSessionIds[8] ?? null));
+  useKeyCommand({ key: "," }, () => goTo("/settings"));
+  useKeyCommand({ key: "/" }, () => setShortcutsOpen(true));
+  useKeyCommand(
+    { key: { special: "escape" }, modifier: "none" },
+    shortcutsOpen ? () => setShortcutsOpen(false) : null,
+  );
+
+  /**
    * The composer Start button. Same request the web's composer sends
    * (POST /api/sessions/new), now carrying both choices explicitly instead of
    * letting the server pick the agent and the binding pick the folder.
@@ -1101,6 +1116,32 @@ export function SessionsScreen({
    * update carrying it has not committed at the moment the take ends —
    * reading `draft` there starts a session with an empty prompt.
    */
+  /**
+   * The create card's way in: the same request as Start, with the prompt
+   * and folder handed over instead of read from the composer and the rail.
+   */
+  const launch = useCallback(
+    async ({ prompt, cwd }: { prompt: string; cwd: string }) => {
+      if (!client) throw new Error("No machine selected");
+      const res = await client.transport.request<{ sessionId?: string }>("/api/sessions/new", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt,
+          agent: agentPicker.agent,
+          model: agentPicker.model ?? undefined,
+          thinkingLevel: agentPicker.thinking ?? undefined,
+          cwd,
+        }),
+      });
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      await load();
+      if (res?.sessionId) openSession(res.sessionId);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [client, agentPicker.agent, agentPicker.model, agentPicker.thinking, load],
+  );
+
   const startSession = useCallback(
     async (spoken?: string) => {
       const prompt = attachments.compose((spoken ?? draft).trim());
@@ -1306,6 +1347,18 @@ export function SessionsScreen({
     if (workspace) return;
     navigation.setOptions({
       headerShown: true,
+      headerTransparent: true,
+      // No tint of its own: the top EdgeFade below the bar is what keeps its
+      // controls readable, the same paint the composer gets at the bottom.
+      headerStyle: { backgroundColor: "transparent" },
+      headerBlurEffect: "none",
+      headerShadowVisible: false,
+      scrollEdgeEffects: {
+        top: "hidden",
+        bottom: "hidden",
+        left: "hidden",
+        right: "hidden",
+      },
       /**
        * NO TITLE, large or small.
        *
@@ -1342,6 +1395,7 @@ export function SessionsScreen({
               <LiveWelcome
                 firstName={firstName}
                 busyCount={flattenNodes(working).length}
+                connection={connection}
                 onPress={() => router.push("/notifications")}
               />
             </View>
@@ -1354,13 +1408,16 @@ export function SessionsScreen({
           rosterUsers={rosterUsers}
           setUserFilter={setUserFilter}
           navigate={(href) => router.push(href)}
+          onShortcuts={() => setShortcutsOpen(true)}
         />
       ),
     });
   }, [
     workspace,
     navigation,
+    colors.bg,
     router,
+    connection,
     computerPicker.options,
     machineName,
     currentBinding?.online,
@@ -1445,6 +1502,84 @@ export function SessionsScreen({
       bottomInset={wide ? 0 : insets.bottom}
     />
   );
+  const folderRail = ready && projectPicker.options.length ? (
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      keyboardShouldPersistTaps="handled"
+      // flexGrow 0: a ScrollView grows by default, and in the iPad rail's
+      // column this one shared the height with the session list beneath it,
+      // opening a blank band under the pills. The phone never saw it because
+      // there the rail sits in an absolute 50pt box.
+      style={{ height: 50, flexGrow: 0, flexShrink: 0, backgroundColor: "transparent" }}
+      contentContainerStyle={{
+        gap: 8,
+        paddingHorizontal: space.lg,
+        paddingTop: space.sm,
+        paddingBottom: space.sm,
+      }}
+    >
+      {/* "+" FIRST: start something new with a preset (create-sheet.tsx). */}
+      <PressableScale
+        onPress={() => {
+          void Haptics.selectionAsync();
+          setCreateOpen(true);
+        }}
+        accessibilityRole="button"
+        accessibilityLabel="Create something new"
+        scale={0.96}
+        style={{
+          width: 34,
+          minHeight: 34,
+          alignItems: "center",
+          justifyContent: "center",
+          borderRadius: radius.pill,
+          backgroundColor: colors.secondary,
+        }}
+      >
+        <Icon ios="plus" android="add" size={15} weight="semibold" color={colors.text} />
+      </PressableScale>
+      {projectPicker.options.map((folder, index) => (
+        <PressableScale
+          key={`${folder.label}:${index}`}
+          onPress={folder.onPress}
+          // Hold a pill to arrange the rail: order, hide, add, create.
+          onLongPress={() => {
+            void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            setRailSheetOpen(true);
+          }}
+          delayLongPress={350}
+          accessibilityRole="button"
+          accessibilityState={{ selected: folder.selected }}
+          accessibilityLabel={`${folder.label} folder`}
+          scale={0.96}
+          // Selected is an OUTLINE and a shade lighter, not a white block.
+          // A solid white pill in a row of grey ones was the loudest thing
+          // on the screen, for a filter.
+          style={{
+            minHeight: 34,
+            justifyContent: "center",
+            paddingHorizontal: 14,
+            borderRadius: radius.pill,
+            borderWidth: 1,
+            borderColor: folder.selected ? colors.borderStrong : "transparent",
+            backgroundColor: folder.selected ? colors.card : colors.secondary,
+          }}
+        >
+          <Text
+            numberOfLines={1}
+            style={{
+              ...type.footnote,
+              fontWeight: "600",
+              color: folder.selected ? colors.text : colors.textSecondary,
+            }}
+          >
+            {folder.label}
+          </Text>
+        </PressableScale>
+      ))}
+    </ScrollView>
+  ) : null;
 
   return (
     <Reanimated.View style={{ flex: 1, backgroundColor: colors.bg }}>
@@ -1500,139 +1635,45 @@ export function SessionsScreen({
                   machineName={machineName}
                   online={currentBinding?.online ?? false}
                 />
-                {/* The greeting wears the web's glass island so it earns the
-                    header row it sits in. The phone's bar item stays bare:
-                    there UIKit already gives the bar its material. */}
-                <GlassSurface
-                  fallbackColor={colors.card}
-                  variant="regular"
-                  style={{
-                    height: 40,
-                    paddingHorizontal: 14,
-                    borderRadius: 999,
-                    justifyContent: "center",
-                  }}
-                >
+                {/* Flat, like the phone's bar item. The glass island it wore
+                    read as a control in a row that already has two. */}
+                <View style={{ height: 40, paddingHorizontal: 6, justifyContent: "center" }}>
                   <LiveWelcome
                     firstName={firstName}
                     busyCount={flattenNodes(working).length}
+                    connection={connection}
                     onPress={() => navigateWorkspace("/notifications")}
                   />
-                </GlassSurface>
+                </View>
               </View>
               <HomeHeaderControls
                 userFilter={userFilter}
                 rosterUsers={rosterUsers}
                 setUserFilter={setUserFilter}
                 navigate={navigateWorkspace}
+                onShortcuts={() => setShortcutsOpen(true)}
               />
             </View>
-            <View
-              accessibilityRole="tablist"
-              style={{
-                flexDirection: "row",
-                paddingHorizontal: space.md,
-                paddingVertical: space.sm,
-                gap: 4,
-              }}
-            >
-              {(
-                [
-                  // Bots is off the surface for now, on the phone's pages
-                  // menu too. The routes still exist; nothing links to them.
-                  { label: "Chat", href: "/" },
-                  { label: "Schedules", href: "/schedules" },
-                ] as const
-              ).map(({ label, href }) => {
-                const selected =
-                  href === "/"
-                    ? home || pathname.startsWith("/session/")
-                    : pathname.startsWith(href);
-                return (
-                  <Pressable
-                    key={href}
-                    accessibilityRole="tab"
-                    accessibilityState={{ selected }}
-                    onPress={() => navigateWorkspace(href)}
-                    // Small, like the web's SurfaceToggle. At 12pt of padding
-                    // and a 16 radius it was a filled slab that outweighed
-                    // every session row under it.
-                    style={{
-                      flex: 1,
-                      paddingVertical: 6,
-                      borderRadius: radius.sm,
-                      backgroundColor: selected ? colors.card : "transparent",
-                      alignItems: "center",
-                    }}
-                  >
-                    <Text
-                      style={{
-                        ...type.subhead,
-                        fontWeight: "600",
-                        color: selected ? colors.text : colors.textMuted,
-                      }}
-                    >
-                      {label}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
+            {/* No Chat/Schedules strip: Schedules lives in the Pages menu on
+                the right, same as the phone, and a two-tab bar that was
+                mostly "Chat" was a row spent on a choice nobody makes. */}
           </>
         ) : null}
-        {ready && projectPicker.options.length ? (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            keyboardShouldPersistTaps="handled"
-            style={{ flexGrow: 0 }}
-            contentContainerStyle={{
-              gap: 8,
-              paddingHorizontal: space.lg,
-              paddingTop: space.xs,
-              paddingBottom: space.sm,
-            }}
-          >
-            {projectPicker.options.map((folder, index) => (
-              <PressableScale
-                key={`${folder.label}:${index}`}
-                onPress={folder.onPress}
-                accessibilityRole="button"
-                accessibilityState={{ selected: folder.selected }}
-                accessibilityLabel={`${folder.label} folder`}
-                scale={0.96}
-                style={{
-                  minHeight: 34,
-                  justifyContent: "center",
-                  paddingHorizontal: 14,
-                  borderRadius: radius.pill,
-                  backgroundColor: folder.selected ? colors.text : colors.secondary,
-                }}
-              >
-                <Text
-                  numberOfLines={1}
-                  style={{
-                    ...type.footnote,
-                    fontWeight: "600",
-                    color: folder.selected ? colors.bg : colors.textSecondary,
-                  }}
-                >
-                  {folder.label}
-                </Text>
-              </PressableScale>
-            ))}
-          </ScrollView>
-        ) : null}
+        {workspace ? folderRail : null}
         <ScrollView
-          style={{ flex: 1 }}
+          style={{ flex: 1, position: "relative", zIndex: 0 }}
           /**
            * The list runs UNDER the composer, which floats over it. The padding
            * is the composer's measured height, so the last session can still be
            * scrolled clear of it — a fixed number would either strand the last
            * row under the glass or leave a dead band when the composer is one
            * line tall.
-           */
+          */
           contentContainerStyle={{
+            paddingTop:
+              !workspace && folderRail
+                ? insets.top + 44 + space.sm + 50
+                : 0,
             paddingBottom:
               home && !wide ? composerHeight + space.md : insets.bottom + space.md,
           }}
@@ -1640,9 +1681,15 @@ export function SessionsScreen({
           // Scrolling the list puts the keyboard away. Reaching for the field is
           // an explicit act; scrolling past it is how you say you are done.
           keyboardDismissMode="on-drag"
-          // Lets the system large title collapse into the bar on scroll, and
-          // insets content below it instead of starting underneath.
-          contentInsetAdjustmentBehavior="automatic"
+          // The phone reserves its initial chrome above, then scrolls through
+          // that space and under the translucent navigation bar. Automatic
+          // adjustment kept the scroll viewport clipped below the bar, so
+          // rows could never reach the material they were meant to drive.
+          // Never, on both layouts. The rail already pads for the safe area
+          // itself, and once the navigator's bar went transparent UIKit's
+          // automatic inset added the bar's height on top of that: a blank
+          // band between the folder pills and the first row on iPad.
+          contentInsetAdjustmentBehavior="never"
           refreshControl={
             <RefreshControl
               refreshing={pulling}
@@ -1699,19 +1746,6 @@ export function SessionsScreen({
                 New session
               </Text>
             </Pressable>
-          ) : null}
-          {(connection === "reconnecting" || connection === "offline") &&
-          ready ? (
-            <Text
-              style={{
-                ...type.caption,
-                color: colors.warning,
-                paddingHorizontal: space.lg,
-                paddingTop: space.xs,
-              }}
-            >
-              Reconnecting…
-            </Text>
           ) : null}
 
           {/* Readiness owns the screen when the machine is not serving. */}
@@ -1968,6 +2002,57 @@ export function SessionsScreen({
           )}
         </ScrollView>
       </View>
+      <ShortcutsSheet visible={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+      <CreateSheet
+        visible={createOpen}
+        onClose={() => setCreateOpen(false)}
+        folders={projectPicker.folders}
+        projectsRoot={projectPicker.projectsRoot}
+        createFolder={projectPicker.createFolder}
+        launch={launch}
+      />
+      <FolderRailSheet
+        visible={railSheetOpen}
+        onClose={() => setRailSheetOpen(false)}
+        folders={projectPicker.folders}
+        setOrder={projectPicker.setOrder}
+        setHidden={projectPicker.setHidden}
+        addFolder={projectPicker.addFolder}
+        createFolder={projectPicker.createFolder}
+        projectsRoot={projectPicker.projectsRoot}
+      />
+      {/* THE TOP FADE, under the bar and the folder rail: rows dissolve into
+          the page as they pass beneath the chrome, mirroring the composer
+          fade at the other end. Below the rail in z-order, above the list. */}
+      {!workspace ? (
+        <EdgeFade
+          edge="top"
+          color={colors.bg}
+          style={{
+            position: "absolute",
+            zIndex: 90,
+            top: 0,
+            left: railWidth,
+            right: 0,
+            height: insets.top + 44 + space.sm + (folderRail ? 50 : 0) + TOP_FADE_HEIGHT,
+          }}
+        />
+      ) : null}
+      {!workspace && folderRail ? (
+        <View
+          style={{
+            position: "absolute",
+            zIndex: 100,
+            elevation: 4,
+            height: 50,
+            top: insets.top + 44 + space.sm,
+            left: 0,
+            right: 0,
+          }}
+        >
+          {folderRail}
+        </View>
+      ) : null}
       {/* THE EMPTY PANE IS THE COMPOSER, as on the web (App.tsx's empty
           stage renders the create composer full-height, centred). It was a
           28pt poster at 35% with the composer docked at the bottom of the
@@ -2038,7 +2123,7 @@ export function SessionsScreen({
             ]}
           >
             <LinearGradient
-              {...composerFadeStops(colors.bg)}
+              {...fadeStops(colors.bg)}
               start={{ x: 0, y: 0 }}
               end={{ x: 0, y: 1 }}
               style={{ flex: 1 }}

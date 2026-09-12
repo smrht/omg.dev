@@ -2,6 +2,28 @@
 
 Recent product updates and deployment notes.
 
+## September 12, 2026 - SDK owns transcript capabilities and drafts (v0.6.66)
+
+- `@omg-dev/client`: `new OmgClient(transport, { capabilities: { workRows, deferToolArgs } })` declares the transcript capabilities on every live subscribe frame and on `getMessages`, whatever transport opened the socket. Before this, a client could opt in on one transport and miss the other, which is how the phone showed raw tool rows over omg.dev.
+- `@omg-dev/client`: the live connection emits a `draft` event with the accumulated text and its `kind` (`text` or `thinking`), so a client no longer parses deltas itself or mistakes streamed reasoning for the reply.
+- `@omg-dev/protocol`: `OmgMessage.steps` and `OmgMessage.tool` (work rows), `OmgDraft`, `OmgLiveCapabilities`.
+
+## September 12, 2026 - One row per run of work, folded on the server (v0.6.65)
+
+- A run of tool calls and thinking now arrives from the server as one "Worked for" row. The web app and the phone no longer build that row themselves, so both show the same rows for the same run.
+- A displayed image, video, file, or dashboard sits under the run that made it. The display call no longer shows as a separate step.
+- Every thought is part of its run, including the first one and the one still streaming.
+- The old raw message stream is unchanged for clients that do not ask for rows, so an older phone build keeps working.
+
+## September 12, 2026 - Queue messages while the agent works, Devin agent (v0.6.64)
+
+- Queue a message while the agent is on a turn and it waits. It no longer reaches the agent right away. Queued messages show as a card under the composer, not in the chat. Click a message to edit it, or remove it. When the turn ends, every queued message is sent in order.
+- New setting under Settings > More > View: "Send while the agent is working". Steer (default) interrupts the turn on Enter. Queue holds the message on Enter. The other action stays on Cmd/Ctrl+Enter and on holding the send button.
+- Queued messages survive a page reload and a service restart.
+- Dependencies: `js-yaml` 5 and `fast-uri` 4 overrides, `sharp` 0.35.4. The dependency audit is clean.
+- New coding agent: Devin. It runs the Devin CLI locally through `devin acp`, so one session keeps its context across follow-up prompts. Pick it in the agent list; "adaptive" (Cognition's model router) is the default model, and Opus, GPT, Sonnet, Gemini, Codex, and Cognition's own SWE models are one pick away.
+- On your own machine, install the Devin CLI (`curl -fsSL https://cli.devin.ai/install.sh | bash`), then run `devin auth login` once. A Devin, Windsurf, or API key (`WINDSURF_API_KEY`) login all work.
+
 ## September 10, 2026 - Hosted omg agent balance and models (v0.6.63)
 
 - Hosted Computers can show the omg agent's monthly AI credit ring without asking the sandbox for an `omg login`.
