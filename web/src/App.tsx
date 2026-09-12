@@ -1415,7 +1415,8 @@ function agentSupportsThinking(agent: AgentKind): boolean {
     agent === "opencode" ||
     agent === "jcode" ||
     agent === "pi" ||
-    agent === "muse"
+    agent === "muse" ||
+    agent === "devin"
   );
 }
 
@@ -1472,7 +1473,7 @@ const AGENT_THINKING_LEVELS: Record<AgentKind, string[]> = {
   deepseek: [],
   // Devin exposes reasoning levels only inside a running session (Alt+T), not
   // as a launch flag, so the selector stays hidden.
-  devin: [],
+  devin: ["none", "low", "medium", "high", "xhigh", "max"],
   opencode: [],
   omg: [],
   jcode: ["low", "medium", "high", "xhigh", "max"],
@@ -24345,6 +24346,7 @@ function ComposerThinkingControl({
   onChange: (value: ThinkingLevel) => void;
   flat: boolean;
 }) {
+  const automatic = levels.length === 0;
   const scrub = useThinkingScrub({
     value,
     levels,
@@ -24360,14 +24362,19 @@ function ComposerThinkingControl({
     <>
       <button
         type="button"
+        disabled={automatic}
         role="slider"
-        aria-label="Thinking effort"
+        aria-label={automatic ? "Thinking effort: Auto" : "Thinking effort selector"}
         aria-valuemin={0}
         aria-valuemax={Math.max(0, levels.length - 1)}
         aria-valuenow={currentIndex}
-        aria-valuetext={value}
+        aria-valuetext={automatic ? "auto" : value}
         aria-expanded={scrub.sticky}
-        title="Click for the slider — or hold and slide, or use the arrow keys"
+        title={
+          automatic
+            ? "This model chooses thinking effort automatically"
+            : "Click for the slider — or hold and slide, or use the arrow keys"
+        }
         {...scrub.pointerProps}
         onClick={(event) => {
           // A press that opened the scrubber ends in a click of its own; that
@@ -24405,15 +24412,14 @@ function ComposerThinkingControl({
           (scrub.scrubbing || scrub.sticky) && "scale-[1.02] bg-foreground/10",
         )}
       >
-        {/* The signal bars say "thinking"; the word was redundant next to
-            them. The pill reads as signal + level (e.g. "Medium"), and the
-            aria-label above keeps the full name for screen readers. */}
+        {/* Name the setting visibly. The signal alone was too easy to miss,
+            especially beside a model name and on narrow screens. */}
         <ThinkingSignal value={shown} levels={levels} />
         <span
-          className="max-w-16 truncate text-xs font-medium capitalize transition-colors duration-150"
+          className="max-w-28 truncate text-xs font-medium transition-colors duration-150"
           style={scrub.scrubbing ? { color: scrub.previewAccent } : undefined}
         >
-          {thinkingLevelLabel(shown)}
+          {automatic ? "Thinking: Auto" : `Thinking: ${thinkingLevelLabel(shown)}`}
         </span>
       </button>
 

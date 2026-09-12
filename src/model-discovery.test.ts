@@ -48,6 +48,7 @@ function cache(
       opencode: provider("opencode"),
       jcode: provider("jcode"),
       muse: provider("muse"),
+      devin: provider("devin"),
       ...providers,
     },
   };
@@ -104,7 +105,7 @@ describe("model discovery retry policy", () => {
       timeZone: "UTC",
       providers: { codex: provider("codex") },
     };
-    expect(providersDueForRetry(older, 0)).toEqual(["grok", "cursor", "fx", "opencode", "jcode", "muse"]);
+    expect(providersDueForRetry(older, 0)).toEqual(["grok", "cursor", "fx", "opencode", "jcode", "devin", "muse"]);
   });
 
   test("no cache means the initial full refresh owns it, not the retry path", () => {
