@@ -19,7 +19,7 @@ export type SessionTokenCategory = {
 
 export type SessionTokenUsage = {
   available: boolean;
-  source: "claude-context" | "codex-transcript" | "claude-transcript" | "unavailable";
+  source: "claude-context" | "codex-transcript" | "claude-transcript" | "devin-acp" | "unavailable";
   accuracy: "reported" | "mixed" | "unavailable";
   updatedAt: number;
   model: string | null;
@@ -467,10 +467,59 @@ async function parseClaudeTranscript(path: string): Promise<SessionTokenUsage | 
   };
 }
 
+function devinUsageSnapshot(sessionId: string): SessionTokenUsage | null {
+  try {
+    const raw = JSON.parse(
+      readFileSync(join(PATHS.data, "devin-usage", `${sessionId}.json`), "utf8"),
+    ) as {
+      updatedAt?: unknown;
+      used?: unknown;
+      size?: unknown;
+      inputTokens?: unknown;
+      outputTokens?: unknown;
+      cachedReadTokens?: unknown;
+    };
+    const used = typeof raw.used === "number" ? raw.used : null;
+    const size = typeof raw.size === "number" && raw.size > 0 ? raw.size : null;
+    const input = typeof raw.inputTokens === "number" ? raw.inputTokens : 0;
+    const output = typeof raw.outputTokens === "number" ? raw.outputTokens : 0;
+    const cacheRead = typeof raw.cachedReadTokens === "number" ? raw.cachedReadTokens : 0;
+    return {
+      available: used != null,
+      source: "devin-acp",
+      accuracy: "reported",
+      updatedAt: typeof raw.updatedAt === "number" ? raw.updatedAt : Date.now(),
+      model: null,
+      context: {
+        used,
+        max: size,
+        free: used != null && size ? Math.max(0, size - used) : null,
+        percent: used != null && size ? Math.min(100, Math.round((used / size) * 1000) / 10) : null,
+      },
+      totals: {
+        input,
+        output,
+        cacheRead,
+        cacheWrite: 0,
+        reasoning: 0,
+        total: input + output,
+        costUsd: null,
+      },
+      categories: [],
+      note: "Live usage uit de Devin ACP-stream.",
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function sessionTokenUsage(
   sessionId: string,
   transcriptPath: string | null,
 ): Promise<SessionTokenUsage> {
+  const devinSnapshot = devinUsageSnapshot(sessionId);
+  if (devinSnapshot) return devinSnapshot;
+
   const stored = readStoredSessionTokenUsage(sessionId);
   if (stored) return fromStored(stored);
   if (transcriptPath && !transcriptPath.startsWith("lfg://")) {

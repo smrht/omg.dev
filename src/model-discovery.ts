@@ -16,6 +16,8 @@ export type DiscoveredModelProvider = {
   labels?: Record<string, string>;
   /** Per-model provider variants, such as OpenCode reasoning effort levels. */
   variants?: Record<string, string[]>;
+  /** Per-model thinking levels, such as Devin's variant suffixes. */
+  thinkingLevelsByModel?: Record<string, string[]>;
   error?: string;
   refreshedAt: number;
   durationMs: number;
@@ -35,7 +37,7 @@ export type ModelDiscoveryCache = {
 const CACHE_PATH = join(PATHS.data, "model-catalog.json");
 const DEFAULT_REFRESH_CRON = "0 8 * * *";
 /** Every provider a full refresh probes. `codex-aisdk` is mirrored from `codex`. */
-const REFRESH_KEYS: ProviderKey[] = ["claude", "aisdk", "codex", "grok", "cursor", "fx", "opencode", "jcode", "muse"];
+const REFRESH_KEYS: ProviderKey[] = ["claude", "aisdk", "codex", "grok", "cursor", "fx", "opencode", "jcode", "devin", "muse"];
 /**
  * Providers whose failure is structural rather than transient: they expose no
  * model-list command at all, so every attempt returns the same error. Retrying
@@ -169,6 +171,12 @@ function jcodePath(): string | null {
   return which("jcode", [`${home}/.local/bin/jcode`, `${home}/.jcode/bin/jcode`, "/usr/local/bin/jcode"]);
 }
 
+function devinPath(): string | null {
+  if (process.env.LFG_DEVIN_PATH) return process.env.LFG_DEVIN_PATH;
+  const home = userHome();
+  return which("devin", [`${home}/.local/bin/devin`, `${home}/.bun/bin/devin`, "/usr/local/bin/devin"]);
+}
+
 function commandFor(key: ProviderKey): string[] | null {
   if (key === "codex" || key === "codex-aisdk") {
     const bin = codexPath();
@@ -195,6 +203,10 @@ function commandFor(key: ProviderKey): string[] | null {
   if (key === "jcode") {
     const bin = jcodePath();
     return bin ? [bin, "--no-update", "model", "list", "--json"] : null;
+  }
+  if (key === "devin") {
+    const bin = devinPath();
+    return bin ? [bin, "models", "list", "--format", "json"] : null;
   }
   return null;
 }
@@ -344,6 +356,7 @@ function parseModels(key: ProviderKey, text: string): {
   models: string[];
   labels: Record<string, string>;
   variants?: Record<string, string[]>;
+  thinkingLevelsByModel?: Record<string, string[]>;
 } {
   if (key === "codex" || key === "codex-aisdk") return parseCodexModels(text);
   if (key === "grok") return parseBulletModels(text);
@@ -351,6 +364,7 @@ function parseModels(key: ProviderKey, text: string): {
   if (key === "opencode") return parseOpenCodeModels(text);
   if (key === "fx") return parseFxModels(text);
   if (key === "jcode") return parseJcodeModels(text);
+  if (key === "devin") return parseDevinModels(text);
   return { models: [], labels: {} };
 }
 
@@ -469,6 +483,113 @@ async function discoverMuseProvider(started: number, refreshedAt: number): Promi
   }
 }
 
+/**
+ * Devin answers `devin models list --format json` with every family and
+ * variant the account may run. The picker wants model names, not reasoning
+ * variants: one clickable entry per family (the slug itself, which Devin
+ * resolves like any fuzzy name), the family label as the human-readable
+ * label, and the family's variant suffixes as that model's thinking levels.
+ * The adaptive router always leads; private slugs fall back to their alias.
+ */
+export function parseDevinModels(text: string): {
+  models: string[];
+  labels: Record<string, string>;
+  thinkingLevelsByModel?: Record<string, string[]>;
+  variants?: Record<string, string[]>;
+} {
+  type DevinVariant = { uid: string; label: string };
+  type DevinFamily = {
+    slug: string;
+    model: string;
+    label: string;
+    variants: DevinVariant[];
+    version: number[];
+  };
+  let parsed: {
+    families?: Array<{
+      slug?: unknown;
+      family_label?: unknown;
+      aliases?: unknown;
+      variants?: Array<{ model_uid?: unknown; label?: unknown }>;
+    }>;
+  };
+  try {
+    parsed = JSON.parse(cleanText(text));
+  } catch {
+    return { models: [], labels: {} };
+  }
+  const versionTokens = (slug: string): number[] =>
+    (slug.match(/\d+(?:\.\d+)?/g) ?? []).map((token) => Number.parseFloat(token));
+  const levelOrder = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+  const families: DevinFamily[] = [];
+  for (const family of parsed.families ?? []) {
+    const slug = typeof family.slug === "string" ? family.slug : "";
+    if (!slug) continue;
+    const aliases = Array.isArray(family.aliases)
+      ? family.aliases.filter((alias): alias is string => typeof alias === "string")
+      : [];
+    const label = typeof family.family_label === "string" ? family.family_label : slug;
+    const model = slug.startsWith("MODEL_PRIVATE") && aliases.length ? aliases[0]! : slug;
+    const variants = (family.variants ?? []).flatMap((variant) => {
+      const uid = typeof variant.model_uid === "string" ? cleanId(variant.model_uid) : null;
+      return uid ? [{ uid, label: typeof variant.label === "string" ? variant.label : uid }] : [];
+    });
+    if (!variants.length) continue;
+    families.push({
+      slug,
+      model,
+      label,
+      variants,
+      version: versionTokens(slug),
+    });
+  }
+  const models: string[] = [];
+  const labels: Record<string, string> = {};
+  const thinkingLevelsByModel: Record<string, string[]> = {};
+  const variantsByModel: Record<string, string[]> = {};
+  const adaptive = families.find((family) => family.slug === "adaptive");
+  if (adaptive) {
+    models.push(adaptive.model);
+    labels[adaptive.model] = adaptive.label;
+    thinkingLevelsByModel[adaptive.model] = [];
+    variantsByModel[adaptive.model] = adaptive.variants.map((variant) => variant.uid);
+  }
+  const newestFirst = [...families]
+    .filter((family) => family.slug !== "adaptive")
+    .sort((a, b) => {
+      const depth = Math.max(a.version.length, b.version.length);
+      for (let index = 0; index < depth; index += 1) {
+        const left = a.version[index] ?? 0;
+        const right = b.version[index] ?? 0;
+        if (left !== right) return right - left;
+      }
+      return a.label.localeCompare(b.label);
+    });
+  for (const family of newestFirst) {
+    if (models.includes(family.model)) continue;
+    models.push(family.model);
+    labels[family.model] = family.label;
+    // Variant uids normalise dots to dashes (gpt-5.6-sol -> gpt-5-6-sol-high),
+    // so match against the normalised slug prefix.
+    const uidPrefix = `${family.slug.replace(/\./g, "-")}-`;
+    const levels = family.variants
+      .flatMap((variant) => {
+        if (!variant.uid.startsWith(uidPrefix)) return [];
+        const level = variant.uid.slice(uidPrefix.length);
+        return levelOrder.includes(level) ? [level] : [];
+      })
+      .sort((a, b) => levelOrder.indexOf(a) - levelOrder.indexOf(b));
+    thinkingLevelsByModel[family.model] = levels;
+    variantsByModel[family.model] = family.variants.map((variant) => variant.uid);
+  }
+  return {
+    models,
+    labels,
+    thinkingLevelsByModel: Object.keys(thinkingLevelsByModel).length ? thinkingLevelsByModel : undefined,
+    variants: Object.keys(variantsByModel).length ? variantsByModel : undefined,
+  };
+}
+
 async function discoverProvider(key: ProviderKey): Promise<DiscoveredModelProvider> {
   const started = performance.now();
   const refreshedAt = Date.now();
@@ -528,6 +649,10 @@ async function discoverProvider(key: ProviderKey): Promise<DiscoveredModelProvid
       models: parsed.models,
       labels: Object.keys(parsed.labels).length ? parsed.labels : undefined,
       variants: parsed.variants && Object.keys(parsed.variants).length ? parsed.variants : undefined,
+      thinkingLevelsByModel:
+        parsed.thinkingLevelsByModel && Object.keys(parsed.thinkingLevelsByModel).length
+          ? parsed.thinkingLevelsByModel
+          : undefined,
       refreshedAt,
       durationMs: Math.round((performance.now() - started) * 1000) / 1000,
     };

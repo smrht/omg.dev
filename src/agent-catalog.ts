@@ -80,6 +80,11 @@ export const FX_MODELS: string[] = [
   "zai/glm-5.2",
 ];
 export const DEEPSEEK_MODELS: string[] = ["deepseek-v4-flash", "deepseek-v4-pro"];
+// Devin resolves the same fuzzy model names as its interactive CLI, and
+// "adaptive" is Cognition's router that picks per task. The list is the stable
+// vocabulary; `devin models list --format json` can widen it later via model
+// discovery.
+export const DEVIN_MODELS: string[] = ["adaptive", "swe", "opus", "gpt", "sonnet", "gemini", "codex"];
 // Static fallback until model discovery (GET api.meta.ai/muse-code/models, the
 // document the CLI itself reads) has answered; discovery is authoritative and
 // is how a newly released muse-spark shows up. The server-side default is the
@@ -193,6 +198,7 @@ const MODEL_CATALOG_KEYS: CodingAgentKind[] = [
   "fx",
   "muse",
   "deepseek",
+  "devin",
   "opencode",
   "omg",
   "jcode",
@@ -251,6 +257,7 @@ const LABELS: Record<CodingAgentKind, string> = {
   fx: "fx",
   muse: "muse",
   deepseek: "deepseek",
+  devin: "devin",
   hermes: "hermes",
   pi: "pi",
   copilot: "copilot",
@@ -266,6 +273,7 @@ export const MODEL_OPTIONS: Record<CodingAgentKind, { defaultModel: string; mode
   fx: { defaultModel: "auto", models: FX_MODELS },
   muse: { defaultModel: "muse-spark-1.2", models: MUSE_MODELS },
   deepseek: { defaultModel: "deepseek-v4-flash", models: DEEPSEEK_MODELS },
+  devin: { defaultModel: "adaptive", models: DEVIN_MODELS },
   hermes: { defaultModel: "nousresearch/hermes-4-405b", models: HERMES_MODELS },
   opencode: { defaultModel: "opencode/nemotron-3.5-lightning-free", models: OPENCODE_MODELS },
   omg: { defaultModel: OMG_MODELS[0]!, models: OMG_MODELS },
@@ -294,6 +302,40 @@ export function discoveredModelsOrFallback(
   return mergeModels(provider?.ok && provider.models.length ? provider.models : fallback);
 }
 
+const DEVIN_LEVEL_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/**
+ * Fast varianten heten per familie anders: Claude plakt `-fast` achter het
+ * niveau (claude-opus-5-high-fast), GPT gebruikt `-priority`
+ * (gpt-5-6-sol-high-priority). Discovery kent de raw uids, dus hier exact
+ * resolvren; zonder discovery blind de documenterde conventie.
+ */
+export function devinModelSupportsFast(model?: string | null): boolean {
+  if (!model || model === "adaptive") return false;
+  const variants = readModelDiscoveryCacheSync()?.providers?.devin?.variants?.[model];
+  if (!variants?.length) return /^(claude-opus-5|claude-opus-4\.8|gpt-6-astra|gpt-5\.6-|gpt-5\.5|gpt-5\.4|gpt-5\.3-codex)/.test(model);
+  return variants.some((uid) => /-(fast|priority)$/.test(uid));
+}
+
+export function composeDevinModel(
+  model: string,
+  thinkingLevel?: string,
+  fastMode?: boolean,
+): string {
+  if (model === "adaptive") return model;
+  const norm = model.replace(/\./g, "-");
+  if (!thinkingLevel && !fastMode) return model;
+  const variants = readModelDiscoveryCacheSync()?.providers?.devin?.variants?.[model] ?? [];
+  const level = thinkingLevel ? `${norm}-${thinkingLevel}` : norm;
+  if (fastMode) {
+    return (
+      variants.find((uid) => uid === `${level}-fast`) ??
+      variants.find((uid) => uid === `${level}-priority`) ??
+      `${level}-fast`
+    );
+  }
+  return variants.includes(level) ? level : `${model}-${thinkingLevel}`;
+}
 const CURSOR_THINKING_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 const CURSOR_LEVEL_ALIASES: Record<string, string> = {
   "extra-high": "xhigh",
@@ -628,6 +670,27 @@ export function thinkingLevelsForAgent(
     const levels = [...new Set(Object.values(variants).flat())];
     return levels.length ? levels : null;
   }
+  // Devin expresses thinking level as a variant suffix on the family slug, so
+  // the allowed vocabulary is the selected family's own variant set (from
+  // discovery). Without a model, the union across discovered families.
+  if (agent === "devin") {
+    const levelsByModel =
+      readModelDiscoveryCacheSync()?.providers?.devin?.thinkingLevelsByModel ?? {};
+    if (model) {
+      const levels = levelsByModel[model];
+      if (levels?.length) return levels;
+      // Unknown model (adaptive, private slugs): the router/CLI picks its own
+      // level, so no vocabulary to validate against.
+      return null;
+    }
+    const levels = [...new Set(Object.values(levelsByModel).flat())];
+    return levels.length
+      ? [...levels].sort(
+          (a, b) =>
+            DEVIN_LEVEL_ORDER.indexOf(a) - DEVIN_LEVEL_ORDER.indexOf(b),
+        )
+      : null;
+  }
   if (agent === "claude" || agent === "aisdk") return CLAUDE_THINKING_LEVELS;
   // grok and pi drive their own CLIs with narrower vocabularies; offering more
   // hands the user a level that either kills the session or does nothing.
@@ -809,6 +872,11 @@ export function listModelCatalog(codingAgents: CodingAgentInfo[] = []): ModelCat
       piProviders,
       openCodeConnected,
     );
+    // Devin's levels come from discovery (the family's variant suffixes),
+    // keyed by the exact model id the picker shows.
+    const devinLevels = key === "devin"
+      ? readModelDiscoveryCacheSync()?.providers?.devin?.thinkingLevelsByModel
+      : undefined;
     const thinkingLevelsByModel = key === "opencode"
       ? Object.fromEntries(
           models.flatMap((model) => {
@@ -816,10 +884,14 @@ export function listModelCatalog(codingAgents: CodingAgentInfo[] = []): ModelCat
             return levels?.length ? [[model, [...levels]]] : [];
           }),
         )
-      : undefined;
+      : key === "devin"
+        ? devinLevels
+        : undefined;
     const thinkingLevels = key === "opencode"
       ? [...new Set(Object.values(thinkingLevelsByModel ?? {}).flat())]
-      : [...(thinkingLevelsForAgent(key) ?? [])];
+      : key === "devin"
+        ? ["none", "low", "medium", "high", "xhigh", "max"]
+        : [...(thinkingLevelsForAgent(key) ?? [])];
     return {
       key,
       label: LABELS[key],

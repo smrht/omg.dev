@@ -2,6 +2,7 @@ import {
   codexModelSupportsFast,
   type CodexServiceTier,
 } from "./service-tier.ts";
+import { devinModelSupportsFast } from "./agent-catalog.ts";
 
 export type FastModeResolution =
   | { ok: true; enabled: boolean; serviceTier?: CodexServiceTier }
@@ -11,7 +12,8 @@ export function agentSupportsFastMode(agent: string): boolean {
   return agent === "codex" ||
     agent === "codex-aisdk" ||
     agent === "claude" ||
-    agent === "aisdk";
+    agent === "aisdk" ||
+    agent === "devin";
 }
 
 /**
@@ -53,6 +55,9 @@ export function resolveSessionFastMode(input: {
     (input.agent === "codex" || input.agent === "codex-aisdk") &&
     !codexModelSupportsFast(input.model)
   ) {
+    return { ok: false, error: `Fast mode is not supported for model "${input.model ?? ""}"` };
+  }
+  if (input.agent === "devin" && !devinModelSupportsFast(input.model)) {
     return { ok: false, error: `Fast mode is not supported for model "${input.model ?? ""}"` };
   }
   return {

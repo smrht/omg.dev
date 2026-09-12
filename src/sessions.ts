@@ -101,6 +101,7 @@ const DIRECT_INDEX_MANAGED_AGENTS = new Set<ManagedSession["agent"]>([
   "fx",
   "muse",
   "deepseek",
+  "devin",
   "copilot",
   "jcode",
 ]);
@@ -630,6 +631,8 @@ export function managedLaunchRow(
             ? "muse serve"
           : agent === "deepseek"
             ? "dsh --profile omg --patch config/deepseek-acp.patch.yml"
+          : agent === "devin"
+            ? `devin acp --model ${m.model ?? ""}`.trim()
           : agent === "jcode"
             ? `jcode --model ${m.model ?? ""} repl`.trim()
           : agent === "hermes"
@@ -681,7 +684,7 @@ export function managedLaunchRow(
     managed: true,
     assignedUser: assigns[m.tmuxName] ?? null,
     model:
-      agent === "codex" || agent === "codex-aisdk" || agent === "opencode" || agent === "omg" || agent === "jcode" || agent === "grok" || agent === "cursor" || agent === "deepseek" || agent === "hermes" || agent === "muse"
+      agent === "codex" || agent === "codex-aisdk" || agent === "opencode" || agent === "omg" || agent === "jcode" || agent === "grok" || agent === "cursor" || agent === "deepseek" || agent === "devin" || agent === "hermes" || agent === "muse"
         ? model
         : modelAlias(model),
     thinkingLevel: m.thinkingLevel ?? null,
@@ -3902,7 +3905,11 @@ async function refreshResumableCacheOnce(focusSessionId?: string): Promise<void>
     // DeepSeek Harness ACP supports live multi-turn sessions but intentionally
     // exposes no load/resume method. Keep its closed transcript out of the
     // Resume picker instead of offering a button that would start fresh.
-    if (m.agent === "deepseek") continue;
+    // Devin's `devin acp` has the same fresh-session-only surface as
+    // DeepSeek Harness ACP: no load/resume method, so keep closed sessions
+    // out of the Resume picker instead of offering a button that would
+    // start fresh.
+    if (m.agent === "deepseek" || m.agent === "devin") continue;
     if (!sessionHasIndexedMessages(m.sessionId)) continue;
     const recent = await indexedRecentMessages(sessionIndexKey(m.sessionId), m.sessionId, 80)
       .catch(() => [] as SessionMsg[]);

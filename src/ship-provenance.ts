@@ -13,6 +13,7 @@
 // plain conversation) still ship freely — the gate fires on work that exists
 // and did not land, never on work that was never there.
 
+import { collectCommittedShipProvenance } from "./ship-commit-evidence.ts";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { ManagedSession } from "./managed.ts";
@@ -32,6 +33,9 @@ export type ShipProvenanceState =
   | "unknown";
 
 export type ShipProvenance = {
+  /** Explicit, verified result commits in a shared checkout. */
+  commitRefs?: string[];
+  workspaceDirty?: number;
   state: ShipProvenanceState;
   branch?: string;
   /** Short HEAD sha, for tracing a post back to a commit. */
@@ -170,7 +174,8 @@ export function shipBlockReason(code: ShipProvenance | undefined): string | null
   if (code.state === "uncommitted") {
     return (
       `This session has ${code.dirty} uncommitted file(s)${where}, so there is no commit ` +
-      "backing this result. Commit the work and land it on main, then ship again."
+      "backing this result. For a shared checkout, pass all result commit SHAs in commitRefs " +
+      "to verify that result independently. Otherwise commit the work and land it on main, then ship again."
     );
   }
   if (code.state === "unlanded") {
@@ -184,7 +189,9 @@ export function shipBlockReason(code: ShipProvenance | undefined): string | null
 
 export function collectShipProvenance(
   managed: Pick<ManagedSession, "cwd" | "worktreeBranch"> | undefined,
+  commitRefs?: string[],
 ): ShipProvenance | undefined {
+  if (commitRefs !== undefined) return collectCommittedShipProvenance(managed, commitRefs);
   const cwd = managed?.cwd ? resolve(managed.cwd) : "";
   if (!cwd || !existsSync(cwd)) return undefined;
 

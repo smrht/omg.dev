@@ -328,7 +328,7 @@ export function omgCapabilityAccess(agent: CodingAgentKind): "mcp" | "contract-o
   // muse takes MCP servers from its global settings.json (no per-session wire
   // registration), where the fork points it at the omg stdio MCP server, so it
   // reaches the same omg toolset as the http-configured agents.
-  return agent === "hermes" || agent === "copilot" || agent === "pi" || agent === "deepseek"
+  return agent === "hermes" || agent === "copilot" || agent === "pi" || agent === "deepseek" || agent === "devin"
     ? "contract-only"
     : "mcp";
 }

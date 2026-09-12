@@ -1,4 +1,4 @@
-import { defaultModelForAgent, OMG_MODELS } from "./agent-catalog.ts";
+import { composeDevinModel, defaultModelForAgent, OMG_MODELS } from "./agent-catalog.ts";
 import {
   CODING_AGENT_ADAPTERS,
   type ActiveSessionAgentKind,
@@ -13,6 +13,7 @@ import {
   spawnManagedCursorAcpSession,
   spawnManagedFxAcpSession,
   spawnManagedDeepseekAcpSession,
+  spawnManagedDevinAcpSession,
   spawnManagedGrokAcpSession,
   spawnManagedJcodeSdkSession,
   spawnManagedMuseMspSession,
@@ -215,6 +216,37 @@ export const ACTIVE_CODING_AGENT_PROVIDERS = {
       omgUser: request.omgUser,
       containInAgentSlice: request.containInAgentSlice,
     })),
+  devin: provider("devin", (request) => {
+    if (!request.model && !request.thinkingLevel && !request.fastMode) {
+      return spawnManagedDevinAcpSession({
+        name: request.name,
+        cwd: request.cwd,
+        prompt: request.prompt,
+        model: "adaptive",
+        key: request.sessionId,
+        omgSessionId: request.sessionId,
+        omgUser: request.omgUser,
+        containInAgentSlice: request.containInAgentSlice,
+      });
+    }
+    // Fast en denkniveau zijn variant-suffixen op de familieslug; composeer
+    // hier de exacte uid (de harness krijgt dan geen apart thinkingLevel).
+    const composed = composeDevinModel(
+      request.model ?? "adaptive",
+      request.thinkingLevel,
+      request.fastMode,
+    );
+    return spawnManagedDevinAcpSession({
+      name: request.name,
+      cwd: request.cwd,
+      prompt: request.prompt,
+      model: composed,
+      key: request.sessionId,
+      omgSessionId: request.sessionId,
+      omgUser: request.omgUser,
+      containInAgentSlice: request.containInAgentSlice,
+    });
+  }),
   pi: provider("pi", (request) =>
     spawnManagedPiSession({
       name: request.name,
