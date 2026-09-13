@@ -58,6 +58,7 @@ import {
   Platform,
   Pressable,
   StyleSheet,
+  useWindowDimensions,
   View,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
@@ -66,14 +67,23 @@ import Reanimated, {
   FadeIn,
   FadeOut,
   useAnimatedKeyboard,
+  useAnimatedRef,
+  useAnimatedReaction,
+  useReducedMotion,
+  scrollTo as scrollListTo,
   useAnimatedStyle,
   useSharedValue,
   withTiming,
+  withDelay,
+  cancelAnimation,
+  runOnJS,
   Easing,
 } from "react-native-reanimated";
 import { Text, TextInput } from "../../src/omg/text";
 import type { OmgConnectionStatus } from "@omg-dev/client";
 import { AgentSetupSheet } from "../../src/omg/agent-setup-sheet";
+import { SEND_DELAY, SEND_DURATION, SendOriginContext } from "../../src/omg/send-motion";
+import { remainingReplySpace, sendTargetOffset, type SendOrigin } from "../../src/omg/send-motion-layout";
 import { HeldQueue, type HeldRow } from "../../src/omg/held-queue";
 
 /** What a send does while the agent is working. Mirrors the web's ComposerSendMode. */
@@ -103,6 +113,7 @@ import {
   Icon,
   IconButton,
   VoiceMeter,
+  withAlpha,
 } from "../../src/components";
 import { useAttachments } from "../../src/omg/attachments";
 import { BotAvatar } from "../../src/omg/bot-avatar";
@@ -219,6 +230,7 @@ export function SessionScreenBody({
   const navigation = useNavigation();
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const window = useWindowDimensions();
   const { colors, type, space, radius } = useTheme();
   const { client, agents, user } = useOmg();
 
@@ -279,6 +291,8 @@ export function SessionScreenBody({
    * active, including an empty queue so sends from other clients appear.
    */
   const [held, setHeld] = useState<HeldRow[]>([]);
+  const queueSendPending = useRef(false);
+  const queueRevision = useRef(0);
   /**
    * THE MACHINE'S SEND MODE, same setting the web composer reads
    * (`composerSendMode`). "steer": a tap interrupts the turn, a hold queues.
@@ -303,13 +317,14 @@ export function SessionScreenBody({
     };
   }, [client, id]);
   const refreshHeld = useCallback(async (): Promise<HeldRow[]> => {
-    if (!client || !id) return [];
+    if (!client || !id || queueSendPending.current) return [];
+    const revision = queueRevision.current;
     try {
       const res = await client.transport.request<{ queue?: HeldRow[] }>(
         `/api/sessions/${encodeURIComponent(id)}/queue`,
       );
       const rows = (Array.isArray(res?.queue) ? res.queue : []).filter((m) => m.status === "held");
-      setHeld(rows);
+      if (revision === queueRevision.current) setHeld(rows);
       return rows;
     } catch {
       return [];
@@ -437,9 +452,40 @@ export function SessionScreenBody({
   /** Set while the reader is away from the bottom and the agent says something. */
   const [unseen, setUnseen] = useState(false);
   const [atBottom, setAtBottom] = useState(true);
+  // Advance the server-owned watermark only for a visible, settled transcript.
+  // A background route or a reader looking at older messages must not clear it.
+  const latestAssistant = useMemo(
+    () => [...messages].reverse().find((message) => message.role === "assistant"),
+    [messages],
+  );
+  useFocusEffect(
+    useCallback(() => {
+      if (!client || !id || !user?.email || loading || error || !atBottom || !latestAssistant) return;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const acknowledge = () => {
+        if (timer) clearTimeout(timer);
+        if (AppState.currentState !== "active") return;
+        timer = setTimeout(() => {
+          if (AppState.currentState !== "active") return;
+          void client.transport.request(`/api/sessions/${encodeURIComponent(id)}/read`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ user: user.email }),
+          }).catch(() => {});
+        }, 500);
+      };
+      acknowledge();
+      const subscription = AppState.addEventListener("change", acknowledge);
+      return () => {
+        if (timer) clearTimeout(timer);
+        subscription.remove();
+      };
+    }, [client, id, user?.email, loading, error, atBottom, latestAssistant]),
+  );
   const [sessionInfo, setSessionInfo] = useState<{
     title: string;
     agent: string;
+    model?: string | null;
     /** Every id the machine files this session under: its own and the native one. */
     aliases: string[];
   } | null>(null);
@@ -515,7 +561,56 @@ export function SessionScreenBody({
     if (resuming) toast.show("Waking the agent…");
   }, [resuming, toast]);
 
-  const listRef = useRef<FlatList<TranscriptItem>>(null);
+  const listRef = useAnimatedRef<FlatList<TranscriptItem>>();
+  const composerSource = useRef<View>(null);
+  const preparingSend = useRef(false);
+  const reducedMotion = useReducedMotion();
+  const [sendTurn, setSendTurn] = useState<{ key: string; reserve: number; origin: SendOrigin | null } | null>(null);
+  const rowHeights = useRef(new Map<string, number>());
+  const [rowMeasureVersion, setRowMeasureVersion] = useState(0);
+  const [footerHeight, setFooterHeight] = useState(0);
+  const replySpaceRef = useRef(0);
+  const bottomPaddingRef = useRef(0);
+  const composerMeasuredRef = useRef(0);
+  const footerHeightRef = useRef(0);
+  const sendGeometry = useRef({ naturalHeight: 0, rowTotal: 0, bottomPadding: 0 });
+  const scrollOffset = useRef(0);
+  const sendScroll = useRef(false);
+  const sendDuration = useSharedValue(SEND_DURATION);
+  const sendTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sendProgress = useSharedValue(0);
+  const sendFrom = useSharedValue(0);
+  const sendTo = useSharedValue(0);
+  const sendActive = useSharedValue(false);
+  const sendReady = useSharedValue(false);
+  const sendStarted = useSharedValue(false);
+  const dismissSendKeyboard = useCallback(() => Keyboard.dismiss(), []);
+  const finishSendMotion = useCallback(() => {
+    sendScroll.current = false;
+    sendActive.value = false;
+    if (sendTimer.current) clearTimeout(sendTimer.current);
+    setSendTurn((turn) => turn ? { ...turn, origin: null } : turn);
+  }, [sendActive]);
+  useAnimatedReaction(
+    () => ({ active: sendActive.value, ready: sendReady.value, progress: sendProgress.value, target: sendTo.value }),
+    (value) => {
+      if (!value.active || !value.ready) return;
+      if (!sendStarted.value) {
+        sendStarted.value = true;
+        runOnJS(dismissSendKeyboard)();
+        sendProgress.value = withDelay(sendDuration.value ? SEND_DELAY : 0,
+          withTiming(1, { duration: sendDuration.value, easing: Easing.out(Easing.cubic) },
+            (finished) => { if (finished) runOnJS(finishSendMotion)(); }));
+      }
+      scrollListTo(listRef, 0, sendFrom.value + (value.target - sendFrom.value) * value.progress, false);
+    },
+  );
+  useEffect(() => () => {
+    if (sendTimer.current) clearTimeout(sendTimer.current);
+    sendActive.value = false;
+    cancelAnimation(sendProgress);
+  }, [sendActive, sendProgress]);
+
   /**
    * WHICH ROWS GET `TranscriptRow`'s ENTRANCE ANIMATION.
    *
@@ -574,6 +669,7 @@ export function SessionScreenBody({
       setSessionInfo({
         title: found.title?.trim() || found.lastUserText?.trim() || "Session",
         agent: found.agent?.trim() || found.agentLabel?.trim() || "omg",
+        model: found.model,
         aliases: [found.sessionId, found.nativeSessionId].filter((v): v is string => !!v),
       });
       if (!socketBusySeen.current) setBusy(!!found.busy);
@@ -597,7 +693,7 @@ export function SessionScreenBody({
          */
         setLive(false);
         const resumable = await client.transport
-          .request<{ sessions?: { sessionId: string; title?: string; lastUserText?: string; agent?: string }[] }>(
+          .request<{ sessions?: { sessionId: string; title?: string; lastUserText?: string; agent?: string; model?: string | null }[] }>(
             "/api/sessions/resumable?limit=50",
           )
           .catch(() => ({ sessions: [] }));
@@ -607,6 +703,7 @@ export function SessionScreenBody({
           setSessionInfo({
             title: row.title?.trim() || row.lastUserText?.trim() || "Session",
             agent: row.agent?.trim() || "omg",
+            model: row.model,
             aliases: [row.sessionId],
           });
         }
@@ -624,14 +721,10 @@ export function SessionScreenBody({
     let cancelled = false;
     if (!client || !id) return;
     setLoading(true);
-    // Not `client.getMessages`: the page declares `workRows=1`, the same
-    // capability transport.ts puts on the socket, so history and the live
-    // stream arrive in one shape.
-    client.transport
-      .request<{ messages?: Entry[] }>(
-        `/api/sessions/${encodeURIComponent(id)}/messages?limit=${limit}&workRows=1`,
-        { cache: "no-store" },
-      )
+    // The SDK declares the same capabilities here as on the socket (see
+    // provider.tsx), so history and the live stream arrive in one shape.
+    client
+      .getMessages(id, limit)
       .then((res) => {
         if (cancelled) return;
         setMessages(res.messages ?? []);
@@ -692,22 +785,12 @@ export function SessionScreenBody({
           setStreamText("");
           setStreamThought("");
           break;
-        case "ai_part": {
-          // Reasoning and reply share the delta channel; `kind` tells them
-          // apart, and an older machine that omits it is sending a reply.
-          // `kind` is on the wire (packages/protocol) but not yet in the
-          // protocol package this app pins, hence the narrow cast.
-          const kind = (event.part as { kind?: string }).kind;
-          const setStream = kind === "thinking" ? setStreamThought : setStreamText;
-          if (event.part.type === "text-start" || event.part.reset) {
-            setStream(event.part.text ?? "");
-          } else if (event.part.type === "text-delta") {
-            setStream((prev) => prev + (event.part.delta ?? ""));
-          } else if (event.part.type === "text-end") {
-            // Leave the text on screen; the real message replaces it.
-          }
+        case "draft":
+          // The SDK accumulates the deltas and says which kind of draft this
+          // is. Reasoning and reply share the wire channel and are told apart
+          // only by that; the raw `ai_part` events are ignored here.
+          (event.draft.kind === "thinking" ? setStreamThought : setStreamText)(event.draft.text);
           break;
-        }
         case "busy":
           socketBusySeen.current = true;
           setBusy(event.busy);
@@ -768,8 +851,31 @@ export function SessionScreenBody({
     return buildTranscriptItems(bot ? filterBotChatEntries(entries) : entries, { busy });
   }, [messages, streamText, streamThought, bot, busy]);
 
+  const replySpace = useMemo(() => {
+    if (!sendTurn) return 0;
+    const anchor = data.findIndex((item) => item.key === sendTurn.key);
+    if (anchor < 0) return 0;
+    return remainingReplySpace(sendTurn.reserve, [
+      footerHeight,
+      ...data.slice(anchor + 1).map((item) => rowHeights.current.get(item.key) ?? 0),
+    ]);
+  }, [data, sendTurn, footerHeight, rowMeasureVersion]);
+  replySpaceRef.current = replySpace;
+  footerHeightRef.current = footerHeight;
+  useLayoutEffect(() => {
+    if (!sendScroll.current || !sendTurn || !rowHeights.current.has(sendTurn.key)) return;
+    const rowTotal = data.reduce((sum, item) => sum + (rowHeights.current.get(item.key) ?? 0), 0);
+    const base = sendGeometry.current;
+    // The final inset excludes the keyboard. Its dismissal must not retarget
+    // the scroll halfway through the shared animation.
+    sendTo.value = sendTargetOffset(base, rowTotal, footerHeight, replySpace, viewportHeight.current);
+    sendActive.value = true;
+  }, [data, sendTurn, rowMeasureVersion, footerHeight, replySpace, sendTo, sendActive]);
+
   const onScroll = useCallback(
     (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+      scrollOffset.current = e.nativeEvent.contentOffset.y;
+      if (e.nativeEvent.layoutMeasurement.height > 0) viewportHeight.current = e.nativeEvent.layoutMeasurement.height;
       // Layout noise, not a reader. See userMovedRef.
       if (!userMovedRef.current) return;
 
@@ -846,7 +952,7 @@ export function SessionScreenBody({
      */
     const timers = attempts.map((delay) =>
       setTimeout(() => {
-        if (atBottomRef.current && !touchingRef.current) {
+        if (atBottomRef.current && !touchingRef.current && !sendScroll.current) {
           listRef.current?.scrollToOffset({ offset: 10 ** 7, animated: false });
         }
       }, delay),
@@ -944,7 +1050,7 @@ export function SessionScreenBody({
    * own layout, so the animated target is the true last offset and UIKit
    * gives it its standard scroll curve.
    */
-  const viewportHeight = useRef(0);
+  const viewportHeight = useRef(window.height);
   const bottomOffset = () => Math.max(0, lastContentHeight.current - viewportHeight.current);
   const handleContentSizeChange = useCallback((_width: number, height: number) => {
     const delta = height - lastContentHeight.current;
@@ -955,6 +1061,9 @@ export function SessionScreenBody({
     // below, because a list that is growing while the reader is somewhere
     // else is still a list that has not settled.
     noteContentActivityRef.current();
+    if (sendScroll.current) return;
+    // Reply growth consumes the reserved space without moving the sent turn.
+    if (replySpaceRef.current > 0) return;
     // Follow the stream only while the reader is already at the bottom, and
     // never while their finger is on the glass — see touchingRef.
     if (!atBottomRef.current || touchingRef.current) return;
@@ -1018,7 +1127,7 @@ export function SessionScreenBody({
    * composer or from tapping an answer to the agent's question.
    */
   const submit = useCallback(
-    async (text: string, mode: "steer" | "queue" = "steer") => {
+    async (text: string, mode: "steer" | "queue" = "steer", origin?: SendOrigin) => {
       const trimmed = text.trim();
       // A bot's first-ever message has no id yet — nothing has minted its
       // backing session — so `onDeliver` is what's allowed to send with one
@@ -1034,14 +1143,54 @@ export function SessionScreenBody({
         text: trimmed,
         ts: Date.now(),
         pending: true,
-        // Carried into the bubble so a held send reads as queued rather than
-        // as sending — see Entry.queued.
-        queued: mode === "queue",
       };
       // The reader's own send is exactly as "new" as an incoming live
       // message — see liveKeysRef's doc comment.
       liveKeysRef.current.add(optimisticId);
-      setMessages((prev) => [...prev, optimistic]);
+      const queueRequest = mode === "queue" && !onDeliver && live !== false;
+      const showInQueue = queueRequest && busy;
+      if (queueRequest) {
+        queueSendPending.current = true;
+        ++queueRevision.current; // An older poll must not erase this send.
+      }
+      if (showInQueue) {
+        setHeld((prev) => [...prev, { id: optimisticId, text: trimmed, status: "pending" }]);
+      } else {
+        atBottomRef.current = true;
+        userMovedRef.current = false;
+        touchingRef.current = false;
+        setAtBottom(true);
+        setUnseen(false);
+        if (origin) {
+          sendGeometry.current = {
+            naturalHeight: lastContentHeight.current - bottomPaddingRef.current - replySpaceRef.current - footerHeightRef.current,
+            rowTotal: data.reduce((sum, item) => sum + (rowHeights.current.get(item.key) ?? 0), 0),
+            bottomPadding: Math.max(composerMeasuredRef.current - origin.height + 44, insets.bottom + 60) + space.lg,
+          };
+          setSendTurn({ key: optimisticId, origin: reducedMotion ? null : origin,
+            reserve: Math.max(80, (viewportHeight.current - insets.top - insets.bottom - 100) / 2) });
+          sendScroll.current = true;
+          sendDuration.value = reducedMotion ? 0 : SEND_DURATION;
+          sendReady.value = reducedMotion;
+          sendStarted.value = false;
+          sendActive.value = false;
+          sendFrom.value = scrollOffset.current;
+          sendProgress.value = 0;
+          if (sendTimer.current) clearTimeout(sendTimer.current);
+          sendTimer.current = setTimeout(() => {
+            sendScroll.current = false;
+            sendActive.value = false;
+            setSendTurn((turn) => turn?.key === optimisticId ? { ...turn, origin: null } : turn);
+          }, 1500);
+        } else {
+          if (sendTimer.current) clearTimeout(sendTimer.current);
+          cancelAnimation(sendProgress);
+          setSendTurn(null);
+          sendScroll.current = false;
+          sendActive.value = false;
+        }
+        setMessages((prev) => [...prev, optimistic]);
+      }
       setSending(true);
       try {
         if (onDeliver) {
@@ -1108,17 +1257,23 @@ export function SessionScreenBody({
            * wrong one when you have simply thought of the next thing — which
            * is why this is a separate gesture rather than a mode switch.
            */
-          await client.transport.request(`/api/sessions/${encodeURIComponent(id)}/send`, {
+          const result = await client.transport.request<{ msg?: HeldRow }>(`/api/sessions/${encodeURIComponent(id)}/send`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ text: trimmed, mode: "queue" }),
           });
-          // If the machine HELD it (agent busy), the row above the composer
-          // is now the message; a second copy in the chain would sit there
-          // dimmed until the release echo, saying the same thing twice.
-          const rows = await refreshHeld();
-          if (rows.some((m) => m.text === trimmed)) {
-            setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
+          // The send response owns the decision. Do not wait for a second
+          // request or match text: two queued messages can have the same words.
+          const accepted = result.msg;
+          setHeld((prev) => {
+            const rest = prev.filter((m) => m.id !== optimisticId && m.id !== accepted?.id);
+            return accepted?.status === "held" ? [...rest, accepted] : rest;
+          });
+          if (accepted?.status === "held") {
+            setSendTurn((turn) => turn?.key === optimisticId ? null : turn);
+            sendScroll.current = false;
+            sendActive.value = false;
+            setMessages((prev) => prev.filter((m) => m.id !== optimisticId));
             return;
           }
         } else {
@@ -1133,15 +1288,23 @@ export function SessionScreenBody({
       } catch (e) {
         // Roll the message back AND give the person their words back — losing
         // typed text to a failed request is the rudest thing a composer can do.
+        setSendTurn((turn) => turn?.key === optimisticId ? null : turn);
+        sendScroll.current = false;
+        sendActive.value = false;
+        setHeld((prev) => prev.filter((m) => m.id !== optimisticId));
         setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
         setDraft((current) => (current ? current : trimmed));
         setError(e instanceof Error ? e.message : String(e));
       } finally {
+        if (queueRequest) {
+          queueSendPending.current = false;
+          void refreshHeld();
+        }
         setSending(false);
         setResuming(false);
       }
     },
-    [client, id, live, router, onDeliver, asks, answerAsk, refreshHeld],
+    [client, id, live, busy, router, onDeliver, asks, answerAsk, refreshHeld, reducedMotion, insets.top, insets.bottom, sendFrom, sendProgress, sendActive, sendDuration, sendReady, sendStarted, data, space.lg],
   );
 
   /** Shown for a beat after a long-press send, so the gesture confirms itself. */
@@ -1170,7 +1333,7 @@ export function SessionScreenBody({
   const send = useCallback(
     (mode: "steer" | "queue" = "steer", spoken?: string) => {
       const text = attachments.compose((spoken ?? draft).trim());
-      if (!text || sending) return;
+      if (!text || sending || preparingSend.current) return;
       if (mode === "queue" && busy) {
         /**
          * A DIFFERENT WEIGHT FOR A DIFFERENT ACT. Queueing puts the message
@@ -1184,14 +1347,25 @@ export function SessionScreenBody({
         setQueuedHint(true);
         setTimeout(() => setQueuedHint(false), 1600);
       }
-      setDraft("");
-      attachments.clear();
-      // Sending ends the typing. The keyboard goes with it, so the reply
-      // lands on a full screen instead of behind the keys.
-      Keyboard.dismiss();
-      void submit(text, mode);
+      const deliver = (origin?: SendOrigin) => {
+        preparingSend.current = false;
+        setDraft("");
+        attachments.clear();
+        void submit(text, mode, origin);
+        if (!origin) Keyboard.dismiss();
+      };
+      if (mode === "queue" && busy) {
+        deliver();
+      } else if (composerSource.current && (spoken ?? draft).trim()) {
+        preparingSend.current = true;
+        composerSource.current.measureInWindow((x, y, width, height) =>
+          deliver(contentReady && atBottomRef.current && width > 0 && height > 0 ? { x, y, width, height } : undefined),
+        );
+      } else {
+        deliver();
+      }
     },
-    [attachments, busy, draft, sending, submit],
+    [attachments, busy, contentReady, draft, sending, submit],
   );
 
   // Kept current for the dictation callback declared above it.
@@ -1476,20 +1650,6 @@ export function SessionScreenBody({
     router,
   ]);
 
-  /**
-   * The native bar: system back on the left (this is a pushed screen, so the
-   * chevron and the edge-swipe cost nothing), the session title with the
-   * agent's avatar and live status in the middle, the overflow on the right.
-   *
-   * Set here rather than in _layout.tsx for the same reason index.tsx sets
-   * its own: the title and the menu need this screen's live state, and the
-   * deps below are what keep them current as the session loads and the agent
-   * starts and stops.
-   *
-   * `headerTitle` is content-sized, not flex-sized, so an uncapped long prompt
-   * would push the overflow button off the bar. The maxWidth is what makes
-   * UIKit truncate the title instead of the chrome.
-   */
   /** The chevron on its own glass disc — one bar item. */
   const BackDisc = useCallback(
     () => (
@@ -1563,71 +1723,40 @@ export function SessionScreenBody({
     [colors, menuOptions],
   );
 
-  /** The agent and the session's name, on their own glass capsule. */
-  const TitleCapsule = useCallback(
+  /** Identity uses the remaining bar width so long titles cannot move actions. */
+  const HeaderIdentity = useCallback(
     () => (
-      <GlassSurface
-        variant="clear"
-        fallbackColor={colors.card}
+      <View
         style={{
+          flex: 1,
+          minWidth: 0,
           flexDirection: "row",
           alignItems: "center",
           gap: space.sm,
-          borderRadius: radius.pill,
-          /**
-           * The back disc's diameter, exactly — and the system's bar item
-           * height with it.
-           *
-           * They sit side by side in the bar, so any difference between them
-           * reads as a mistake rather than a hierarchy. This used to be sized
-           * by its own padding around two lines of text, which happened to be
-           * close while the subtitle existed and stopped being close the
-           * moment it went. A fixed height and vertical centring keeps the pair
-           * matched whatever the title does.
-           */
-          height: BAR_ITEM,
-          // The mark is a circle inside a capsule, so it needs more of a lead
-          // than a square would: at 4pt it sat against the glass.
-          paddingLeft: space.sm,
-          paddingRight: space.md,
-          overflow: "hidden",
         }}
       >
-        {/* THE MARK CARRIES BOTH FACTS THE SUBTITLE WAS CARRYING.
-            It was a second line reading "Claude" — under a capsule already
-            showing Claude's mark — or "Working…", which the mark says better
-            with its spinner. Two lines of chrome in a navigation bar for one
-            piece of information, and the title got 190pt to fit in because of
-            it. One line now, and the title has the room. */}
-        {/**
-         * A BOT CHAT'S HEADER IS A FACE AND A NAME, not the agent running it
-         * or a prompt-derived title — spec §4.1: "Avatar: same rounded-full
-         * emoji avatar as the roster row... Title line: bot name." The
-         * mascot mark (bot-avatar.tsx) is this app's native equivalent of
-         * that avatar, and its own pulsing dot already carries "working" the
-         * same way AgentAvatar's spinner does, so nothing else about this
-         * capsule has to change to say it.
-         */}
         {bot ? (
-          <BotAvatar shape={bot.shape} colorway={bot.colorway} size={26} working={busy} />
+          <BotAvatar shape={bot.shape} colorway={bot.colorway} size={32} working={busy} />
         ) : (
-          <AgentAvatar agent={agentLabel} size={26} busy={busy} plain />
+          <AgentAvatar agent={agentLabel} size={32} busy={busy} plain />
         )}
-        <Text
-          numberOfLines={1}
-          ellipsizeMode="tail"
-          style={{
-            ...type.subhead,
-            fontWeight: "600",
-            color: dropped ? colors.warning : colors.text,
-            maxWidth: 210,
-          }}
-        >
-          {dropped ? "Reconnecting…" : bot ? bot.name : title}
-        </Text>
-      </GlassSurface>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text
+            numberOfLines={1}
+            ellipsizeMode="tail"
+            style={{ ...type.subhead, fontWeight: "600", color: colors.text }}
+          >
+            {bot ? bot.name : title}
+          </Text>
+          {dropped || sessionInfo?.model ? (
+            <Text numberOfLines={1} style={{ ...type.caption, color: colors.textSecondary }}>
+              {dropped ? "Reconnecting…" : sessionInfo?.model}
+            </Text>
+          ) : null}
+        </View>
+      </View>
     ),
-    [agentLabel, bot, busy, colors, dropped, radius.pill, space, title, type],
+    [agentLabel, bot, busy, colors, dropped, sessionInfo?.model, space.sm, title, type],
   );
 
   /**
@@ -1777,10 +1906,16 @@ export function SessionScreenBody({
     };
   }, []);
 
+  const transcriptBottomPadding = Math.max(composerHeight, insets.bottom + 60) + space.lg +
+    Math.max(0, keyboardHeight - insets.bottom);
+  bottomPaddingRef.current = transcriptBottomPadding;
+  composerMeasuredRef.current = composerHeight;
+
   return (
     <Reanimated.View style={{ flex: 1 }}>
-      <FlatList
+      <Reanimated.FlatList
         ref={listRef}
+        removeClippedSubviews={false}
         data={data}
         keyExtractor={(item) => item.key}
         onLayout={(e) => {
@@ -1833,10 +1968,7 @@ export function SessionScreenBody({
            * sentence ending exactly at the top edge of the glass reads as
            * clipped even when it is not.
            */
-          paddingBottom:
-            Math.max(composerHeight, insets.bottom + 60) +
-            space.lg +
-            Math.max(0, keyboardHeight - insets.bottom),
+          paddingBottom: transcriptBottomPadding,
           // 24pt between EVERY item read as a transcript of isolated objects
           // rather than a conversation: a tool run and the sentence explaining
           // it were pushed as far apart as two separate turns. 16pt keeps the
@@ -1868,6 +2000,8 @@ export function SessionScreenBody({
         // A drag is the only thing that means "I am reading somewhere else".
         // Programmatic scrolls and layout settling are not.
         onScrollBeginDrag={() => {
+          sendScroll.current = false;
+          sendActive.value = false;
           userMovedRef.current = true;
           touchingRef.current = true;
         }}
@@ -1890,19 +2024,34 @@ export function SessionScreenBody({
           const speakerChanged =
             !!previous && transcriptSpeaker(previous) !== transcriptSpeaker(item);
           return (
-            <View style={{ paddingBottom: space.sm, paddingTop: speakerChanged ? 10 : 0 }}>
+            <View
+              onLayout={(event) => {
+                const height = event.nativeEvent.layout.height;
+                if (rowHeights.current.get(item.key) === height) return;
+                rowHeights.current.set(item.key, height);
+                if (sendTurn) setRowMeasureVersion((version) => version + 1);
+              }}
+              style={{ paddingBottom: space.sm, paddingTop: speakerChanged ? 10 : 0 }}
+            >
+              <SendOriginContext.Provider value={sendTurn?.key === item.key && sendTurn.origin ? { origin: sendTurn.origin, progress: sendProgress, ready: sendReady } : null}>
               <OverlapRow id={`row:${item.key}`}>
                 <TranscriptRow
                   item={item}
-                  fresh={contentReady && liveKeysRef.current.has(item.key)}
+                  fresh={contentReady && liveKeysRef.current.has(item.key) && sendTurn?.key !== item.key}
                   bot={bot}
                 />
               </OverlapRow>
+              </SendOriginContext.Provider>
             </View>
           );
         }}
         ListFooterComponent={
-          thinking ? bot ? <BotWorkingIndicator bot={bot} /> : <ThinkingPill /> : null
+          <View>
+            <View onLayout={(event) => setFooterHeight(event.nativeEvent.layout.height)}>
+              {thinking ? bot ? <BotWorkingIndicator bot={bot} /> : <ThinkingPill /> : null}
+            </View>
+            <View style={{ height: replySpace }} />
+          </View>
         }
         ListEmptyComponent={
           // The spinner lives INSIDE the list so it inherits the content
@@ -1950,18 +2099,17 @@ export function SessionScreenBody({
        * The list reserves room for it in its own top padding, so nothing
        * starts underneath the chevron.
        */}
-      {/* The transcript passes UNDER the bar and dissolves as it goes: the
-          page colour fades over it from the top edge, the same paint the
-          Live view puts above its composer. The bar itself is transparent. */}
+      {/* A translucent backdrop and matching fade keep the title legible. */}
       <EdgeFade
         edge="top"
         color={colors.bg}
         style={{
           position: "absolute",
-          top: 0,
+          top: insets.top + BAR_ITEM + space.xs,
           left: 0,
           right: 0,
-          height: insets.top + BAR_ITEM + space.xs + TOP_FADE_HEIGHT,
+          height: TOP_FADE_HEIGHT,
+          opacity: 0.85,
         }}
       />
       <View
@@ -1975,14 +2123,12 @@ export function SessionScreenBody({
           paddingBottom: space.xs,
           flexDirection: "row",
           alignItems: "center",
-          gap: 6,
-          backgroundColor: "transparent",
+          gap: space.sm,
+          backgroundColor: withAlpha(colors.bg, 0.85),
         }}
       >
         <BackDisc />
-        <TitleCapsule />
-        {/* Pushes the overflow to the far edge without a spacer view. */}
-        <View style={{ flex: 1 }} />
+        <HeaderIdentity />
         {menuOptions.length ? <OverflowDisc /> : null}
       </View>
 
@@ -2023,50 +2169,9 @@ export function SessionScreenBody({
         }}
       />
 
-      {/* The bar itself draws NOTHING.
- *
- * It used to be a surface in its own right: a fill plus a hairline rule
- * across the top, with the rounded field sitting on it. Against a black
- * transcript that reads as a grey slab pasted along the bottom of the
- * screen — a band whose edges have no meaning, since the thing you
- * interact with is the pill inside it, not the panel behind it.
- *
- * The fill and the rule were there to separate the composer from the
- * scrolling transcript. The field's own shape already does that, and
- * `keyboardDismissMode="interactive"` means content is meant to pass
- * behind it. So the bar is now pure layout, and the field is the only
- * surface — the same rule the home composer follows. */}
-      <Reanimated.View
-        onLayout={(e) => setComposerHeight(e.nativeEvent.layout.height)}
-        // Reserve the measured height immediately. A separate layout animation
-        // made the field and transcript padding disagree during queue expansion
-        // and delayed the collapse after clearing a multiline draft.
-        style={[
-          {
-            position: "absolute",
-            left: 0,
-            right: 0,
-            bottom: 0,
-            paddingHorizontal: space.md,
-            paddingTop: space.md,
-            paddingBottom: insets.bottom + space.md,
-            gap: space.sm,
-          },
-          composerLift,
-        ]}
-      >
-        {/**
-         * JUMP BACK TO NOW — and say when there is something to come back to.
-         *
-         * Reading history in a live session is a trap without this: the
-         * transcript keeps growing above the fold and the only way back is a
-         * long drag. It appears only when you have actually left the bottom,
-         * and it says "New activity" rather than showing an unread COUNT,
-         * because a number here would be counting tool traffic and thinking
-         * blocks as if they were things someone said to you.
-         */}
+      {/* Outside the measured composer: hiding Latest must not move the scroll target. */}
         {!atBottom ? (
-          <View style={{ alignItems: "center", paddingBottom: space.xs }}>
+          <Reanimated.View style={[{ position: "absolute", bottom: composerHeight, left: 0, right: 0, alignItems: "center", paddingBottom: space.xs }, composerLift]}>
             <Pressable
               onPress={() => {
                 setUnseen(false);
@@ -2074,13 +2179,11 @@ export function SessionScreenBody({
                 // land and onScroll to agree: anything the agent says during
                 // that half second should follow, and the pill should not
                 // linger over the message you just asked to see.
+                userMovedRef.current = false;
                 atBottomRef.current = true;
                 setAtBottom(true);
-                // The same absurd offset the auto-scroll uses (see the
-                // "scrollToOffset WITH AN ABSURD OFFSET" note above):
-                // scrollToEnd aims at a content height that is stale while
-                // markdown is still laying out, so "Latest" stopped short of
-                // the bottom by exactly the part that had not measured yet.
+                // The floating button does not change composer padding when
+                // hidden, so this measured destination stays put during the glide.
                 listRef.current?.scrollToOffset({ offset: bottomOffset(), animated: true });
               }}
               accessibilityRole="button"
@@ -2118,9 +2221,41 @@ export function SessionScreenBody({
                 <Icon ios="arrow.down" android="arrow_downward" size={11} color={colors.textMuted} />
               </GlassSurface>
             </Pressable>
-          </View>
+          </Reanimated.View>
         ) : null}
 
+      {/* The bar itself draws NOTHING.
+ *
+ * It used to be a surface in its own right: a fill plus a hairline rule
+ * across the top, with the rounded field sitting on it. Against a black
+ * transcript that reads as a grey slab pasted along the bottom of the
+ * screen — a band whose edges have no meaning, since the thing you
+ * interact with is the pill inside it, not the panel behind it.
+ *
+ * The fill and the rule were there to separate the composer from the
+ * scrolling transcript. The field's own shape already does that, and
+ * `keyboardDismissMode="interactive"` means content is meant to pass
+ * behind it. So the bar is now pure layout, and the field is the only
+ * surface — the same rule the home composer follows. */}
+      <Reanimated.View
+        onLayout={(e) => setComposerHeight(e.nativeEvent.layout.height)}
+        // Reserve the measured height immediately. A separate layout animation
+        // made the field and transcript padding disagree during queue expansion
+        // and delayed the collapse after clearing a multiline draft.
+        style={[
+          {
+            position: "absolute",
+            left: 0,
+            right: 0,
+            bottom: 0,
+            paddingHorizontal: space.md,
+            paddingTop: space.md,
+            paddingBottom: insets.bottom + space.md,
+            gap: space.sm,
+          },
+          composerLift,
+        ]}
+      >
         {/* Questions for the person, inside the floating composer — see
             QuestionCard. Ask-user rows first, then a native prompt. */}
         {asks.map((q) => (
@@ -2140,41 +2275,6 @@ export function SessionScreenBody({
             options={prompt.options ?? []}
             onAnswer={answerPrompt}
           />
-        ) : null}
-
-        {/**
-         * THE GESTURE CONFIRMS ITSELF.
-         *
-         * A long press that sends is invisible: the field empties exactly as
-         * it does on a tap, so nothing on screen distinguishes "queued behind
-         * the current turn" from "sent into it" — and those are opposite
-         * outcomes. A chip on the right, over the field it came from, for as
-         * long as it takes to read one word.
-         */}
-        {queuedHint ? (
-          <Reanimated.View
-            entering={FadeIn.duration(120)}
-            exiting={FadeOut.duration(160)}
-            pointerEvents="none"
-            style={{ alignItems: "flex-end", paddingRight: space.sm, paddingBottom: space.xs }}
-          >
-            <GlassSurface
-              variant="regular"
-              fallbackColor={colors.secondary}
-              style={{
-                flexDirection: "row",
-                alignItems: "center",
-                gap: 5,
-                paddingHorizontal: space.md - 2,
-                paddingVertical: 5,
-                borderRadius: radius.pill,
-                overflow: "hidden",
-              }}
-            >
-              <Icon ios="clock" android="schedule" size={12} color={colors.textSecondary} />
-              <Text style={{ ...type.caption, fontWeight: "500", color: colors.text }}>Queued</Text>
-            </GlassSurface>
-          </Reanimated.View>
         ) : null}
 
         <AttachmentStrip items={attachments.items} onRemove={attachments.remove} />
@@ -2206,7 +2306,7 @@ export function SessionScreenBody({
             control of its own — the plus button's place in Messages. Its own
             glass circle, bottom-aligned so it stays level with the last line
             as the field grows. */}
-        <View style={{ flexDirection: "row", alignItems: "flex-end", gap: space.sm, zIndex: 1 }}>
+        <View ref={composerSource} collapsable={false} style={{ flexDirection: "row", alignItems: "flex-end", gap: space.sm, zIndex: 1 }}>
         <GlassSurface
           variant="regular"
           fallbackColor={colors.card}
@@ -2269,6 +2369,7 @@ export function SessionScreenBody({
             </View>
           </DropdownMenu>
 
+          <View style={{ flex: 1, flexDirection: "row", alignItems: "center" }}>
           <TextInput
             /**
              * THE LIVE TRANSCRIPT GOES IN THE FIELD. Dictation is typing with
@@ -2290,7 +2391,7 @@ export function SessionScreenBody({
              * discover that from the spinner.
              */
             placeholder={
-              live === false
+              queuedHint ? "" : live === false
                 ? "Message to resume…"
                 : busy && sendMode === "queue"
                   ? "Queue a follow-up…"
@@ -2333,6 +2434,20 @@ export function SessionScreenBody({
               lineHeight: 21,
             }}
           />
+          {/* Confirmation paints over the empty field. It never adds a row
+              or changes the measured composer/transcript padding. */}
+          {queuedHint && !draft && !dictationTail ? (
+            <Reanimated.View
+              entering={FadeIn.duration(120)}
+              exiting={FadeOut.duration(160)}
+              pointerEvents="none"
+              style={{ position: "absolute", left: 0, top: 0, bottom: 0, flexDirection: "row", alignItems: "center", gap: 5 }}
+            >
+              <Icon ios="clock" android="schedule" size={13} color={colors.textMuted} />
+              <Text style={{ ...type.callout, color: colors.textMuted }}>Queued</Text>
+            </Reanimated.View>
+          ) : null}
+          </View>
           {/**
            * ONE BUTTON, TWO JOBS, decided by whether there is anything to
            * send. An empty composer can only be filled — so it offers the

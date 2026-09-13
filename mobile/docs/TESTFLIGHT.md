@@ -39,8 +39,8 @@ the UI fixes with unchanged 1.0.4 native configuration.
 | ASC API key | `P37PJ5VSHN`, issuer `8e538491-9c7f-4ddf-88ba-4bf3e4f81fa6`, ADMIN |
 | App Store | **LIVE since 2026-09-01T02:04:11Z** — version 1.0, build 37, released manually. `asc-status` now reports `Store: LIVE ... storefront us`. |
 | `asc-status` store probe | Fixed 2026-09-01. It had called the iTunes lookup with no `country`, which answered `resultCount 0` for a live app three times out of three, so it printed `Store: not live` for hours after release and the review-watch bot repeated it. It now asks `us,hk,gb,jp` in order and reports the first storefront that answers. A total lookup failure reads as unknown, not as not-live. **The script lives at `~/.local/bin/asc-status` and is NOT in this repository**, so the fix is on this box only. |
-| Latest iOS upload | **1.0.5 (45)** — built from `7f7e8cc65`, workflow `34672791382`, EAS build `9c9c01ef-78d8-431b-9394-dbb867d32ec7`. Uploaded to App Store Connect 2026-09-12 04:30 UTC, submission `aacc9b07-d681-46b7-9f3e-b6afd50e0f62`. Apple processing / TestFlight availability is not yet confirmed. Includes `expo-document-picker` for Choose File, the keyboard shortcut modules introduced in build 43, and the queue/sheet fixes. Build 43 was the last upload previously confirmed VALID. Build 44 was rejected because the 1.0.4 train closed. The real Files sheet remains untested on a binary containing the module. |
-| EAS Update | live, branch `production`, runtimeVersion policy `appVersion`; last group `a8140309-0812-4a85-a4c4-a981b28f1864` (2026-09-12, runtime `1.0.4`, `gitCommitHash 2da80890a` on branch `ota/work-rows-1.0.4`) — see the publish log below. `main` targets 1.0.5, so 1.0.4 phones are served from that branch until build 45 ships |
+| Latest iOS upload | **1.0.5 (45)** — built from `7f7e8cc65`, workflow `34672791382`, EAS build `9c9c01ef-78d8-431b-9394-dbb867d32ec7`. Uploaded to App Store Connect 2026-09-12 04:30 UTC, submission `aacc9b07-d681-46b7-9f3e-b6afd50e0f62`. Apple processing / TestFlight availability is not yet confirmed. Includes `expo-document-picker` for Choose File, the keyboard shortcut modules introduced in build 43, and the queue/sheet fixes. Build 43 was the last upload previously confirmed VALID. Build 44 was rejected because the 1.0.4 train closed. The native Files sheet passed the simulator check below; physical-phone activation remains unverified. |
+| EAS Update | live, branch `production`, runtimeVersion policy `appVersion`. Two runtimes are in the field: `1.0.5` last group `9d1bedc3-5acc-498d-9921-264bfc20c34d` (2026-09-12, `92f6da4ea`, main); `1.0.4` last group `aaddb400-d4c6-41c9-ad21-95fff1663115` (2026-09-12, `1b32cb06e`, main with only app version held at 1.0.4). Both include full-screen project creation, the translucent chat navigation background, live fleet status on Home, the single-line chat title, send morph and reply space, roomier Live rows, separate chat header, Latest scroll fix, inline queue confirmation, immediate queue placement, and combined work-row fixes. Publish BOTH for every phone-visible change until 1.0.4 is retired; check the installed version before attributing a missing change. |
 
 ## Publish log (`production` channel)
 
@@ -102,8 +102,274 @@ command didn't error."
 | 2026-09-12 | `c80754bc-6fa7-41b1-b55f-e7da5ab87df1` | `d9f6fa524` (run `34672720005`) | Transcript rows come folded from the machine: the socket URL and the page fetch declare `workRows=1`, so every run of thoughts and tool calls arrives as one `work` message and `buildTranscriptItems` maps it instead of folding. A displayed image, file, or video rides on the artifact as `tool`. The rule is `src/transcript-rows.ts` in the lfg repository (v0.6.65). A machine that predates the capability still sends raw rows, which render one per message. | `git diff cd3d7186b d9f6fa524 -- mobile/package.json mobile/app.json mobile/app.config.js` is empty; runtime `1.0.4` unchanged. Published at `d9f6fa524`, before `e708a37eb` moved `app.json` to 1.0.5, with subsequent 1.0.4 maintenance publishes listed below. Mobile type check passed. Not checked on a device before publishing; web verified end to end against the deployed server. Group, commit and runtime read back with `eas update:view c80754bc-6fa7-41b1-b55f-e7da5ab87df1 --json` (ios+android, `gitCommitHash d9f6fa524`). |
 | 2026-09-12 | `10e25a78-407c-4bdc-a42a-0359cb431f91` | `4259af847` (branch `ota/work-rows-1.0.4`, run `34673895534`) | Work rows on the hosted path. `c80754bc` above put `workRows=1` on the direct transport only; the phone reaches a machine through the SDK's grant transport, whose `openLiveSocket` hard-codes `/api/live/ws`, so the machine kept sending raw tool and thinking rows and the new code drew them one per row. The wrapper now overrides `openLiveSocket` on the grant transport through its `openSocket`, one path constant for both. | Published from `ota/work-rows-1.0.4` = `d9f6fa524` + the fix (`b8d53ea3b` on main), because `main` had moved `app.json` to 1.0.5 (`e708a37eb`) and an OTA from there would target a runtime no phone has. Native surface vs `d9f6fa524` unchanged. Mobile type check passed. A first dispatch of the branch before the cherry-pick (run `34673872080`) was cancelled before it published. Read back with `eas update:view --json`: ios+android, runtime 1.0.4, `gitCommitHash 4259af847`. |
 | 2026-09-12 | `a8140309-0812-4a85-a4c4-a981b28f1864` | `2da80890a` (branch `ota/work-rows-1.0.4`, run `34674047942`) | A streamed thought is a step of the live run, not the reply. Reasoning arrives as `ai_part` deltas with `kind: "thinking"` on the reply channel (server side since `37f9446f0`, 2026-08-25, which fixed the web only); the phone appended every delta to `streamText`, so a Grok session showed its reasoning as paragraphs of the answer. Thoughts now stream into their own state and render as a one-step `work` row at the tail, which joins the open run. | Carries `10e25a78`. `afbc17cf4` on main. The pinned protocol package has no `kind` on `OmgAiStreamPart`, hence a narrow cast. Native surface unchanged; mobile type check passed. Not checked on a device before publishing. Read back with `eas update:view --json`: ios+android, runtime 1.0.4, `gitCommitHash 2da80890a`. |
+| 2026-09-12 | `4dd4a029-6db4-4950-bae5-26e06928e2a3` | `dfef89a46` (branch `ota/work-rows-1.0.4`, run `34674970544`) | The SDK owns transcript capabilities and drafts. `@omg-dev/client` and `@omg-dev/protocol` move to 0.6.66 (published by release `v0.6.66`): `OmgClient` is built with `{ capabilities: { workRows: true } }`, which the SDK declares on every subscribe frame and on `getMessages` for either transport, so the socket-URL override from `10e25a78` is gone; streamed drafts arrive as the SDK's `draft` event with their `kind`, so the phone no longer parses `ai_part` deltas and the `kind` cast from `a8140309` is gone. Supersedes both groups with the same behaviour. | `8053d18a3` on main. Native gate: only `mobile/package.json` moved (two pure-JS `@omg-dev/*` bumps, no native module), `app.json` and `app.config.js` unchanged, runtime 1.0.4. Mobile type check passed against the published 0.6.66; SDK tests cover the subscribe frame, the page query and thinking/reply draft separation. Not checked on a device before publishing. Read back with `eas update:view --json`: ios+android, runtime 1.0.4, `gitCommitHash dfef89a46`. |
+| 2026-09-12 | `bb49b0fc-68ac-4690-a91c-92b7a6f991eb` | `8a5273be2` (branch `ota/1.0.4-combined`, run `34675792379`) | The combined 1.0.4 publish, coordinated with session 542a7801. `ota/work-rows-1.0.4` had forked at `d9f6fa524`, BEFORE `7f7e8cc65` (queue layout and sheet dismissal), so `10e25a78`, `a8140309` and `4dd4a029` all dropped that fix while superseding `ee60972a`, which had carried it. This group is `main` (`b4828c28a`) with only `mobile/app.json` held at 1.0.4, so it carries `7f7e8cc65` and the SDK 0.6.66 work-rows/draft change together. | `git diff origin/main 8a5273be2 --stat` is the one version line. Verified by content: no `if (!held.length) return` and no `queued: confirmed.queued` in `[id].tsx`; `provider.tsx` builds `OmgClient` with `workRows`; `@omg-dev/client` ^0.6.66. Native gate unchanged from `4dd4a029`. Not checked on a device before publishing. Read back with `eas update:view --json`: ios+android, runtime 1.0.4, `gitCommitHash 8a5273be2`. Lesson: a maintenance branch for the old runtime must be re-cut from `main` for every publish, not extended by cherry-pick. |
+| 2026-09-12 | `37876cb1-cc0f-490b-80a3-c92d1fecf8f4` | `370bfb29b` (`main`, run `34676092226`) | The same code as `bb49b0fc`, for runtime 1.0.5. Benny's phone is on native build 45 (1.0.5, cut from `7f7e8cc65`), which predates every phone fix from today and cannot receive a 1.0.4 group; his screenshot after `bb49b0fc` still showed eight raw `shell` rows. The machine folds this session for any capable socket (37 messages, 0 raw) and sends raw only to a socket that declares nothing, which build 45 does on the hosted path. | Published from `main` with no override; `app.json` is 1.0.5 there. Native surface vs build 45 (`7f7e8cc65`): only `mobile/package.json` moved (pure-JS `@omg-dev/*` bumps). Coordinated with session 542a7801, which verifies the EAS source independently. Not checked on a device before publishing. Read back with `eas update:view --json`: ios+android, runtime 1.0.5, `gitCommitHash 370bfb29b`. |
 | 2026-09-12 | `4dbfae7e-87ee-4afe-a4f4-4564495bf6b0` | `1f7658e53` | Queue refresh continues when empty while the screen is active and refreshes on foreground return. Delivered messages no longer inherit a local Queued badge. Queue/composer height changes no longer run competing layout animations. Sheets animate their existing dragged card off screen before unmounting and blur the composer before opening. | Published for runtime `1.0.4` from `release/ios-1.0.4-e7a545`; native configuration, dependencies, plugins and modules are unchanged from `cd3d7186b`. Workflow `34672790564` passed typecheck and Metro export. Group, runtime and commit independently verified with `eas update:view`. iPhone simulator checks covered the queue card and sheet dismissal. The UI fixes also landed on main in `7f7e8cc65` for build 45. Superseded by `ee60972a`: this first compatibility branch omitted the concurrent server-work-row client update. |
 | 2026-09-12 | `ee60972a-fc3a-4b93-b1cb-cbed81cfeae5` | `1779f4f79` | Queue and sheet fixes plus the concurrent server-work-row client update. | The maintenance branch was merged with current main (`b9cc97262`); its only mobile diff from main is app version 1.0.4 instead of 1.0.5. Native configuration and dependencies match the previously cleared 1.0.4 runtime. Workflow `34673038633` passed mobile typecheck and Metro export. `eas update:view` independently confirmed iOS and Android runtime 1.0.4, group and commit. |
+
+### Full-screen New Project (2026-09-12)
+
+New Project now opens as a full-screen form. The old floating Sheet did not
+adjust for the keyboard, while selecting a type automatically focused the
+project-name field. The form now uses keyboard avoidance and a scrolling body.
+Fields focus only when tapped. Changing steps dismisses the keyboard, and a
+persistent Close button exits the flow.
+
+Mobile typecheck passed. The pinned iPhone 17 Pro simulator verified all three
+steps, no automatic focus after choosing a type, name and description inputs
+with the software keyboard open, expanded instructions, Back preserving the
+name, and Close/reopen resetting the flow. These checks did not launch a project.
+
+- Runtime 1.0.5: `9d1bedc3-5acc-498d-9921-264bfc20c34d`, workflow
+  `34689839706`, source `92f6da4ea`.
+- Runtime 1.0.4: `aaddb400-d4c6-41c9-ad21-95fff1663115`, workflow
+  `34689841541`, source `1b32cb06e`. Branch `ota/project-form-1.0.4`
+  was cut from main with only the app version line changed.
+
+Both workflows passed typecheck, Metro export, and native compatibility
+checks. EAS readback verified both platforms, runtime versions, and commits.
+Phone activation remains unverified.
+
+### Translucent chat navigation (2026-09-12)
+
+The chat navigation backdrop now uses 85% opacity. The fade below it uses the
+same opacity, while the title and controls remain fully opaque. Mobile
+typecheck passed. The pinned iPhone 17 Pro simulator showed scrolling text
+beneath the bar with the title and controls still legible.
+
+- Runtime 1.0.5: `341e95f4-f2d8-4577-ad20-823d06c20462`, workflow
+  `34689246809`, source `7e5e51e0f`.
+- Runtime 1.0.4: `451b7784-530f-4a22-8f80-2ff509dcc4f0`, workflow
+  `34689249474`, source `b03fcc316`. Branch `ota/nav-translucent-1.0.4`
+  was cut from main with only the app version line changed.
+
+Both workflows passed typecheck, Metro export, and native compatibility
+checks. EAS readback verified both platforms, runtime versions, and commits.
+Phone activation remains unverified.
+
+### Live fleet status on Home (2026-09-12)
+
+Home subscribes to `client.live.subscribeStatus` while focused and in the
+foreground. The SDK shares one socket with transcript consumers and subscribes
+to `status:*`. Home patches known sessions by ID and fetches the full list for
+unknown IDs. REST responses preserve status changes received during the fetch.
+Concurrent refreshes share one request; an unknown row during that request
+gets a follow-up fetch. No Live Activities code changed.
+
+REST remains the initial load and reconnect reconciliation. Home checks every
+10 seconds while status support is absent or disconnected, and once per minute
+when live to reconcile removals. Blur and background release the subscription
+and timer. Foreground return opens them again.
+
+SDK `0.6.67` was published in release workflow `34688442817`, source
+`d481077b5`; SDK implementation `14837df0a`. Mobile installs the registry
+packages, not local package copies. Mobile implementation `56d4f3305`.
+
+Verification: 19 focused behavior tests passed, plus root and mobile typechecks
+and the dependency exception audit. The full suite had 11 failures; all 11
+also failed on unchanged main (which had four additional failures in that run).
+The failures are outside this change. Native verification used iPhone 17 Pro
+`2DDC0F84-B433-49C6-8675-87E7A98CB60E`. A real status frame changed this session's
+title on Home without a REST request: the preceding REST call was at
+1789208581907 and the changed-title frame arrived at 1789208623164. The next
+scheduled REST call was at 1789208639999. The title was restored, and the
+restoring frame arrived at 1789208648328. Temporary logging was removed.
+
+- Runtime 1.0.5: `1a00a8af-ea39-4361-ba0f-41042f790f0b`, workflow
+  `34688755112`, source `56d4f3305`.
+- Runtime 1.0.4: `2647cddb-96ba-442f-b4b8-45fc24ec488d`, workflow
+  `34688757228`, source `e2f27bada`. Branch `ota/fleet-status-1.0.4`
+  differs from main only in the app version line.
+
+Both workflows passed mobile typecheck, Metro export, and native compatibility
+checks. EAS readback verified both platforms, runtime versions, and commits.
+Physical-phone activation remains unverified.
+
+### Single-line chat title (2026-09-12)
+
+Removed the agent-name subtitle under the chat title. The avatar and title
+remain centred in the header. A dropped connection still shows its temporary
+reconnection status. Mobile typecheck passed. The iPhone 17 Pro simulator
+showed the real session header without the Codex subtitle.
+
+- Runtime 1.0.5: `c7fa8045-6629-462f-bd95-a0fe507bfc3c`, workflow
+  `34687754009`, source `83e307100`.
+- Runtime 1.0.4: `0b1a8131-8d13-4a01-a3a4-a8815ea31b75`, workflow
+  `34687756271`, source `d3e43ffe3`. Branch `ota/header-line-1.0.4`
+  was cut from main with only the app version line changed.
+
+Both workflows passed typecheck, Metro export, and the native compatibility
+gate. EAS readback verified both platforms, runtime versions, and commits.
+Physical-phone activation remains unverified.
+
+### Input-to-bubble send motion (2026-09-12)
+
+A normal text send near the latest message now starts from the measured
+composer rectangle. The bubble and transcript use one UI-thread animation
+clock. Keyboard dismissal begins with that motion. The scroll target uses
+final geometry instead of following the keyboard's changing inset.
+
+The new turn reserves about half the available viewport below the message.
+Reply rows consume this space before extending the transcript. Queued sends
+keep their queue placement. Sends from older history and attachment-only
+sends use normal scroll behavior. Failed sends remove the reserve and restore
+the draft. Reduced motion skips the animated transition.
+
+Verification: 94 focused tests passed, including rectangle transforms,
+reply-space consumption, and stable scroll targets. Mobile typecheck passed.
+The iPhone 17 Pro simulator covered short and multiline sends, keyboard
+movement, reply growth, failure restoration, and the reduced-motion code
+path. The recording uses a temporary local delivery stub and generated reply;
+that instrumentation was removed before commit. The final recorded scroll
+samples moved in one direction without a reverse correction. Physical-phone
+activation remains unverified.
+
+- Runtime 1.0.5: `7ab8b287-8be1-4366-a695-fbf3260f42b1`, workflow
+  `34687336873`, source `cf4311430`.
+- Runtime 1.0.4: `a82548de-6b0e-406f-8060-20fc7f4babbd`, workflow
+  `34687348653`, source `af9f56f6e`. Branch `ota/send-morph-1.0.4`
+  was cut from main with only the app version line changed.
+
+Both workflows passed typecheck, Metro export, and the native compatibility
+gate. EAS readback verified both platforms, runtime versions, and commits.
+
+### Roomier Live session rows (2026-09-12)
+
+Session rows now use an 80-point height and 44-point agent avatars, up from
+60 and 22. Titles use 17-point text, previews use 15-point text, and the two
+lines have a 4-point gap. Both lines remain mounted, so activity updates do
+not resize a row. The skeleton uses the same `SESSION_ROW` geometry instead
+of its old copied card measurements. Child connectors also derive their
+centres from that geometry.
+
+Mobile typecheck passed. The iPhone 17 Pro simulator showed the real Live
+list with larger rows and truncation. A temporary view also rendered the
+loading rows and a parent/child family to check height and connector
+alignment. That view was removed before commit `0e46eb839`.
+
+- Runtime 1.0.5: `95f7f267-3232-4080-8202-886720d85cd2`, workflow
+  `34685857075`, source `0e46eb839`.
+- Runtime 1.0.4: `4cffb8ac-d282-48a1-a54c-4c09350b8773`, workflow
+  `34685859344`, source `b5498abe4`. Branch `ota/roomier-rows-1.0.4`
+  differs only in the app version line.
+
+Both workflows passed typecheck and Metro export. EAS readback verified
+both platforms, runtimes, and commits. Phone activation remains unverified.
+
+
+### Separate chat header (2026-09-12)
+
+The chat header has separate back and menu discs. The middle section shows
+an unboxed 32-point agent avatar, the chat title, and the agent name below.
+It uses the remaining width, so long titles truncate without moving either
+button. The header has an opaque background; transcript text fades below
+it instead of passing behind the identity. Bot chats retain their bot name
+and avatar. Reconnection status uses the subtitle.
+
+Mobile typecheck passed. The iPhone 17 Pro simulator showed normal and long
+titles, a working actions menu, and back navigation from a screen with a
+prior route. The title probe was removed before commit `ead2ba3e5`.
+
+- Runtime 1.0.5: `be89918f-a997-4046-adfe-dfb4b651118e`, workflow
+  `34685335795`, source `ead2ba3e5`.
+- Runtime 1.0.4: `0f1f13f2-4dfc-4e74-882a-939093ab9e6d`, workflow
+  `34685345967`, source `d88c08cb3`. Branch `ota/chat-header-1.0.4`
+  differs only in the app version line.
+
+Both workflows passed typecheck and Metro export. EAS readback verified
+both platforms, runtime versions, and source commits. Phone activation is
+not verified.
+
+
+### Follow-up simulator checks (2026-09-12)
+
+Simulator build `b5dd61c4-64d4-4530-9c48-20869a8b525c` completed in
+workflow `34683951166`, from `55dff53c1`, with profile `simulator` and no
+submission. It was installed on iPhone 17 Pro simulator
+`2DDC0F84-B433-49C6-8675-87E7A98CB60E`. This is a development build,
+not another TestFlight upload.
+
+- Native Choose File opened the Files sheet. A 39-byte text fixture was
+  selected, uploaded through the real session transport, and shown in the
+  composer. Source and uploaded SHA-256 matched:
+  `562bb22a86bfccab7d69f1959dfa77798310baf587fa7f790896d7855b4a1647`.
+  Removing the attachment, reopening Files, and cancelling left no attachment.
+- The queue refreshed from empty to two held messages. Expand, edit/save,
+  and remove used the real queue endpoints. Send now removed the held row
+  and reached `sendMessage`; that final call was intercepted for the exact
+  test text to avoid interrupting the active verification session. Actual
+  agent interruption was not tested end to end.
+- A short sheet drag returned the sheet. A full drag dismissed it. Opening
+  and dismissing the sheet with the keyboard visible did not restore the
+  keyboard. The gesture was recorded.
+- The five focused queue/transcript/files test files passed: 91 tests,
+  218 assertions, zero failures. Mobile `tsc --noEmit` passed. The build
+  workflow also passed its typecheck, Metro, and purpose-string checks.
+
+The existing inline confirmation and Latest scroll recordings remain the
+visual evidence for those fixes. Temporary probes were removed. No new
+production code or OTA was needed for this check. Paired physical phones
+were unavailable, so the update loaded on the user's phone remains unknown.
+
+### Latest activity scroll (2026-09-12)
+
+The Latest button now floats outside the measured composer. Hiding it no
+longer shrinks the bottom padding while the scroll animation is running.
+An explicit jump also resets the user-scroll gate, so animation frames do
+not unpin the list or show the button again before another user drag.
+
+- Runtime 1.0.5: `257c73dc-95a9-4675-b2de-49edbb924fda`, source
+  `39992d57a`, workflow `34683635071`.
+- Runtime 1.0.4: `c0f9a5e8-bbb4-41dc-ace1-3bb827bf65b1`, source
+  `beefdaf20`, workflow `34683651766`. Branch `ota/latest-scroll-1.0.4`
+  differs only in the app version line.
+
+Simulator baseline: showing/hiding Latest changed composer height from
+106 to 150 to 106 points. Fixed: 106 points throughout. A real tap was
+recorded; 36 subsequent scroll samples had zero backward steps and ended
+at the native maximum offset. Both workflows passed typecheck and Metro
+export. EAS readback verified both platforms, runtimes, and source commits.
+Test instrumentation was removed. Phone activation remains unverified.
+
+### Inline queue confirmation (2026-09-12)
+
+The short-lived Queued confirmation now paints inside the empty message
+field. It no longer adds a row above the composer. The queue card and its
+controls are unchanged. Simulator measurement showed no height event when
+the confirmation appeared or disappeared. The hint fades in and out.
+
+- Runtime 1.0.5: `73c5214e-65fb-4d2b-8727-bf25b6a9c8a3`, source
+  `2d346fff4`, workflow `34682974065`.
+- Runtime 1.0.4: `6d7bffd9-2328-47bf-aefc-f71d9024446e`, source
+  `3d2125807`, workflow `34682990859`. Maintenance branch
+  `ota/inline-queued-1.0.4` differs only in the app version line.
+
+Both workflows passed typecheck and Metro export. EAS readback confirmed
+both platforms, source commits, and runtimes. The simulator Files test
+reported `Cannot find native module 'ExpoDocumentPicker'`; it cannot verify
+the Files flow on the newer phone binary. Test instrumentation was removed.
+Phone activation remains unverified.
+
+### Immediate queue placement (2026-09-12)
+
+Busy queue sends now enter the queue card before the network request. They
+never enter the transcript with a temporary Queued badge. The send response
+confirms placement by message ID and status. Polls cannot erase a pending
+send. Failed sends remove the pending card and restore the draft.
+
+- Runtime 1.0.5: group `eb5b1582-ec4b-4e4a-85c1-1b5c174a5e5e`, source
+  `ac74225ed`, workflow `34677520138`.
+- Runtime 1.0.4: group `409eaefd-7ff8-4791-b962-af0b67aa6b69`, source
+  `66572391a`, workflow `34677532392`. Branch `ota/immediate-queue-1.0.4`
+  differs from `ac74225ed` only in the app version line.
+
+Both workflows passed typecheck and Metro export. EAS readback confirmed
+both platforms, runtimes, and source commits. An iPhone 17 Pro simulator
+check delayed the request for 45 seconds: one pending queue card, zero
+transcript bubbles, then one confirmed held row. An injected failure left
+zero queue rows and bubbles and restored the draft. Test messages and
+instrumentation were removed. Phone activation remains unverified.
 
 ### Verification for the 2026-09-12 queue/sheet release
 

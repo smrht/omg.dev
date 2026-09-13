@@ -2,6 +2,18 @@
 
 Recent product updates and deployment notes.
 
+## September 12, 2026 - Stable message queues and mobile navigation (v0.6.68)
+
+- Queued messages now leave the editable queue one at a time as the agent becomes available. The remaining messages stay visible across reconnects and restarts instead of moving into a hidden agent queue.
+- Mobile Live now has a side navigation panel for pages and the computer switcher. Unread dots clear when the latest reply is visible. Agent icons are smaller, and chat headers show the selected model with a neutral reconnect label.
+- Mobile project creation opens full-screen with explicit keyboard focus. Home receives fleet status over the shared live connection, and the chat navigation background is more transparent.
+- Web composers support `#` references to sessions.
+
+## September 12, 2026 - Shared fleet status subscription (v0.6.67)
+
+- `@omg-dev/client`: `client.live.subscribeStatus(listener)` delivers fleet status rows over the existing shared WebSocket. Status-only consumers open the socket, reconnect with a fresh subscription, and release it when the last consumer leaves.
+- Transcript and status subscriptions share one connection and have separate channel identities.
+
 ## September 12, 2026 - SDK owns transcript capabilities and drafts (v0.6.66)
 
 - `@omg-dev/client`: `new OmgClient(transport, { capabilities: { workRows, deferToolArgs } })` declares the transcript capabilities on every live subscribe frame and on `getMessages`, whatever transport opened the socket. Before this, a client could opt in on one transport and miss the other, which is how the phone showed raw tool rows over omg.dev.

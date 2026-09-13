@@ -708,13 +708,16 @@ export function SectionHeader({
  */
 export const SESSION_ROW = {
   /** Fixed, not minimum — see the note on the row's own height. */
-  height: 60,
+  height: 80,
   /** Horizontal margin between the row and the edge of its column. */
   inset: 12,
   /** Inset from the row's own edge to the mark. */
   padding: 10,
   /** The agent mark's box. */
-  avatar: 22,
+  avatar: 36,
+  gap: 12,
+  textGap: 4,
+  paddingRight: 8,
 } as const;
 
 /** The mark's centre, measured from the left edge of the row's column. */
@@ -731,6 +734,7 @@ export function SessionCard({
   agent,
   busy,
   blocked,
+  unread,
   ended,
   onPress,
   onArchive,
@@ -748,6 +752,15 @@ export function SessionCard({
   agent?: string | null;
   busy?: boolean;
   blocked?: boolean;
+  /**
+   * This session said something and nobody has looked at it.
+   *
+   * The server owns the answer (a per-person watermark; see
+   * src/session-reads.ts and omg/session-unread.ts) — the row only draws it.
+   * A working session is never unread: the box holds the mark back until the
+   * turn settles, because the dot means "ready for you".
+   */
+  unread?: boolean;
   /** Finished: no agent attached, resumable. See SessionStatusDot. */
   ended?: boolean;
   onPress: () => void;
@@ -831,7 +844,7 @@ export function SessionCard({
           style={({ pressed }) => ({
             flexDirection: "row",
             alignItems: "center",
-            gap: space.md,
+            gap: SESSION_ROW.gap,
             /**
              * NOTHING AT REST. The web's rail row has no fill and no border
              * until you touch it; the surface was the card's idea, and a list
@@ -870,36 +883,51 @@ export function SessionCard({
             // circle with no visual mass of its own, so an equal inset leaves
             // it looking stuck to the group's edge. The avatar on the left is
             // big enough not to need the same help.
-            paddingRight: space.sm,
-            /**
-             * FIXED, not minimum. The preview line is always mounted, so the
-             * row is 60 whatever it holds and a streaming session cannot
-             * reflow the rows below it. Same height as the web's rail row
-             * (`h-[3.75rem]`).
-             */
+            paddingRight: SESSION_ROW.paddingRight,
+            // Reserve both text lines so activity updates do not resize rows.
             height: SESSION_ROW.height,
           })}
         >
-          {/* 22. The mark identifies the agent; it is not the subject of the
-              row. Without a disc around it the artwork reads at full size, so
-              what used to need 40pt of circle now says the same thing in half
-              of that and stops competing with the session's name. */}
           <AgentAvatar agent={agent} size={SESSION_ROW.avatar} busy={busy} plain />
-          <View style={{ flex: 1, gap: 1, minWidth: 0 }}>
-            {/* 16/13, the web's `text-base` / `text-sm` pair. This was 15/12,
-                down from 17/13: 17 read as a heading, but 15 over 12 left too
-                little contrast between the name and its preview. */}
-            <Text
-              numberOfLines={1}
-              style={{ ...type.body, fontWeight: "600", color: colors.text }}
-            >
-              {title}
-            </Text>
+          <View style={{ flex: 1, gap: SESSION_ROW.textGap, minWidth: 0 }}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0 }}>
+              {/* THE UNREAD DOT LEADS THE TITLE, the way it does on the web
+                  roster and on a bot row: one small filled disc in the tint,
+                  not a count and not a colour change on the text. It is inside
+                  the title row rather than the trailing slot so it cannot
+                  fight the timestamp for the edge. */}
+              {unread ? (
+                <View
+                  accessibilityRole="image"
+                  accessibilityLabel="Unread"
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: 4,
+                    backgroundColor: colors.primary,
+                  }}
+                />
+              ) : null}
+              <Text
+                numberOfLines={1}
+                style={{
+                  ...type.headline,
+                  flexShrink: 1,
+                  // Unread is not communicated by the dot alone: the title
+                  // carries full strength weight while it is unread, and
+                  // settles back once it has been read.
+                  fontWeight: unread ? "700" : "600",
+                  color: colors.text,
+                }}
+              >
+                {title}
+              </Text>
+            </View>
             {/* Rendered unconditionally — see the prop's note. An empty
                 preview keeps its line rather than collapsing the row. */}
             <Text
               numberOfLines={1}
-              style={{ ...type.footnote, color: colors.textMuted }}
+              style={{ ...type.subhead, color: colors.textMuted }}
             >
               {subtitle ?? ""}
             </Text>

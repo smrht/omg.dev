@@ -152,6 +152,15 @@ import {
 } from "./lib/transcript-find";
 import { clearFindHighlight, paintFindHighlight } from "./lib/find-highlight";
 import { applyBotMention, botMentionAt, matchBots, type BotMentionState } from "./lib/bot-mention";
+import {
+  applySessionMention,
+  sessionMentionAt,
+  sessionMentionUrl,
+  type MentionableSession,
+  type SessionMentionScope,
+  type SessionMentionState,
+} from "./lib/session-mention";
+import { SessionMentionSuggest } from "./components/session-mention-suggest";
 import { uploadFile as uploadFileThroughTransport } from "./lib/upload";
 import { compressImageFile, isCompressibleImage } from "./lib/image-compress";
 import { AppCrash } from "./components/app-crash";
@@ -15331,6 +15340,9 @@ type SkillTextareaProps = Omit<
   // Lets a surrounding composer align adjacent controls to a single-line field
   // while still pinning them to the bottom once the textarea wraps or grows.
   onMultilineChange?: (multiline: boolean) => void;
+  // Where the `#` session picker ranks from: siblings of this folder come
+  // first, and the composer's own session is never offered to itself.
+  mentionScope?: SessionMentionScope;
 };
 
 function SkillTextarea({
@@ -15342,6 +15354,7 @@ function SkillTextarea({
   insetEnd = false,
   scrollToEndNonce = 0,
   onMultilineChange,
+  mentionScope,
   ...props
 }: SkillTextareaProps) {
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -15362,6 +15375,45 @@ function SkillTextarea({
   // A new query is a new list, so the highlight returns to the top. Keyed on
   // the query text, not the state object, which is rebuilt on every keyup.
   useEffect(() => setMentionIndex(0), [botMention?.query]);
+
+  // `#` session references. Unlike bots, the candidate list is not in memory:
+  // it spans the durable catalog, so the server ranks it (same folder first,
+  // then keyword matches). Debounced, and a late response for an older query
+  // is dropped rather than shown under the newer one.
+  const [sessionMention, setSessionMention] = useState<SessionMentionState | null>(null);
+  const [sessionIndex, setSessionIndex] = useState(0);
+  const [sessionHits, setSessionHits] = useState<{ q: string; items: MentionableSession[] }>({
+    q: "",
+    items: [],
+  });
+  const sessionQuery = sessionMention?.query;
+  const scopeCwd = mentionScope?.cwd ?? null;
+  const scopeSid = mentionScope?.sessionId ?? null;
+  useEffect(() => {
+    if (sessionQuery == null) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      api<{ sessions: MentionableSession[] }>(
+        sessionMentionUrl(sessionQuery, { cwd: scopeCwd, sessionId: scopeSid }),
+      )
+        .then((r) => {
+          if (!cancelled) {
+            setSessionHits({ q: sessionQuery, items: Array.isArray(r.sessions) ? r.sessions : [] });
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setSessionHits({ q: sessionQuery, items: [] });
+        });
+    }, sessionQuery ? 140 : 0);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [sessionQuery, scopeCwd, scopeSid]);
+  // Keep the previous list on screen while a new query is in flight, so the
+  // popup does not blink empty on every keystroke.
+  const sessionMatches = sessionMention ? sessionHits.items : [];
+  useEffect(() => setSessionIndex(0), [sessionQuery]);
 
   // CSS `field-sizing: content` is still flaky across browsers (and loses to
   // rows/min-height combos), so grow from scrollHeight. max-height in className
@@ -15446,10 +15498,29 @@ function SkillTextarea({
     const caret = fieldRef.current?.selectionStart ?? value.length;
     if (!botMentionAt(value, caret)) setBotMention(null);
   }, [value, botMention]);
+  useLayoutEffect(() => {
+    if (!sessionMention) return;
+    const caret = fieldRef.current?.selectionStart ?? value.length;
+    if (!sessionMentionAt(value, caret)) setSessionMention(null);
+  }, [value, sessionMention]);
 
   function sync(target: HTMLTextAreaElement) {
     setSkillSuggest(slashSkillAt(target.value, target.selectionStart));
     setBotMention(botMentionAt(target.value, target.selectionStart));
+    setSessionMention(sessionMentionAt(target.value, target.selectionStart));
+  }
+
+  function pickSession(session: MentionableSession) {
+    if (!sessionMention) return;
+    const textarea = fieldRef.current;
+    const next = applySessionMention(value, sessionMention, session);
+    onValueChange(next.value);
+    setSessionMention(null);
+    requestAnimationFrame(() => {
+      textarea?.focus();
+      textarea?.setSelectionRange(next.cursor, next.cursor);
+      resizeField(textarea);
+    });
   }
 
   function pickBot(bot: PersistentBot) {
@@ -15503,6 +15574,13 @@ function SkillTextarea({
         onHover={setMentionIndex}
         onPick={pickBot}
       />
+      <SessionMentionSuggest
+        active={sessionMention}
+        matches={sessionMatches}
+        selected={sessionIndex}
+        onHover={setSessionIndex}
+        onPick={pickSession}
+      />
       <Textarea
         {...props}
         ref={setFieldRef}
@@ -15525,6 +15603,7 @@ function SkillTextarea({
           window.setTimeout(() => {
             setSkillSuggest(null);
             setBotMention(null);
+            setSessionMention(null);
           }, 120)
         }
         onKeyDown={(event) => {
@@ -15562,6 +15641,29 @@ function SkillTextarea({
               // Clamped: the list can shrink under a stale index between the
               // last keystroke and this one.
               pickBot(mentionMatches[Math.min(mentionIndex, count - 1)]);
+              return;
+            }
+          }
+          if (sessionMention && sessionMatches.length) {
+            const count = sessionMatches.length;
+            if (event.key === "Escape") {
+              event.preventDefault();
+              setSessionMention(null);
+              return;
+            }
+            if (event.key === "ArrowDown") {
+              event.preventDefault();
+              setSessionIndex((current) => (current + 1) % count);
+              return;
+            }
+            if (event.key === "ArrowUp") {
+              event.preventDefault();
+              setSessionIndex((current) => (current - 1 + count) % count);
+              return;
+            }
+            if (event.key === "Enter" || event.key === "Tab") {
+              event.preventDefault();
+              pickSession(sessionMatches[Math.min(sessionIndex, count - 1)]);
               return;
             }
           }
@@ -16359,6 +16461,7 @@ function SessionChatBody({
             <ComposerTextarea
               textareaRef={messageInputRef}
               data-composer-sid={sid}
+              mentionScope={{ cwd: session.cwd, sessionId: sid }}
               value={messageText}
               onValueChange={setMessageText}
               onMultilineChange={setMessageMultiline}
@@ -23255,6 +23358,7 @@ function NewSessionDialog({
         <ComposerTextarea
           value={prompt}
           onValueChange={setPrompt}
+          mentionScope={{ cwd: selectedRepo }}
           onMultilineChange={variant === "inline" ? setPromptMultiline : undefined}
           scrollToEndNonce={dictationScrollNonce}
           onPaste={files.onPasteFiles}
