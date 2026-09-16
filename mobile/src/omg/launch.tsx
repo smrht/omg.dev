@@ -43,7 +43,14 @@ import Reanimated, {
   withTiming,
 } from "react-native-reanimated";
 
-import { BrandMark } from "./brand-mark";
+import {
+  BrandMark,
+  BrandWordmark,
+  WORDMARK_GAP_RATIO,
+  WORDMARK_MARK_RATIO,
+  WORDMARK_NUDGE_RATIO,
+} from "./brand-mark";
+import { launch } from "./palette";
 import { Text } from "./text";
 import { useTheme } from "./theme";
 
@@ -51,6 +58,45 @@ import { useTheme } from "./theme";
 const SHIMMER_MS = 1500;
 /** How many characters the bright part of the wave spans. */
 const SHIMMER_WIDTH = 4;
+/**
+ * THE CAPTION IS READ, NOT GLIMPSED.
+ *
+ * It used to be `type.footnote` (13pt/400) drawn in `colors.textMuted`, whose
+ * alpha is 0.6 — and the shimmer then multiplied that by as little as 0.45, so
+ * the resting text sat at an effective 0.27 alpha on the background. That is
+ * below any usable contrast, and because only the 4-character wave rose out of
+ * it the line read as a moving smudge rather than a sentence. Two changes: a
+ * one-tier-brighter token (`textSecondary`, alpha 0.78) and a floor under the
+ * shimmer, so the dim state is still legible and the wave is a highlight on
+ * top of readable text instead of the only readable part.
+ */
+const SHIMMER_FLOOR = 0.72;
+const SHIMMER_LIFT = 1 - SHIMMER_FLOOR;
+/** 15pt/600: a launch caption is the only text on screen, so it carries weight. */
+const CAPTION_TYPE = { fontSize: 15, fontWeight: "600", letterSpacing: -0.1 } as const;
+
+/**
+ * The launch surface: the landing's background, flat.
+ *
+ * NO GLOW. The landing puts a brand radial behind its hero and this screen
+ * carried a copy of it; Benny took it out. The background is one colour now,
+ * which also means the mark's bite is filled with that colour again rather
+ * than with the glow's centre.
+ *
+ * Exported because `app/_layout.tsx` shows a second, caption-less splash while
+ * auth and consent settle. That screen and this one have to be the same
+ * surface — two hand-rolled copies of "the launch look" is how one of them
+ * ends up stale — so the backdrop lives here and both render it.
+ */
+export function LaunchBackdrop({ children }: { children?: React.ReactNode }) {
+  const { isDark } = useTheme();
+  const tokens = isDark ? launch.dark : launch.light;
+  return (
+    <View style={[StyleSheet.absoluteFill, { backgroundColor: tokens.bg }]}>
+      {children}
+    </View>
+  );
+}
 
 /**
  * THE EXIT IS A ZOOM PAST THE VIEWER, NOT A RESIZE.
@@ -64,18 +110,41 @@ const SHIMMER_WIDTH = 4;
  *
  * So: a short DIP first (the anticipation every fast move needs — a thing that
  * pulls back before it goes reads as intent rather than a glitch), then an
- * accelerating rush to 7x in a quarter of a second. Seven, because the mark
- * has to leave the screen: 64pt at 7x is 448pt against a 393pt-wide phone, so
- * it passes the viewer rather than stopping in front of them.
+ * accelerating rush in a quarter of a second.
+ *
+ * THE FACTOR IS SET BY THE MARK'S SIZE, not chosen for its own sake: the mark
+ * has to leave the screen, and every time the mark has shrunk this has had to
+ * grow to keep the same overshoot. 7x covered a 64pt mark (448pt against a
+ * 393pt-wide phone). The horizontal lockup took the mark to 41pt and this went
+ * to 11x. Sizing the mark off the landing's real 0.704 ratio takes it to
+ * 28.2pt, where 11x reaches only 310pt and the mark would stop in front of the
+ * viewer. 16x restores the margin: 451pt.
  */
+/**
+ * THE LOCKUP IS HORIZONTAL, exactly as the landing header draws it: mark, gap,
+ * then the type. It used to be a 64pt mark with the type stacked underneath.
+ *
+ * The gap is the wordmark's own ratio (0.26 of the cap height) so the spacing
+ * matches BrandWordmark's built-in lockup rather than drifting from it.
+ */
+const WORDMARK_SIZE = 40;
+/**
+ * Derived from BrandWordmark's ratios rather than restated, because this
+ * screen hand-rolls the row — it has to animate the mark and the type apart —
+ * and a second set of hardcoded numbers is exactly how the launch lockup and
+ * the real one drift into looking like different logos.
+ */
+const MARK_SIZE = WORDMARK_SIZE * WORDMARK_MARK_RATIO;
+const LOCKUP_GAP = WORDMARK_SIZE * WORDMARK_GAP_RATIO;
+const MARK_NUDGE = WORDMARK_SIZE * WORDMARK_NUDGE_RATIO;
+
 const CAPTION_OUT_MS = 120;
 const DIP_MS = 110;
 const ZOOM_MS = 250;
 const DIP_SCALE = 0.9;
-const ZOOM_SCALE = 7;
+const ZOOM_SCALE = 16;
 
-function ShimmerText({ text }: { text: string }) {
-  const { colors, type } = useTheme();
+function ShimmerText({ text, color }: { text: string; color: string }) {
   const progress = useSharedValue(0);
 
   useEffect(() => {
@@ -100,8 +169,8 @@ function ShimmerText({ text }: { text: string }) {
           index={index}
           total={chars.length}
           progress={progress}
-          color={colors.textMuted}
-          style={type.footnote}
+          color={color}
+          style={CAPTION_TYPE}
         />
       ))}
     </View>
@@ -130,7 +199,7 @@ function ShimmerChar({
     const head = progress.value * (total + SHIMMER_WIDTH * 2) - SHIMMER_WIDTH;
     const distance = Math.abs(index - head);
     const lift = Math.max(0, 1 - distance / SHIMMER_WIDTH);
-    return { opacity: 0.45 + lift * 0.55 };
+    return { opacity: SHIMMER_FLOOR + lift * SHIMMER_LIFT };
   });
 
   return (
@@ -154,12 +223,26 @@ export function LaunchScreen({
   done?: boolean;
   onFinished?: () => void;
 }) {
-  const { colors } = useTheme();
+  const { isDark } = useTheme();
+  const tokens = isDark ? launch.dark : launch.light;
   const breathe = useSharedValue(0);
   const scale = useSharedValue(1);
   const fade = useSharedValue(1);
   const backdrop = useSharedValue(1);
   const caption = useSharedValue(1);
+  /**
+   * 0 at rest, 1 once the mark has reached the screen centre.
+   *
+   * A HORIZONTAL LOCKUP PUTS THE MARK OFF CENTRE, and a view scales about its
+   * own centre — so zooming it where it sits would send it out along a line to
+   * the left of the middle, which reads as the mark falling off the side
+   * rather than launching. It slides to the centre first, under the caption's
+   * own 120ms, so the move is over before the dip begins and is read as the
+   * lockup collapsing to its mark rather than as a separate step.
+   */
+  const slide = useSharedValue(0);
+  /** Lockup width, measured: the slide distance depends on the type's width. */
+  const [lockupWidth, setLockupWidth] = useState(0);
   const [leaving, setLeaving] = useState(false);
 
   useEffect(() => {
@@ -182,6 +265,7 @@ export function LaunchScreen({
      * re-cut the others.
      */
     caption.value = withTiming(0, { duration: CAPTION_OUT_MS });
+    slide.value = withTiming(1, { duration: CAPTION_OUT_MS, easing: Easing.inOut(Easing.quad) });
 
     scale.value = withDelay(
       CAPTION_OUT_MS,
@@ -207,7 +291,10 @@ export function LaunchScreen({
       CAPTION_OUT_MS + DIP_MS + ZOOM_MS * 0.3,
       withTiming(0, { duration: ZOOM_MS * 0.55 }),
     );
-  }, [done, leaving, scale, fade, backdrop, caption, onFinished]);
+  }, [done, leaving, scale, fade, backdrop, caption, slide, onFinished]);
+
+  // Distance right to the lockup's own centre, which is the screen's centre.
+  const markShift = lockupWidth / 2 - MARK_SIZE / 2;
 
   const markStyle = useAnimatedStyle(() => {
     if (!leaving) {
@@ -216,7 +303,12 @@ export function LaunchScreen({
         transform: [{ scale: 0.97 + breathe.value * 0.03 }],
       };
     }
-    return { opacity: fade.value, transform: [{ scale: scale.value }] };
+    // translateX BEFORE scale: the transforms apply in order, so the mark is
+    // already centred when it is scaled about its own centre.
+    return {
+      opacity: fade.value,
+      transform: [{ translateX: markShift * slide.value }, { scale: scale.value }],
+    };
   });
 
   const captionStyle = useAnimatedStyle(() => ({ opacity: caption.value }));
@@ -224,29 +316,57 @@ export function LaunchScreen({
   const backdropStyle = useAnimatedStyle(() => ({ opacity: backdrop.value }));
 
   return (
-    <Reanimated.View
-      pointerEvents={leaving ? "none" : "auto"}
-      style={[StyleSheet.absoluteFill, { backgroundColor: colors.bg }, backdropStyle]}
-    >
+    <Reanimated.View pointerEvents={leaving ? "none" : "auto"} style={[StyleSheet.absoluteFill, backdropStyle]}>
+      <LaunchBackdrop />
       {/**
-       * TWO LAYERS, EACH CENTRED ON THE SCREEN — not one centred column of
-       * mark-above-caption.
+       * TWO LAYERS, EACH CENTRED ON THE SCREEN — the lockup and the caption —
+       * rather than one centred column of lockup-above-caption.
        *
-       * As a column the PAIR was centred, which put the mark's own centre
-       * above the screen's by half the caption's height plus its gap. Invisible
-       * at rest, and very visible at 7x: a view scales about its own centre, so
-       * the mark rushed out along a line that missed the middle of the screen
-       * and the zoom read as drifting off toward the top. The mark owns the
-       * centre now and the caption is offset from it.
+       * As a column the PAIR was centred, which put the lockup's own centre
+       * above the screen's by half the caption's height plus its gap.
+       * Invisible at rest, and very visible during the exit: a view scales
+       * about its own centre, so the mark rushed out along a line that missed
+       * the middle of the screen and the zoom read as drifting toward the top.
+       * The lockup owns the centre and the caption is offset from it.
+       *
+       * `paddingTop` on a centred box moves its content down by HALF the
+       * padding, because the padding shrinks the box it is centring in. Hence
+       * the doubled offset below — read it as `2 * distance-below-centre`.
        */}
-      <Reanimated.View style={[StyleSheet.absoluteFill, styles.screen, markStyle]}>
-        <BrandMark size={64} holeColor={colors.bg} />
-      </Reanimated.View>
+      <View style={[StyleSheet.absoluteFill, styles.screen]} pointerEvents="none">
+        <View
+          style={styles.lockup}
+          onLayout={(e) => setLockupWidth(e.nativeEvent.layout.width)}
+        >
+          {/**
+           * The nudge is on an OUTER view, not merged into markStyle.
+           * `transform` is one property: the animated style sets its own
+           * array every frame, so a translateY in the same style array is
+           * simply replaced and the mark sits on the wrong baseline.
+           */}
+          <View style={{ transform: [{ translateY: MARK_NUDGE }] }}>
+            <Reanimated.View style={markStyle}>
+              <BrandMark size={MARK_SIZE} holeColor={tokens.bg} />
+            </Reanimated.View>
+          </View>
+          {/**
+           * THE TYPE LEAVES WITH THE CAPTION, NOT WITH THE MARK.
+           *
+           * The mark's exit is a rush past the viewer, and type at 16x is an
+           * unreadable wall crossing the screen. The lockup's two halves part
+           * company on the way out: the type goes quietly while the mark —
+           * the only half that reads at any size — does the travelling.
+           */}
+          <Reanimated.View style={captionStyle}>
+            <BrandWordmark size={WORDMARK_SIZE} mark={false} color={tokens.text} />
+          </Reanimated.View>
+        </View>
+      </View>
       <Reanimated.View
         pointerEvents="none"
         style={[StyleSheet.absoluteFill, styles.screen, styles.caption, captionStyle]}
       >
-        <ShimmerText text={label} />
+        <ShimmerText text={label} color={tokens.textMuted} />
       </Reanimated.View>
     </Reanimated.View>
   );
@@ -257,8 +377,14 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  lockup: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: LOCKUP_GAP,
+  },
   caption: {
-    // Pushed below the mark, which is centred: half of 64, and a gap.
-    paddingTop: 64 + 36,
+    // Clear of the lockup's own half-height plus a gap. The TYPE is the tall
+    // half now that the mark is 0.704 of it, so measure off the type.
+    paddingTop: (WORDMARK_SIZE / 2 + 30) * 2,
   },
 });

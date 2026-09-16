@@ -5,6 +5,8 @@ import {
   diffSessionEvents,
   diffShipEvents,
   errorFrameMessage,
+  fleetStatusFrame,
+  fleetStatusSignature,
   forwardToLocalServe,
   isHttpFrame,
   isReportableTransition,
@@ -267,6 +269,45 @@ describe("isTopLevelSession", () => {
     expect(isTopLevelSession(session({ sessionId: "a", subagentDepth: 0 }))).toBe(true);
     expect(isTopLevelSession(session({ sessionId: "a", subagentDepth: null }))).toBe(true);
   });
+});
+
+describe("fleetStatusFrame", () => {
+  test("reports only top-level work and one privacy-safe attention target", () => {
+    expect(fleetStatusFrame([
+      session({ sessionId: "working", busy: true }),
+      session({ sessionId: "blocked", busy: true, status: "blocked" }),
+      session({ sessionId: "child", busy: true, parentSessionId: "working" }),
+      session({ sessionId: "idle", busy: false }),
+    ], 1234)).toEqual({
+      type: "event",
+      event: "fleet.status",
+      sessionId: "fleet",
+      title: null,
+      project: null,
+      agent: null,
+      runningCount: 2,
+      blockedCount: 1,
+      attentionSessionId: "blocked",
+      sessions: [
+        { id: "blocked", title: "build a todo app", agent: "claude", state: "blocked" },
+        { id: "working", title: "build a todo app", agent: "claude", state: "working" },
+        { id: "idle", title: "build a todo app", agent: "claude", state: "done" },
+      ],
+      sessionCount: 3,
+      ts: 1234,
+    });
+  });
+});
+
+test("fleet roster bounds titles and refreshes identity without count changes", () => {
+  const rows = Array.from({ length: 8 }, (_, index) => session({ sessionId: `session-${index}`, busy: true, title: "x".repeat(100), agent: "codex" }));
+  const before = fleetStatusFrame(rows, 1);
+  expect(before.sessions).toHaveLength(3);
+  expect(before.sessionCount).toBe(8);
+  expect(before.sessions[0].title).toHaveLength(72);
+  expect(fleetStatusSignature(before)).toBe(fleetStatusSignature(fleetStatusFrame(rows, 2)));
+  rows[0].title = "New title";
+  expect(fleetStatusSignature(before)).not.toBe(fleetStatusSignature(fleetStatusFrame(rows, 2)));
 });
 
 describe("isReportableTransition", () => {

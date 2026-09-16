@@ -34,6 +34,11 @@
  * the results as their own rows rather than labelling one with another's name.
  */
 
+import type { MessageAuthorRef } from "../../../src/conversation-contract";
+import { ChatIdentityContext } from "./chat-identity";
+import { messageSpeaker, otherMessageSender } from "./message-author";
+import { HumanMessageFrame } from "./human-message-frame";
+import { Sheet } from "./sheet";
 import { SendOriginContext, useSendEntrance } from "./send-motion";
 import * as Clipboard from "expo-clipboard";
 import MenuView, { type MenuAction } from "@expo/ui/community/menu";
@@ -42,7 +47,6 @@ import type { AndroidSymbol, SFSymbol } from "expo-symbols";
 import { useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Animated,
-  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -62,22 +66,31 @@ import Reanimated, {
 import { useRouter } from "expo-router";
 import type { OmgMessage } from "@omg-dev/protocol";
 
-import { Icon } from "../components";
+import { Icon, IconButton } from "../components";
 import { formatFileSize } from "./file-preview";
 import { workLabel } from "./work-label";
+import { WorkingDots } from "./working-indicator";
 import { stampTime } from "./format";
-import { CodeBlock, Markdown, useBodyText } from "./markdown";
+import { CodeBlock, useBodyText } from "./markdown";
+import { TranscriptBody } from "./transcript-body";
 import {
   parseMessageAttachments,
   type MessageAttachment,
 } from "./message-attachments";
 import { parseOmgPromptEnvelope } from "./omg-prompt-envelope";
+import {
+  classifySystemMessage,
+  systemMessagePreview,
+  type SystemMessage,
+  type SystemMessageKind,
+} from "./system-message";
 import { AuthenticatedImage } from "./remote-image";
 import { Text } from "./text";
 import { useTheme } from "./theme";
 
 /** A transcript message, plus the flag the live stream sets on its synthetic tail. */
 export type Entry = OmgMessage & {
+  author?: MessageAuthorRef;
   streaming?: boolean;
   /**
    * Sent with `mode: "queue"` — waiting BEHIND the turn in flight rather than
@@ -173,7 +186,7 @@ export function transcriptSpeaker(item: TranscriptItem): string {
   if (item.type === "stamp") return "stamp";
   if (item.type === "tools") return "assistant";
   const role = item.message.role;
-  if (role === "user") return "user";
+  if (role === "user") return messageSpeaker(item.message);
   if (role === "assistant") return "assistant";
   return "system";
 }
@@ -344,9 +357,15 @@ export function TranscriptRow({
   item,
   fresh,
   bot,
+  virtualize,
+  firstOfRun,
+  lastOfRun,
 }: {
   item: TranscriptItem;
   fresh?: boolean;
+  virtualize?: boolean;
+  firstOfRun?: boolean;
+  lastOfRun?: boolean;
   /** Present only inside a bot chat — see app/session/[id].tsx's `SessionScreenBody`. */
   bot?: BotBubbleIdentity | null;
 }) {
@@ -374,7 +393,7 @@ export function TranscriptRow({
       {item.type === "stamp" ? (
         <Stamp ts={item.ts} />
       ) : item.type === "message" ? (
-        <TranscriptEntry message={item.message} nextTs={item.nextTs} bot={bot} />
+        <TranscriptEntry firstOfRun={firstOfRun} lastOfRun={lastOfRun} message={item.message} nextTs={item.nextTs} bot={bot} virtualize={virtualize} />
       ) : (
         <ToolRun pairs={item.pairs} entries={item.entries} nextTs={item.nextTs} live={item.live} />
       )}
@@ -430,70 +449,45 @@ function ToolSheet({
 }) {
   const { colors, type, space } = useTheme();
   return (
-    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
-      <View style={{ flex: 1, backgroundColor: colors.bg }}>
+    <Sheet visible={visible} onClose={onClose}>
+      <View>
+        {/*
+          * THE CLOSE IS A DISC, NOT A BARE GLYPH. A 15pt xmark hugging the
+          * title on a 12pt-padded row read as cramped and was a small target
+          * on the sheet's one action. This is the same 36pt IconButton on
+          * the app's grey disc that every other screen uses for a dismiss,
+          * with the row padded so it sits clear of the sheet's rounded top.
+          */}
         <View
           style={{
             flexDirection: "row",
             alignItems: "center",
-            gap: space.sm,
-            paddingHorizontal: space.lg,
-            paddingVertical: space.md,
-            borderBottomWidth: StyleSheet.hairlineWidth,
-            borderBottomColor: colors.border,
+            gap: space.md,
+            paddingLeft: space.lg,
+            paddingRight: space.md,
+            paddingTop: space.md,
+            paddingBottom: space.sm,
           }}
         >
-          <Icon ios={symbol.ios} android={symbol.android} size={14} color={colors.textMuted} />
+          <Icon ios={symbol.ios} android={symbol.android} size={15} color={colors.textMuted} />
           <Text style={{ ...type.headline, color: colors.text, flex: 1 }} numberOfLines={1}>
             {title}
           </Text>
-          <Pressable
-            onPress={onClose}
-            hitSlop={10}
-            accessibilityRole="button"
+          <IconButton
+            ios="xmark"
+            android="close"
+            size={15}
+            color={colors.textSecondary}
+            background={colors.accent}
             accessibilityLabel="Close"
-            style={({ pressed }) => ({ opacity: pressed ? 0.5 : 1 })}
-          >
-            <Icon ios="xmark" android="close" size={15} color={colors.textSecondary} />
-          </Pressable>
+            onPress={onClose}
+          />
         </View>
-        <ScrollView
-          contentContainerStyle={{ padding: space.lg, gap: space.sm }}
-          contentInsetAdjustmentBehavior="never"
-        >
+        <View style={{ padding: space.lg, gap: space.sm }}>
           {children}
-        </ScrollView>
+        </View>
       </View>
-    </Modal>
-  );
-}
-
-/** Three dots breathing in sequence: the one animation everybody reads as "something is coming". */
-function WorkingDots({ color }: { color: string }) {
-  const dots = useRef([new Animated.Value(0.3), new Animated.Value(0.3), new Animated.Value(0.3)]).current;
-  useEffect(() => {
-    const loops = dots.map((value, i) =>
-      Animated.loop(
-        Animated.sequence([
-          Animated.delay(i * 160),
-          Animated.timing(value, { toValue: 1, duration: 340, useNativeDriver: true }),
-          Animated.timing(value, { toValue: 0.3, duration: 340, useNativeDriver: true }),
-          Animated.delay((dots.length - 1 - i) * 160),
-        ]),
-      ),
-    );
-    loops.forEach((loop) => loop.start());
-    return () => loops.forEach((loop) => loop.stop());
-  }, [dots]);
-  return (
-    <View style={{ flexDirection: "row", alignItems: "center", gap: 4, marginRight: 2 }}>
-      {dots.map((value, i) => (
-        <Animated.View
-          key={i}
-          style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: color, opacity: value }}
-        />
-      ))}
-    </View>
+    </Sheet>
   );
 }
 
@@ -612,7 +606,7 @@ function ToolRun({
             gutter. A LIVE run carries the breathing dots instead — the same
             ones the footer used to show on its own — so the run row is the
             working indicator, not a second one under it. */}
-        {live ? <WorkingDots color={colors.textSecondary} /> : null}
+        {live ? <WorkingDots color={colors.textSecondary} size={4} /> : null}
         <Text style={{ ...type.caption, fontWeight: "500", color: colors.textSecondary }}>{label}</Text>
         <Icon ios="chevron.right" android="chevron_right" size={10} color={colors.textMuted} />
       </Pressable>
@@ -720,10 +714,16 @@ export function TranscriptEntry({
   message,
   nextTs,
   bot,
+  virtualize,
+  firstOfRun,
+  lastOfRun,
 }: {
   message: Entry;
   nextTs?: number | null;
   bot?: BotBubbleIdentity | null;
+  virtualize?: boolean;
+  firstOfRun?: boolean;
+  lastOfRun?: boolean;
 }) {
   const { colors, type, space, radius } = useTheme();
   const isUser = message.role === "user";
@@ -775,7 +775,7 @@ export function TranscriptEntry({
   if (message.kind === "tool_result") return <ToolEntry call={null} result={message} />;
   if (message.kind === "tool_use") return <ToolEntry call={message} result={null} />;
 
-  if (isUser) return <UserMessage message={message} />;
+  if (isUser) return <UserMessage message={message} firstOfRun={firstOfRun} lastOfRun={lastOfRun} />;
 
   if (!message.text?.trim()) {
     // Never an empty cell: say what arrived, even when this build cannot draw it.
@@ -818,7 +818,7 @@ export function TranscriptEntry({
           paddingVertical: 10,
         }}
       >
-        <Markdown text={message.text ?? ""} streaming={message.streaming} />
+        <TranscriptBody text={message.text ?? ""} streaming={message.streaming} virtualize={virtualize} />
       </View>
     );
   }
@@ -827,7 +827,7 @@ export function TranscriptEntry({
   // tint — exactly like the web transcript.
   return (
     <View style={{ alignSelf: "stretch", paddingHorizontal: space.xs }}>
-      <Markdown text={message.text ?? ""} streaming={message.streaming} />
+      <TranscriptBody text={message.text ?? ""} streaming={message.streaming} virtualize={virtualize} />
     </View>
   );
 }
@@ -1603,7 +1603,97 @@ function OmgInstructionsChip({ instructions, version }: { instructions: string; 
   );
 }
 
-export function UserMessage({ message }: { message: Entry }) {
+/** A glyph per family of machine-written turn; see system-message.ts. */
+const SYSTEM_SYMBOLS: Record<SystemMessageKind, Symbols> = {
+  "background-task": { ios: "arrow.turn.down.right", android: "subdirectory_arrow_right" },
+  subagent: { ios: "arrow.turn.down.right", android: "subdirectory_arrow_right" },
+  peer: { ios: "bubble.left.and.bubble.right", android: "forum" },
+  "bot-message": { ios: "bubble.left.and.bubble.right", android: "forum" },
+  "ask-answer": { ios: "questionmark.circle", android: "help" },
+  fork: { ios: "arrow.triangle.branch", android: "call_split" },
+  rotation: { ios: "arrow.clockwise", android: "refresh" },
+  routine: { ios: "clock", android: "schedule" },
+};
+
+/**
+ * A TURN THE MACHINE WROTE, drawn as one quiet line instead of a sent bubble.
+ *
+ * A background task reporting home, a peer bot writing in, an answered
+ * question, a fork's launch prompt: all of these arrive as `role: "user"`
+ * text with a marker in front, and the bubble put that marker in the person's
+ * own mouth — `[Background task ios app · 542a7801]`, right-aligned, in a
+ * card, as if they had typed it. The transcript is a log of what happened;
+ * these are events in it, not speech, and they read as events: centred, in
+ * the caption colours the "Worked for 9s" rows use, with the sender named in
+ * plain words and the raw body two lines deep. The whole thing is one tap
+ * away in a sheet, because the body is still the agent's real input and
+ * sometimes you need to read all of it.
+ *
+ * One component for every kind, on purpose. Each wrapper used to be a
+ * separate discovery — a bubble that looked wrong, then a special case —
+ * and the fix was the same every time. The list of shapes lives in
+ * system-message.ts; this only decides how a recognised one looks.
+ */
+function SystemLine({ system, raw }: { system: SystemMessage; raw: string }) {
+  const { colors, type, space } = useTheme();
+  const body = useBodyText();
+  const [open, setOpen] = useState(false);
+  const symbol = SYSTEM_SYMBOLS[system.kind];
+  const preview = systemMessagePreview(system.body);
+
+  return (
+    <>
+      <Pressable
+        onPress={() => {
+          void Haptics.selectionAsync();
+          setOpen(true);
+        }}
+        accessibilityRole="button"
+        accessibilityLabel={`${system.label}${system.id ? `, ${system.id}` : ""}. Open`}
+        style={({ pressed }) => ({
+          alignSelf: "center",
+          maxWidth: "100%",
+          alignItems: "center",
+          gap: 4,
+          paddingVertical: space.xs,
+          paddingHorizontal: space.lg,
+          opacity: pressed ? 0.6 : 1,
+        })}
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", maxWidth: "100%", gap: 6 }}>
+          <Icon ios={symbol.ios} android={symbol.android} size={12} color={colors.textMuted} />
+          <Text numberOfLines={2} style={{ ...type.footnote, flexShrink: 1, fontWeight: "500", color: colors.textSecondary }}>
+            {system.label}
+          </Text>
+          {system.id ? (
+            <Text style={{ ...type.caption, fontFamily: MONO, color: colors.textMuted }}>
+              {system.id}
+            </Text>
+          ) : null}
+          <Icon ios="chevron.right" android="chevron_right" size={10} color={colors.textMuted} />
+        </View>
+        {preview ? (
+          <Text
+            numberOfLines={2}
+            style={{ ...type.footnote, color: colors.textMuted, textAlign: "center" }}
+          >
+            {preview}
+          </Text>
+        ) : null}
+      </Pressable>
+
+      <ToolSheet visible={open} title={system.label} symbol={symbol} onClose={() => setOpen(false)}>
+        <Text selectable style={body}>
+          {system.body || raw}
+        </Text>
+      </ToolSheet>
+    </>
+  );
+}
+
+export function UserMessage({ message, firstOfRun, lastOfRun }: { message: Entry; firstOfRun?: boolean; lastOfRun?: boolean }) {
+  const identity = useContext(ChatIdentityContext);
+  const sender = otherMessageSender(message, identity);
   const { colors, type, space, isDark } = useTheme();
   const body = useBodyText();
   const sendEntrance = useSendEntrance();
@@ -1623,6 +1713,7 @@ export function UserMessage({ message }: { message: Entry }) {
   // actual task text, not the full contract. The raw `message.text` still
   // goes to the agent; this is presentation only (see omg-prompt-envelope.ts).
   const rawText = envelope?.task ?? message.text ?? "";
+  const system = useMemo(() => classifySystemMessage(rawText), [rawText]);
 
   /**
    * COPY IS A LONG PRESS, not a button. The little doc-on-doc glyph under
@@ -1666,13 +1757,28 @@ export function UserMessage({ message }: { message: Entry }) {
   );
   const isLong = text.length > LONG_MESSAGE_CHARS;
 
+  // Not something the person typed: see SystemLine. The launch chip stays,
+  // because a fork's opener rides inside the omg.dev envelope and the
+  // contract is still one tap away.
+  if (system) {
+    return (
+      <View style={{ alignSelf: "stretch", gap: space.xs }}>
+        {envelope ? (
+          <OmgInstructionsChip instructions={envelope.instructions} version={envelope.version} />
+        ) : null}
+        <SystemLine system={system} raw={rawText} />
+      </View>
+    );
+  }
+
   return (
+    <HumanMessageFrame sender={sender} firstOfRun={firstOfRun} lastOfRun={lastOfRun}>
     <View style={{ alignSelf: "stretch", gap: space.xs }}>
       {envelope ? (
         <OmgInstructionsChip instructions={envelope.instructions} version={envelope.version} />
       ) : null}
       {attachments.length ? (
-        <UserAttachments attachments={attachments} pending={message.pending} />
+        <UserAttachments attachments={attachments} pending={message.pending} otherAuthor={!!sender} />
       ) : null}
       {/* A caption is optional: attach an image with nothing typed and the
           picture is the whole message, with no empty bubble under it. */}
@@ -1686,8 +1792,8 @@ export function UserMessage({ message }: { message: Entry }) {
            * vanishing changed the row's height, and the height change plus
            * the key swap read as the message being re-inserted.
            */
-          entering={sendEntrance.entering}
-          style={[settle, sendEntrance.bubbleStyle, { alignSelf: "flex-end", maxWidth: "85%" }]}
+          entering={sender ? undefined : sendEntrance.entering}
+          style={[settle, sender ? undefined : sendEntrance.bubbleStyle, { alignSelf: sender ? "flex-start" : "flex-end", maxWidth: "85%" }]}
         >
         <MenuView
           actions={bubbleActions}
@@ -1727,7 +1833,7 @@ export function UserMessage({ message }: { message: Entry }) {
             paddingVertical: 5,
           }}
         >
-          <Reanimated.View style={sendEntrance.contentStyle}>
+          <View>
           <Text
             // Not `selectable`: the native selection gesture is a long press
             // too, and it would take this one before the copy menu could.
@@ -1767,7 +1873,7 @@ export function UserMessage({ message }: { message: Entry }) {
               </Text>
             </Pressable>
           ) : null}
-          </Reanimated.View>
+          </View>
         </View>
         </MenuView>
         </Reanimated.View>
@@ -1776,7 +1882,7 @@ export function UserMessage({ message }: { message: Entry }) {
         style={{
           flexDirection: "row",
           alignItems: "center",
-          alignSelf: "flex-end",
+          alignSelf: sender ? "flex-start" : "flex-end",
           gap: space.sm,
           marginTop: 2,
           marginRight: space.sm,
@@ -1796,6 +1902,7 @@ export function UserMessage({ message }: { message: Entry }) {
         ) : null}
       </View>
     </View>
+    </HumanMessageFrame>
   );
 }
 
@@ -1810,9 +1917,11 @@ export function UserMessage({ message }: { message: Entry }) {
 function UserAttachments({
   attachments,
   pending,
+  otherAuthor = false,
 }: {
   attachments: MessageAttachment[];
   pending?: boolean;
+  otherAuthor?: boolean;
 }) {
   const { colors, space, radius } = useTheme();
   const single = attachments.length === 1;
@@ -1832,7 +1941,7 @@ function UserAttachments({
          * hung off both sides of the screen. They are one utterance and they
          * share an edge.
          */
-        justifyContent: "flex-end",
+        justifyContent: otherAuthor ? "flex-start" : "flex-end",
         // Not `stretch`, which is the flex default: that pulls every tile on a
         // row up to the tallest one's height, so a wide screenshot beside a
         // tall one renders squashed. The web stylesheet carries this same note.

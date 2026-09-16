@@ -40,6 +40,13 @@ export type ResumableCacheRow = ResumableSession & {
   // and searched but not resumed by LFG. Keep them in the same derived catalog
   // without exposing them in the existing Resume picker.
   resumable?: boolean;
+  // A headless auto-agent run rather than a session a human opened. Set by the
+  // scan from the runner's prompt signature; see auto/watch-agent-signature.ts.
+  scheduled?: boolean;
+  // When the session was closed, which is NOT lastActivityAt (the final turn).
+  // Only the close path knows it, so the scan leaves this undefined and the
+  // upsert preserves whatever is already stored.
+  archivedAt?: number | null;
 };
 
 export type ResumableBackend =
@@ -73,6 +80,10 @@ export type ResumableQuery = {
   // Omitted by the Resume > Sessions picker, which keeps showing every row:
   // hiding is a list decision, not deletion.
   roster?: boolean;
+  // Headless auto-agent runs are hidden by default: they are the majority of
+  // rows on a box with active schedules, and none of them is a conversation
+  // anyone wants to resume. Pass true to get the unfiltered catalog.
+  includeScheduled?: boolean;
 };
 
 export type ResumableFacets = {
@@ -84,6 +95,11 @@ export type ResumableQueryResult = {
   sessions: ResumableSession[];
   total: number;
   facets: ResumableFacets;
+  // How many scheduled runs the current filters match. The picker labels its
+  // show/hide control with this, so the rows it is hiding are stated rather
+  // than silently missing. Counted under the same search/agent/project filters
+  // as `total`, so the two numbers describe the same slice of history.
+  scheduledTotal: number;
 };
 
 export type HistoricalSession = {
@@ -131,6 +147,8 @@ type Row = {
   assigned_user: string | null;
   managed: number;
   resumable: number;
+  scheduled: number;
+  archived_at: number | null;
 };
 
 let db: Database | null = null;
@@ -217,17 +235,29 @@ function init(): Database {
     );
     d.exec(migration);
   }
-  // omg-fork: roster-hide + internal-roster lineage. Guarded by the actual
-  // schema, not only user_version: the pre-0.6.24 fork numbered these 7/8 and
-  // carried fast_mode as its own 009, so a live database arrives here at
-  // user_version 9 with every column already present, while a fresh install
-  // reaches 7 with none of the fork columns. Columns, not counters, decide.
+  // omg-fork: roster-hide + internal-roster lineage, and upstream's 0.6.69
+  // archive columns. Guarded by the actual schema, not only user_version: the
+  // pre-0.6.24 fork numbered these 7/8 and carried fast_mode as its own 009,
+  // so a live database arrives here at user_version 9 with every fork column
+  // already present — upstream's own `version < 8` guard would then skip
+  // 008_archive_scheduled_runs and every query on `scheduled` would fail.
+  // Columns, not counters, decide.
   {
     const forkColumns = new Set(
       d.query<{ name: string }, []>("PRAGMA table_info(resumable_sessions)")
         .all()
         .map((column) => column.name),
     );
+    if (!forkColumns.has("scheduled")) {
+      d.exec(
+        readFileSync(
+          new URL("./migrations/resume-cache/008_archive_scheduled_runs.sql", import.meta.url),
+          "utf8",
+        ),
+      );
+      // That file stamps user_version = 8; a fork database is already past it.
+      if (version > 8) d.exec(`PRAGMA user_version = ${version}`);
+    }
     if (!forkColumns.has("roster_hidden")) {
       d.exec(
         readFileSync(
@@ -275,6 +305,10 @@ function toSession(row: Row): ResumableSession {
     serviceTier: row.service_tier === "fast" ? "fast" : null,
     fastMode: row.fast_mode === 1 || row.service_tier === "fast",
     assignedUser: row.assigned_user,
+    // Null for every row archived before this column existed. The picker sorts
+    // on it and must label the row with the same instant it sorted on, so it
+    // falls back to lastActivityAt in exactly the same way the ORDER BY does.
+    archivedAt: row.archived_at,
   };
 }
 
@@ -339,8 +373,9 @@ export function upsertResumableRows(rows: ResumableCacheRow[]): void {
       (session_id, cwd, project, title, last_user_text, last_activity_at, agent, path, mtime_ms,
        backend, resume_handle, model, thinking_level, service_tier, fast_mode,
        assigned_user, managed, resumable, roster_hidden,
-       parent_session_id, spawned_by, bot_id, originator, source_kind, launch_contract)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       parent_session_id, spawned_by, bot_id, originator, source_kind, launch_contract,
+       scheduled, archived_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(session_id) DO UPDATE SET
       cwd = excluded.cwd,
       project = excluded.project,
@@ -364,7 +399,19 @@ export function upsertResumableRows(rows: ResumableCacheRow[]): void {
       bot_id = COALESCE(excluded.bot_id, resumable_sessions.bot_id),
       originator = COALESCE(excluded.originator, resumable_sessions.originator),
       source_kind = COALESCE(excluded.source_kind, resumable_sessions.source_kind),
-      launch_contract = MAX(excluded.launch_contract, resumable_sessions.launch_contract)
+      launch_contract = MAX(excluded.launch_contract, resumable_sessions.launch_contract),
+      -- Sticky, because "this row came from an automated run" is a fact about
+      -- the session that cannot later become untrue. It also has to be: a
+      -- schedule-spawned tmux session is marked by the close path from
+      -- spawnedBy, then removeManaged drops the registry row, and the next file
+      -- scan re-enriches the same session_id knowing only the transcript. A
+      -- plain overwrite would silently clear the flag and put the run back in
+      -- the picker.
+      scheduled = MAX(excluded.scheduled, resumable_sessions.scheduled),
+      -- The scan cannot see a close event, so it always passes NULL here.
+      -- COALESCE keeps a close time that was already stamped instead of
+      -- letting the next refresh erase it.
+      archived_at = COALESCE(excluded.archived_at, resumable_sessions.archived_at)
   `);
   d.transaction((batch: ResumableCacheRow[]) => {
     for (const r of batch) {
@@ -394,6 +441,8 @@ export function upsertResumableRows(rows: ResumableCacheRow[]): void {
         r.originator ?? null,
         r.sourceKind ?? null,
         r.launchContract ? 1 : 0,
+        r.scheduled ? 1 : 0,
+        r.archivedAt ?? null,
       );
     }
   })(rows);
@@ -465,7 +514,7 @@ export function getCachedResumableSession(sessionId: string): ResumableSession |
     .query<Row, [string]>(`
       SELECT session_id, cwd, project, title, last_user_text, last_activity_at, agent, path, mtime_ms,
              backend, resume_handle, model, thinking_level, service_tier, fast_mode,
-             assigned_user, managed, resumable
+             assigned_user, managed, resumable, scheduled, archived_at
       FROM resumable_sessions
       WHERE session_id = ? AND resumable = 1
     `)
@@ -887,6 +936,13 @@ export function queryResumableCache(opts: ResumableQuery = {}): ResumableQueryRe
   }
   facetWhere.push("resumable = 1");
   if (opts.roster) facetWhere.push("roster_hidden = 0");
+  // Everything above applies whether or not scheduled runs are shown; keep it
+  // separate so the "how many am I hiding" count below can reuse it.
+  const sharedWhere = [...facetWhere];
+  // Scheduled runs are excluded from the facet counts too, not just the page.
+  // A chip that reads "claude 4,904" and then pages nothing but hidden rows is
+  // worse than no chip.
+  if (!opts.includeScheduled) facetWhere.push("scheduled = 0");
   const facetWhereSql = facetWhere.length ? `WHERE ${facetWhere.join(" AND ")}` : "";
 
   const agentFacet = d
@@ -900,22 +956,37 @@ export function queryResumableCache(opts: ResumableQuery = {}): ResumableQueryRe
     )
     .all(...facetParams);
 
-  // The visible page respects every filter.
-  const where = [...facetWhere];
-  const params = [...facetParams];
+  // The visible page respects every filter. Collected separately from the
+  // shared clauses because the scheduled count below needs the same narrowing
+  // (a count of 388 next to a project-filtered page of 4 would be a lie).
+  const narrowing: string[] = [];
+  const narrowingParams: (string | number)[] = [];
   if (opts.agent) {
-    where.push("agent = ?");
-    params.push(opts.agent);
+    narrowing.push("agent = ?");
+    narrowingParams.push(opts.agent);
   }
   if (opts.project) {
-    where.push("project = ?");
-    params.push(opts.project);
+    narrowing.push("project = ?");
+    narrowingParams.push(opts.project);
   }
   if (opts.cwd) {
-    where.push("cwd = ?");
-    params.push(opts.cwd);
+    narrowing.push("cwd = ?");
+    narrowingParams.push(opts.cwd);
   }
+  const where = [...facetWhere, ...narrowing];
+  const params = [...facetParams, ...narrowingParams];
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+  // How many scheduled runs this same slice of history holds. Neither
+  // "scheduled = 0"/"scheduled = 1" binds a parameter, so the parameter order
+  // is identical to the page query above.
+  const scheduledWhere = [...sharedWhere, "scheduled = 1", ...narrowing];
+  const scheduledTotal =
+    d
+      .query<{ count: number }, (string | number)[]>(
+        `SELECT COUNT(*) AS count FROM resumable_sessions WHERE ${scheduledWhere.join(" AND ")}`,
+      )
+      .get(...facetParams, ...narrowingParams)?.count ?? 0;
 
   const total =
     d
@@ -928,10 +999,17 @@ export function queryResumableCache(opts: ResumableQuery = {}): ResumableQueryRe
     .query<Row, (string | number)[]>(`
       SELECT session_id, cwd, project, title, last_user_text, last_activity_at, agent, path, mtime_ms,
              backend, resume_handle, model, thinking_level, service_tier, fast_mode,
-             assigned_user, managed, resumable
+             assigned_user, managed, resumable, scheduled, archived_at
       FROM resumable_sessions
       ${whereSql}
-      ORDER BY last_activity_at IS NULL, last_activity_at DESC, session_id DESC
+      -- Newest ARCHIVE first, not newest turn first. A session reclaimed under
+      -- memory pressure, or closed hours after its last message, was sorted by
+      -- an instant the human never saw and landed pages down the list the
+      -- moment they archived it. Rows older than the archived_at column fall
+      -- back to last_activity_at, which is what they were sorted on before.
+      ORDER BY COALESCE(archived_at, last_activity_at) IS NULL,
+               COALESCE(archived_at, last_activity_at) DESC,
+               session_id DESC
       LIMIT ? OFFSET ?
     `)
     .all(...params, limit, offset);
@@ -939,6 +1017,7 @@ export function queryResumableCache(opts: ResumableQuery = {}): ResumableQueryRe
   return {
     sessions: rows.map(toSession),
     total,
+    scheduledTotal,
     facets: {
       agents: agentFacet.map((r) => ({ agent: r.agent, count: r.count })),
       projects: projectFacet
@@ -993,7 +1072,7 @@ export function queryHistoricalCache(opts: HistoricalQuery = {}): HistoricalQuer
     .query<Row, (string | number)[]>(`
       SELECT session_id, cwd, project, title, last_user_text, last_activity_at, agent, path, mtime_ms,
              backend, resume_handle, model, thinking_level, service_tier, fast_mode,
-             assigned_user, managed, resumable
+             assigned_user, managed, resumable, scheduled, archived_at
       FROM resumable_sessions
       ${whereSql}
       ORDER BY last_activity_at IS NULL, last_activity_at DESC, session_id DESC

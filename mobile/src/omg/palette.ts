@@ -39,6 +39,22 @@ export type Palette = {
   codeBg: string;
   /** Elevated fill for a field sitting on `card`. */
   fieldFill: string;
+  /**
+   * Skeleton placeholder fill, and the highlight that sweeps across it.
+   *
+   * NATIVE-ONLY, like `fieldFill`: there is no matching custom property in
+   * index.css, so these are absent from check-theme-drift's MAP on purpose.
+   *
+   * They are TRANSLUCENT rather than flat hexes. A bone always sits on `card`
+   * today, but the same primitive is the obvious thing to reach for on a sheet
+   * or a popover, and an alpha keeps the separation constant wherever it
+   * lands. `secondary` used to play this role and it is a flat colour chosen
+   * to sit BESIDE card, not on it: #2c2c2e on #242428 is 8 levels of
+   * separation, about 1.2:1, which measured as an almost invisible bone on
+   * device. Light was worse — #f9f9fb on #ffffff, 6 levels.
+   */
+  skeletonBone: string;
+  skeletonSweep: string;
 };
 
 /**
@@ -100,6 +116,11 @@ export const darkColors: Palette = {
   codeBg: "rgba(118, 118, 128, 0.16)",
   /** Elevated fill for a field sitting on `card`. */
   fieldFill: "#1c1c1e",
+  // Same warm base as mutedForeground/text2. On `card` (36,36,40) these
+  // composite to roughly (56,55,58) and (92,90,92): the bone reads as a
+  // placeholder at a glance, and the sweep is clearly brighter than it.
+  skeletonBone: "rgba(235, 230, 220, 0.10)",
+  skeletonSweep: "rgba(235, 230, 220, 0.20)",
 };
 
 /** Light tokens — from `:root` in web/src/index.css. */
@@ -124,7 +145,43 @@ export const lightColors: Palette = {
   text2: "#3c3c43",
   codeBg: "rgba(120, 120, 128, 0.08)",
   fieldFill: "#ffffff",
+  // Same base as light's mutedForeground. On white these composite to about
+  // (237,237,238) and (205,205,208).
+  skeletonBone: "rgba(60, 60, 67, 0.09)",
+  skeletonSweep: "rgba(60, 60, 67, 0.18)",
 };
+
+/**
+ * THE LANDING PAGE'S OWN SURFACE, for the launch screen only.
+ *
+ * Benny asked for the splash to look like omg.dev, so these are not invented:
+ * they are the landing stylesheet's `:root` and `.dark` custom properties,
+ * read on 2026-09-12 from
+ * .../web/landing/1de05cf82745300d600e2eeefabe884f54cacb53/assets/styles.css
+ * — `--background`, `--foreground`, `--muted-foreground` and `--brand`.
+ *
+ * SEPARATE FROM `Palette` ON PURPOSE, and not in check-theme-drift's MAP. The
+ * app's own palette mirrors web/src/index.css, which is the DASHBOARD's token
+ * set — a different surface with a different background. Folding the marketing
+ * cream into `colors.bg` would re-skin every screen in the app. This is one
+ * screen quoting another product surface, so it stays a named island.
+ *
+ * The landing's brand radial glow was copied here too and then removed at
+ * Benny's request, so `--brand` is no longer among these: the launch surface
+ * is one flat colour and the only brand on it is the mark itself.
+ */
+export const launch = {
+  light: {
+    bg: "#f0ede7",
+    text: "#0d0c0a",
+    textMuted: "#65605a",
+  },
+  dark: {
+    bg: "#060505",
+    text: "#ffffff",
+    textMuted: "#c4beb4",
+  },
+} as const;
 
 /**
  * omg brand. Deliberately scheme-independent and NOT part of the shared token

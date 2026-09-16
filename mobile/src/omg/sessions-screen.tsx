@@ -19,6 +19,7 @@ import {
   usePathname,
 } from "expo-router";
 import * as Haptics from "expo-haptics";
+import { usePromptDraft, stashScope } from "./prompt-stash";
 import {
   createContext,
   type ReactNode,
@@ -42,8 +43,10 @@ import {
 import Reanimated, {
   useAnimatedKeyboard,
   useAnimatedStyle,
+  useSharedValue,
 } from "react-native-reanimated";
 import { LinearGradient } from "expo-linear-gradient";
+import { composerReservation } from "./composer-reservation";
 import { COMPOSER_FADE_HEIGHT, EdgeFade, fadeStops, TOP_FADE_HEIGHT } from "./edge-fade";
 import { keyCommandsAvailable, useKeyCommand } from "./key-commands";
 import { ShortcutsSheet } from "./shortcuts-sheet";
@@ -58,8 +61,6 @@ import {
   EmptyState,
   Icon,
   SESSION_ROW,
-  SESSION_ROW_MARK_X,
-  SESSION_ROW_MARK_Y,
   HomeComposer,
   PrimaryButton,
   SectionHeader,
@@ -73,12 +74,13 @@ import {
   sessionStableId,
   type SessionNode,
 } from "./session-tree";
-import { AutoReportRow } from "./auto-agent-card";
+import { FindingsDrawer, FindingsPill, PILL_GAP, PILL_HEIGHT } from "./findings-pill";
 import { canDriveSession, type DriveableSession } from "./session-runtime";
 import { useOverlapWatch } from "./list-overlap-watch";
 import { groupNodesByProject } from "./session-groups";
 import { observeSessionStatus, SessionStatusState } from "./session-status";
 import { sessionPreview } from "./session-preview";
+import { SubagentGroup } from "./subagent-group";
 import {
   groupHomeAutoFindings,
   selectHomeAutoFindings,
@@ -86,7 +88,7 @@ import {
   type AutoFindingRow,
 } from "./auto-agents";
 import { useComputerPicker } from "./computer-picker";
-import { SideNavButton, SideNavDrawer, SideNavPanel } from "./side-nav";
+import { SideNavButton, SIDE_NAV_RADIUS, SideNavDrawer, sideNavWidth, useSideNavGesture } from "./side-nav";
 import {
   clearSessionUnread,
   fetchSessionsForViewer,
@@ -94,6 +96,7 @@ import {
   type UnreadSessionRow,
 } from "./session-unread";
 import { UserFilterMenu } from "./user-filter-menu";
+import { GlassSurface } from "./glass";
 import {
   sessionMatchesUserFilter,
   useUserFilter,
@@ -109,7 +112,7 @@ import { useOmg } from "./provider";
 import { useToast } from "./toast";
 import { SessionListSkeleton } from "./skeleton";
 import { useTheme } from "./theme";
-import { bindingLabel, relativeTime } from "./format";
+import { cloudComputerLabel, bindingLabel, relativeTime } from "./format";
 import { CLOUD_BINDING_ID } from "./config";
 import {
   isSharedBindingId,
@@ -138,39 +141,25 @@ type ListedSession = OmgSession & UnreadSessionRow;
 /**
  * Which sessions hold a reply this person has not read.
  *
- * A context rather than a prop threaded through SessionFamily and
- * SessionBranch: the tree passes rows down three levels and neither of those
- * components has any other business with read state.
+ * The roster owns read state. Parent rows and expanded subagent cards read
+ * the same set, so collapsing a family cannot hide its unread indicator.
  */
 const SessionUnreadContext = createContext<Set<string>>(new Set());
 
-/**
- * A session and everything it spawned.
- *
- * Children are indented under their parent with a spine and an elbow, the way
- * the web draws the same family. The elbow lands on the CARD's midline rather
- * than the midline of the card plus its own descendants, which is the detail
- * that makes a three-deep tree still read as a tree.
- *
- * A subagent is not archivable from here: it belongs to its parent's run, and
- * swiping one away would leave the parent waiting on something the list says
- * is gone.
- */
+/** A parent row with its subagents behind a compact, expandable stack. */
 function SessionFamily({
   node,
-  depth = 0,
   onOpen,
   onArchive,
   animateEntry = true,
 }: {
   node: SessionNode;
-  depth?: number;
   onOpen: (id: string | null) => void;
   onArchive?: (id: string | null) => void;
   /** See the identical prop on SessionCard/AutoFindingCard for why. */
   animateEntry?: boolean;
 }) {
-  const { colors, space, radius } = useTheme();
+  const { colors, radius } = useTheme();
   const session = node.session;
   // Only the iPad rail has a current row: the list stays on screen beside
   // the open session. On a phone the list is a screen you come BACK to, and
@@ -217,7 +206,7 @@ function SessionFamily({
           unread={unread}
           onPress={() => onOpen(session.sessionId)}
           onArchive={
-            depth === 0 && onArchive
+            onArchive
               ? () => onArchive(session.sessionId)
               : undefined
           }
@@ -226,165 +215,15 @@ function SessionFamily({
       </View>
 
       {node.children.length ? (
-        <View
-          style={{
-            marginLeft: CHILD_INDENT,
-            marginTop: space.sm,
-            gap: space.sm,
-          }}
-        >
-          {node.children.map((child, index) => (
-            <SessionBranch
-              key={sessionStableId(child.session)}
-              node={child}
-              depth={depth + 1}
-              last={index === node.children.length - 1}
-              onOpen={onOpen}
-              animateEntry={animateEntry}
-            />
-          ))}
-        </View>
+        <SubagentGroup
+          nodes={node.children}
+          unreadSessions={unreadSessions}
+          onOpen={onOpen}
+        />
       ) : null}
     </View>
   );
 }
-
-/**
- * One child, plus the two lines that tie it to its parent.
- *
- * THE LINE AIMS AT THE MARK, and both ends come from one set of numbers.
- *
- * This used to MEASURE the branch and join at half its height, because a card
- * was 60pt with one line of text and ~72 with two. Two things were wrong with
- * that. The measured box is the whole family, so a child that had children of
- * its own joined at the midline of the SUBTREE — far below its own row. And
- * horizontally the line stopped at a literal copied from the row's old 16pt
- * margin, so when the row's margin changed the line kept pointing at where the
- * row used to be, arriving at the mark's left edge rather than its centre.
- *
- * The row is a fixed height now, so the join is exact arithmetic on
- * SESSION_ROW rather than a measurement, and it is right on the first frame
- * with no flash.
- *
- * The spine is one continuous run. Drawn per-child at `height: 100%` it stopped
- * at each card's bottom edge and left a gap-sized hole between every sibling —
- * a dashed line down the family. Stretching it `top`-to-`bottom` past the gap
- * closes those; the last child stops it at its own midline so the family ends
- * on the elbow instead of trailing a line into whatever follows.
- */
-function SessionBranch({
-  node,
-  depth,
-  last,
-  onOpen,
-  animateEntry = true,
-}: {
-  node: SessionNode;
-  depth: number;
-  last: boolean;
-  onOpen: (id: string | null) => void;
-  /** See the identical prop on SessionCard/AutoFindingCard for why. */
-  animateEntry?: boolean;
-}) {
-  const { colors, space } = useTheme();
-  // The mark's centre, both axes. Not measured — see the note above.
-  const midline = SESSION_ROW_MARK_Y;
-  const reach = SESSION_ROW_MARK_X - SPINE_INSET;
-
-  return (
-    <View>
-      {/**
-       * The last child gets a ROUNDED ELBOW drawn as one bordered box — a left
-       * border and a bottom border meeting in a corner radius, which is how
-       * the web draws it (`rounded-bl-lg border-b border-l`). Two straight
-       * rects meeting at a right angle is a different drawing: it reads as
-       * plumbing, and it cannot be softened at the join no matter how thin the
-       * lines are.
-       *
-       * A child with siblings below it is a T-junction instead: the spine has
-       * to carry on past the branch, so the corner cannot be part of it.
-       *
-       * The row inside carries its own margin and padding, so the branch
-       * crosses both to reach the mark — sized to the indent alone it stopped
-       * in mid air, short of the row it points at.
-       */}
-      {last ? (
-        <View
-          pointerEvents="none"
-          style={{
-            position: "absolute",
-            left: SPINE_INSET,
-            top: -space.sm,
-            width: reach,
-            height: midline + space.sm,
-            borderLeftWidth: LINE,
-            borderBottomWidth: LINE,
-            borderBottomLeftRadius: ELBOW_RADIUS,
-            borderColor: colors.borderStrong,
-          }}
-        />
-      ) : (
-        <>
-          <View
-            pointerEvents="none"
-            style={{
-              position: "absolute",
-              left: SPINE_INSET,
-              top: -space.sm,
-              bottom: -space.sm,
-              width: LINE,
-              backgroundColor: colors.borderStrong,
-            }}
-          />
-          <View
-            pointerEvents="none"
-            style={{
-              position: "absolute",
-              left: SPINE_INSET,
-              top: midline,
-              width: reach,
-              height: LINE,
-              backgroundColor: colors.borderStrong,
-            }}
-          />
-        </>
-      )}
-      <SessionFamily
-        node={node}
-        depth={depth}
-        onOpen={onOpen}
-        animateEntry={animateEntry}
-      />
-    </View>
-  );
-}
-
-/** Hairlines vanish against black at this length; a point and a half reads. */
-const LINE = 1.5;
-/**
- * The indent a family's children sit at, and the only place it is written.
- * SessionBranch subtracts it to work out where the spine goes, so the two
- * cannot disagree.
- */
-const CHILD_INDENT = 24;
-
-/**
- * How far the spine sits inside the indent — DERIVED, not chosen.
- *
- * The spine descends from the parent it belongs to, so it belongs directly
- * under that parent's mark. This was a standalone 7, tuned when the row
- * carried a 16pt margin: back then the mark's centre sat at 43 and the spine
- * at 31, twelve points to its left. Turning the card into a row moved the
- * mark's centre to 27 and left the spine at 31, so it swapped sides and hung
- * four points to the RIGHT of the thing it hangs from.
- *
- * Subtracting the indent from the mark's own position means the line starts
- * under the mark at any row geometry, and nothing has to be re-tuned when one
- * of those numbers moves again.
- */
-const SPINE_INSET = SESSION_ROW_MARK_X - CHILD_INDENT;
-/** Enough curve to read as a corner at 1.5pt, not enough to become an arc. */
-const ELBOW_RADIUS = 9;
 
 /**
  * A conservative floor for the composer's height, before it has been
@@ -394,6 +233,7 @@ const ELBOW_RADIUS = 9;
  * instead of letting a row sit under the glass.
  */
 const MIN_COMPOSER_HEIGHT = 76;
+
 
 /**
  * The greeting the web Live view carries, in the bar slot the removed
@@ -521,6 +361,7 @@ export function SessionsScreen({
     bindingId,
     bindings,
     sharedComputers,
+    cloud,
     user,
   } = useOmg();
   const computerPicker = useComputerPicker();
@@ -658,7 +499,12 @@ export function SessionsScreen({
    */
   const [connection, setConnection] =
     useState<OmgConnectionStatus>("connecting");
-  const [draft, setDraft] = useState("");
+  const { text: draft, set: setDraft, stage: stageDraft, finish: finishDraft } = usePromptDraft(
+    stashScope(user?.email, bindingId), {
+      context: "new-session",
+      title: "New session", cwd: projectPicker.cwd ?? undefined,
+    },
+  );
   const [starting, setStarting] = useState(false);
   const dictation = useDictation(
     // The whole transport, not a fetch closure: dictation now opens a
@@ -919,7 +765,7 @@ export function SessionsScreen({
     : currentBinding
       ? bindingLabel(currentBinding)
       : bindingId === CLOUD_BINDING_ID
-        ? "Cloud computer"
+        ? cloudComputerLabel(cloud)
         : "No computer";
 
   /** First name only, capitalised — the web greets the same way. */
@@ -1043,8 +889,57 @@ export function SessionsScreen({
    * carrying this is safe on older installs. The list order is the rail's.
    */
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
-  /** The phone's side nav. The iPad's wide layout keeps the same rows on screen. */
+  /**
+   * Open findings live behind a pill, not in the list — see findings-pill.tsx.
+   * One drawer, opened by the pill, closed by its own grabber or a row tap.
+   */
+  const [findingsOpen, setFindingsOpen] = useState(false);
+  const autoGroups = useMemo(() => groupHomeAutoFindings(autoRows), [autoRows]);
+
+  /**
+   * WHAT THE PHONE'S LIST HAS TO CLEAR BELOW THE COMPOSER.
+   *
+   * The pill floats OVER the list, so clearing only the composer leaves the
+   * last card stuck under the pill with no scroll left to free it. Reserve
+   * the pill's own band as well, and only while a pill is actually drawn.
+   */
+  const pillClearance = autoGroups.length ? PILL_HEIGHT + PILL_GAP : 0;
+  const openAutoAgent = useCallback(
+    (agentId: string) => {
+      const href = `/auto/${encodeURIComponent(agentId)}` as Href;
+      if (workspace) navigateWorkspace(href);
+      else router.push(href);
+    },
+    [workspace, navigateWorkspace, router],
+  );
+  /**
+   * The side nav, as a drawer, on every width including the iPad.
+   *
+   * It used to be pinned into the foot of the iPad rail on the reasoning that
+   * a column was already on screen, so sliding a second one over it would be
+   * ceremony. In practice that put the account header, the project chips, the
+   * session list, the findings pill AND six nav rows into one 320pt column,
+   * and the nav footer was allowed up to 40% of the height. Benny's word for
+   * the result was "cramping all on the side", and he is right: the rail was
+   * carrying two jobs and the list, which is the reason the rail exists, lost.
+   *
+   * So the rail is the list again and the nav slides over, the way it already
+   * did on the phone and in a narrow iPad window. One presentation for every
+   * width, and the machine's name and status stay on screen regardless because
+   * `SideNavButton` carries them.
+   */
   const [navOpen, setNavOpen] = useState(false);
+  const navProgress = useSharedValue(0);
+  const drawerWidth = sideNavWidth(width);
+  const navGesture = useSideNavGesture({
+    visible: navOpen, onOpen: () => setNavOpen(true), onClose: () => setNavOpen(false),
+    progress: navProgress, width: drawerWidth, enabled: true,
+  });
+  const navPageStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: drawerWidth * navProgress.value }],
+    borderTopLeftRadius: SIDE_NAV_RADIUS * navProgress.value,
+    borderBottomLeftRadius: SIDE_NAV_RADIUS * navProgress.value,
+  }));
   const [railSheetOpen, setRailSheetOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const orderedSessionIds = useMemo(
@@ -1125,8 +1020,12 @@ export function SessionsScreen({
 
   const startSession = useCallback(
     async (spoken?: string) => {
+      if (attachments.uploading) return;
       const prompt = attachments.compose((spoken ?? draft).trim());
       if (!prompt || !client || starting) return;
+      const stashId = stageDraft(prompt);
+      setDraft("");
+      let acceptedSend = false;
       setStarting(true);
       try {
         const res = await client.transport.request<{ sessionId?: string }>(
@@ -1144,11 +1043,15 @@ export function SessionsScreen({
               // sending a level it does not recognise is a 400 rather than a
               // fallback.
               thinkingLevel: agentPicker.thinking ?? undefined,
+              // Omitted unless chosen: the box picks the login with the most
+              // capacity left when it hears nothing, which beats this app
+              // pinning one at random.
+              claudeAccountId: agentPicker.claudeAccountId,
               cwd: projectPicker.cwd ?? undefined,
             }),
           },
         );
-        setDraft("");
+        acceptedSend = true;
         attachments.clear();
         void Haptics.notificationAsync(
           Haptics.NotificationFeedbackType.Success,
@@ -1158,6 +1061,7 @@ export function SessionsScreen({
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {
+        finishDraft(stashId, acceptedSend ? "sent" : "failed");
         setStarting(false);
       }
     },
@@ -1168,6 +1072,9 @@ export function SessionsScreen({
       agentPicker.model,
       projectPicker.cwd,
       draft,
+      stageDraft,
+      finishDraft,
+      setDraft,
       starting,
       load,
       router,
@@ -1307,21 +1214,8 @@ export function SessionsScreen({
     [client, startingFindingId, setAutoFindingStatus, load, router],
   );
 
-  /**
-   * The bar is the system's, not ours.
-   *
-   * This screen used to draw its own row — mark, machine chip, gear — because
-   * KeyboardAvoidingView measures against its PARENT, so a native header would
-   * have needed its height fed back as `keyboardVerticalOffset`. Moving the
-   * keyboard to `useAnimatedKeyboard` removed that constraint entirely: the
-   * lift is driven by the real keyboard frame and does not care what sits
-   * above it. So the header is now a real UINavigationBar with the system
-   * large title, which collapses on scroll, carries the system material, and
-   * matches every other iOS app for free.
-   *
-   * Set here rather than in _layout.tsx because the right-hand items need this
-   * screen's machine state, and the deps below are what keep them current.
-   */
+  // Keep the native bar empty and stable. The page owns the header controls
+  // so drawer transitions do not also animate UIKit bar-item replacement.
   useLayoutEffect(() => {
     if (workspace) return;
     navigation.setOptions({
@@ -1349,79 +1243,10 @@ export function SessionsScreen({
        */
       headerLargeTitle: false,
       title: "",
-      /**
-       * The greeting sits ON the bar, level with the two buttons — the row the
-       * web puts it in.
-       *
-       * It spent a version as page content because iOS 26 wraps bar items in a
-       * glass capsule and a sentence inside one looked like a control. That is
-       * per-ITEM, not per-bar: `hidesSharedBackground` opts this one out, so
-       * the greeting is plain text on the bar and the buttons opposite keep
-       * their glass.
-       */
-      /**
-       * THE BAR EMPTIES WHILE THE NAV IS OPEN.
-       *
-       * The drawer is an ordinary view inside this screen, not a modal (see
-       * side-nav.tsx for why that matters to the computer menu), and a native
-       * navigation bar draws ABOVE react-native content whatever its z-index
-       * says. Left as they are, the greeting and the filter would float on
-       * top of the open drawer. The bar is transparent and has no title, so
-       * with its two items withdrawn there is nothing left of it to see.
-       */
-      unstable_headerLeftItems: () =>
-        navOpen
-          ? []
-          : [
-              {
-                type: "custom",
-                hidesSharedBackground: true,
-                element: (
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 2 }}>
-                    {/* The nav, then the greeting. The machine switcher moved
-                        inside the nav; this button keeps the machine's online
-                        dot, which is the part of it you read at a glance. */}
-                    <SideNavButton
-                      onPress={() => setNavOpen(true)}
-                      online={currentBinding?.online ?? false}
-                      machineName={machineName}
-                    />
-                    <LiveWelcome
-                      firstName={firstName}
-                      busyCount={flattenNodes(working).length}
-                      connection={connection}
-                      onPress={() => router.push("/notifications")}
-                    />
-                  </View>
-                ),
-              },
-            ],
-      headerRight: () =>
-        navOpen ? null : (
-          <HomeHeaderControls
-            userFilter={userFilter}
-            rosterUsers={rosterUsers}
-            setUserFilter={setUserFilter}
-          />
-        ),
+      unstable_headerLeftItems: () => [],
+      headerRight: () => null,
     });
-  }, [
-    workspace,
-    navigation,
-    colors.bg,
-    router,
-    connection,
-    navOpen,
-    machineName,
-    currentBinding?.online,
-    userFilter,
-    rosterUsers,
-    setUserFilter,
-    firstName,
-    working.length,
-    colors,
-    space,
-  ]);
+  }, [workspace, navigation]);
 
   // The composer floats over the list rather than sitting under it, so the
   // list has to know how tall it is. Measured rather than assumed: it grows
@@ -1481,6 +1306,7 @@ export function SessionsScreen({
       starting={starting}
       projectLabel={projectPicker.label}
       projectOptions={projectPicker.options}
+      projectCwd={projectPicker.cwd ?? null}
       agent={agentPicker.agent}
       agentLabel={agentPicker.label}
       agentOptions={agentPicker.options}
@@ -1488,6 +1314,8 @@ export function SessionsScreen({
       modelOptions={agentPicker.modelOptions}
       thinkingLabel={agentPicker.thinkingLabel}
       thinkingOptions={agentPicker.thinkingOptions}
+      accountOptions={agentPicker.accountOptions}
+      accountLabel={agentPicker.claudeAccountLabel}
       attachments={attachments}
       dictation={dictation}
       usage={usage}
@@ -1498,6 +1326,7 @@ export function SessionsScreen({
   const folderRail = ready && projectPicker.options.length ? (
     <ScrollView
       horizontal
+      onTouchStart={navGesture.blockOpeningGesture}
       showsHorizontalScrollIndicator={false}
       keyboardShouldPersistTaps="handled"
       // flexGrow 0: a ScrollView grows by default, and in the iPad rail's
@@ -1576,7 +1405,28 @@ export function SessionsScreen({
 
   return (
     <SessionUnreadContext.Provider value={unreadSessions}>
-    <Reanimated.View style={{ flex: 1, backgroundColor: colors.bg }}>
+    <View style={{ flex: 1, backgroundColor: colors.bg, overflow: "hidden" }} {...navGesture.panHandlers}>
+    <Reanimated.View style={[{ flex: 1, backgroundColor: colors.bg, overflow: "hidden", borderCurve: "continuous" }, navPageStyle]}>
+      {/* One persistent row moves with the page throughout the drawer transition. */}
+      {!workspace ? (
+        <View pointerEvents="box-none" style={{ position: "absolute", top: insets.top,
+          left: 16, right: 16, height: 44, zIndex: 110,
+          flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 16, flexShrink: 1 }}>
+            <SideNavButton floating onPress={() => setNavOpen((open) => !open)}
+              online={currentBinding?.online ?? false} machineName={machineName} />
+            <LiveWelcome firstName={firstName} busyCount={flattenNodes(working).length}
+              connection={connection}
+              onPress={() => (navOpen ? setNavOpen(false) : router.push("/notifications"))} />
+          </View>
+          <GlassSurface fallbackColor={colors.card} variant="regular"
+            style={{ width: 44, height: 44, borderRadius: 22,
+              alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <HomeHeaderControls userFilter={userFilter} rosterUsers={rosterUsers}
+              setUserFilter={setUserFilter} />
+          </GlassSurface>
+        </View>
+      ) : null}
       {workspace ? (
         <View
           style={{
@@ -1624,18 +1474,15 @@ export function SessionsScreen({
               }}
             >
               <View style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: space.xs }}>
-                {/* Narrow enough that the rail IS the screen (Slide Over, a
-                    split window): the nav has nowhere to live on screen, so
-                    it becomes the phone's drawer and this button opens it.
-                    Wide, the same rows sit in the rail's footer below and
-                    there is nothing to open. */}
-                {!wide ? (
-                  <SideNavButton
-                    onPress={() => setNavOpen(true)}
-                    online={currentBinding?.online ?? false}
-                    machineName={machineName}
-                  />
-                ) : null}
+                {/* Opens the nav at every width. It also carries the machine
+                    name and its online dot, which is what the rail footer used
+                    to show, so nothing goes off screen by moving the rows into
+                    the drawer. */}
+                <SideNavButton
+                  onPress={() => setNavOpen(true)}
+                  online={currentBinding?.online ?? false}
+                  machineName={machineName}
+                />
                 {/* Flat, like the phone's bar item. The glass island it wore
                     read as a control in a row that already has two. */}
                 <View style={{ height: 40, paddingHorizontal: 6, justifyContent: "center" }}>
@@ -1670,11 +1517,13 @@ export function SessionsScreen({
           */
           contentContainerStyle={{
             paddingTop:
-              !workspace && folderRail
-                ? insets.top + 44 + space.sm + 50
+              !workspace
+                ? insets.top + 44 + space.sm + (folderRail ? 50 : 0)
                 : 0,
             paddingBottom:
-              home && !wide ? composerHeight + space.md : insets.bottom + space.md,
+              home && !wide
+                ? composerHeight + space.md + pillClearance
+                : insets.bottom + space.md,
           }}
           keyboardShouldPersistTaps="handled"
           // Scrolling the list puts the keyboard away. Reaching for the field is
@@ -1918,72 +1767,13 @@ export function SessionsScreen({
               ))}
 
               {/**
-               * WHAT NEEDS A DECISION TODAY.
-               *
-               * Auto agents run on a timer and report findings; a finding is
-               * not a session, so it does not belong in Working or Idle, where
-               * a tap opens a transcript. A swipe here still dismisses, same
-               * gesture as archive, different target — see the long note atop
-               * auto-agent-card.tsx for why dismiss gets both that swipe and a
-               * visible button, and why "start session" only gets the button.
-               * Its own section, ADDED rather than substituted: the three above
-               * are untouched.
-               *
-               * ONE ROW PER OPEN FINDING, matching the web's own live view
-               * (the "Auto" section in web/src/App.tsx) rather than a roster of
-               * every scheduled agent — most of which have nothing to say right
-               * now, which is exactly why the web doesn't list them here either
-               * (see selectHomeAutoFindings). Nothing hands off to a "manage
-               * schedules" page: there is nothing left unsaid to hand off.
-               *
-               * BETWEEN Idle AND Recent, and that position is the argument.
-               * Working and Idle are happening now. Recent is finished and
-               * read-only. An open finding is neither — it is unfinished
-               * business that nothing is currently working on, which is exactly
-               * the gap between the two, and putting it below Recent would bury
-               * the only actionable thing on the screen under a log.
-               *
-               * Blue, matching the tint the web gives findings ("N open" in
-               * `text-primary`) and staying clear of the amber/green/grey the
-               * three session sections have already claimed.
-               *
-               * GATED ON `sessionsSettled`, ALONGSIDE `autoRows.length` — see
-               * the long note by that flag's `useEffect` above. Auto's own
-               * data is very often ready before Working/Idle's is (no
-               * readiness gate on its fetch), and rendering it the moment it
-               * arrives is exactly what let it paint, settle, and then get
-               * shoved down when Sessions mounted its own rows late.
+               * NO "AUTO" SECTION EITHER. Open findings used to sit here, one
+               * 80pt row per agent, between Idle and the old Recent slot.
+               * Three findings pushed the running sessions off the fold, so
+               * they moved behind the pill that floats at the foot of the
+               * list (FindingsPill, below) and open in a drawer. Same rows,
+               * same tap target, same "draw nothing when nothing is open".
                */}
-              {sessionsSettled && autoRows.length ? (
-                <>
-                  <SectionHeader
-                    label="Auto"
-                    count={autoRows.length}
-                    dotColor={colors.text}
-                  />
-                  <View style={{ gap: space.xs }}>
-                    {/* One row per agent, as the web's Auto section: the
-                        name, a count when there is more than one, the lead
-                        finding, the worst severity and the newest time.
-                        Tapping opens the agent's report page. */}
-                    {groupHomeAutoFindings(autoRows).map((group) => (
-                      <OverlapRow key={`agent:${group.agentId}`} id={`auto-agent:${group.agentId}`}>
-                        <AutoReportRow
-                          group={group}
-                          animateEntry={animateEntry}
-                          onOpen={() => {
-                            void Haptics.selectionAsync();
-                            const href = `/auto/${encodeURIComponent(group.agentId)}` as Href;
-                            if (workspace) navigateWorkspace(href);
-                            else router.push(href);
-                          }}
-                        />
-                      </OverlapRow>
-                    ))}
-                  </View>
-                </>
-              ) : null}
-
               {/**
                * NO "RECENT" SECTION.
                *
@@ -2000,63 +1790,15 @@ export function SessionsScreen({
             </>
           )}
         </ScrollView>
-        {/* THE NAV, PINNED TO THE FOOT OF THE RAIL, on iPad only.
-            A 320pt column is already on screen, so sliding a second one over
-            it would be ceremony; the rows simply live at the bottom of the one
-            that is there, under a hairline, the way a sidebar footer does.
-
-            IT SCROLLS ITSELF AND IT IS CAPPED. Five rows plus the machine is
-            ~280pt, which is most of the column in a short window (a landscape
-            split, a small stage). The cap keeps the session list the larger
-            half and lets the nav scroll inside whatever it is given, rather
-            than pushing the list off its own rail. */}
-        {wide ? (
-          <View
-            style={{
-              borderTopWidth: 1,
-              borderTopColor: colors.border,
-              maxHeight: Math.max(160, Math.round(windowHeight * 0.4)),
-              paddingHorizontal: space.md - 4,
-              paddingTop: space.xs,
-              paddingBottom: insets.bottom + space.xs,
-            }}
-          >
-            <ScrollView showsVerticalScrollIndicator={false}>
-              <SideNavPanel
-                pathname={pathname}
-                computerOptions={computerPicker.options}
-                machineName={machineName}
-                online={currentBinding?.online ?? false}
-                navigate={(href) => navigateWorkspace(href as Href)}
-                onShortcuts={
-                  keyCommandsAvailable() ? () => setShortcutsOpen(true) : undefined
-                }
-              />
-            </ScrollView>
+        {/* THE PILL ON THE RAIL: in flow at the foot of the column, below the
+            list. It sat above the nav footer before that footer moved into the
+            drawer; it now simply ends the rail. */}
+        {wide && autoGroups.length ? (
+          <View style={{ paddingVertical: space.xs, paddingBottom: insets.bottom + space.xs }}>
+            <FindingsPill groups={autoGroups} onPress={() => setFindingsOpen(true)} />
           </View>
         ) : null}
       </View>
-      {/* The phone's drawer, and the iPad's when its window is too narrow to
-          keep the rail. Mounted last so it paints over the list; it draws
-          nothing at all while closed. */}
-      {!wide ? (
-        <SideNavDrawer
-          visible={navOpen}
-          onClose={() => setNavOpen(false)}
-          pathname={pathname}
-          computerOptions={computerPicker.options}
-          machineName={machineName}
-          online={currentBinding?.online ?? false}
-          onDismiss={() => setNavOpen(false)}
-          navigate={(href) => {
-            if (workspace) navigateWorkspace(href as Href);
-            else router.push(href as Href);
-          }}
-          onShortcuts={
-            keyCommandsAvailable() ? () => setShortcutsOpen(true) : undefined
-          }
-        />
-      ) : null}
       <ShortcutsSheet visible={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
       <CreateSheet
         visible={createOpen}
@@ -2190,34 +1932,78 @@ export function SessionsScreen({
               composerLift,
             ]}
             /**
-             * NEVER SHRINK THE RESERVATION, only grow it.
+             * The reservation TRACKS the composer, with a floor under it.
              *
-             * The composer's own first layout pass can land BEFORE the things
-             * that widen its pill row — `agentPicker`/`projectPicker` options
+             * The composer's first layout pass can land BEFORE the things that
+             * widen its pill row — `agentPicker`/`projectPicker` options
              * resolve from the machine, `usage` rings arrive from a separate
              * fetch (see `usageLoading` above) — so an early `onLayout` can
-             * measure a shorter composer than the one actually on screen a
-             * moment later, once those pills populate. Overwriting
-             * `composerHeight` on every measurement trusts that later growth
-             * re-fires `onLayout` and corrects itself — which it normally does —
-             * but the one time it lands late (a slow response, a re-render that
-             * coalesces with the resize) is the one time the pill row —
-             * "opus / Thinking / All projects" — sits on top of whatever card
-             * has scrolled to the bottom. Taking the max instead means a later,
-             * taller measurement still wins, and an earlier, larger one (e.g. a
-             * longer agent name that later shortens) only costs a little unused
-             * clearance rather than risking a covered row.
+             * measure a shorter composer than the one on screen a moment
+             * later, and the pill row — "opus / Thinking / All projects" —
+             * would sit on top of whatever card had scrolled to the bottom.
+             * `MIN_COMPOSER_HEIGHT + insets.bottom` is what answers that: it
+             * is the same conservative floor the state is seeded with, so an
+             * under-measurement cannot uncover a row.
+             *
+             * This used to keep the MAXIMUM instead, which answered the same
+             * worry and created a worse one — see composerReservation().
              */
             onLayout={(e) => {
-              const measured = e.nativeEvent.layout.height;
-              setComposerHeight((current) => Math.max(current, measured));
+              setComposerHeight(
+                composerReservation(e.nativeEvent.layout.height, MIN_COMPOSER_HEIGHT + insets.bottom),
+              );
             }}
           >
             {composer}
           </Reanimated.View>
+          {/* THE PILL ON THE PHONE: over the fade and just above the glass,
+              carried by the same `composerLift` so it rides the keyboard.
+              `box-none` so the list still scrolls either side of it. */}
+          {autoGroups.length ? (
+            <Reanimated.View
+              pointerEvents="box-none"
+              style={[
+                {
+                  position: "absolute",
+                  left: railWidth,
+                  right: 0,
+                  bottom: composerHeight + PILL_GAP,
+                  alignItems: "center",
+                },
+                composerLift,
+              ]}
+            >
+              <FindingsPill groups={autoGroups} onPress={() => setFindingsOpen(true)} />
+            </Reanimated.View>
+          ) : null}
         </>
       ) : null}
     </Reanimated.View>
+      <FindingsDrawer
+        visible={findingsOpen}
+        onClose={() => setFindingsOpen(false)}
+        groups={autoGroups}
+        onOpenAgent={openAutoAgent}
+      />
+      {/* Mounted last so it paints over the rail and the pane; it draws
+          nothing at all while closed. */}
+      <SideNavDrawer
+          controller={navGesture}
+          progress={navProgress}
+          pathname={pathname}
+          computerOptions={computerPicker.options}
+          machineName={machineName}
+          online={currentBinding?.online ?? false}
+          onDismiss={() => setNavOpen(false)}
+          navigate={(href) => {
+            if (workspace) navigateWorkspace(href as Href);
+            else router.push(href as Href);
+          }}
+          onShortcuts={
+            keyCommandsAvailable() ? () => setShortcutsOpen(true) : undefined
+          }
+        />
+    </View>
     </SessionUnreadContext.Provider>
   );
 }

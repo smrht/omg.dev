@@ -25,6 +25,7 @@ import { AppState, StyleSheet, View } from "react-native";
 import { CLOUD_BINDING_ID, CONTROLPLANE_ORIGIN, STORAGE_KEYS } from "./config";
 import { getAuthToken, getSession, signOut as authSignOut, type SignedInUser } from "./auth";
 import { forgetAllTransports, getHostedTransport } from "./transport";
+import { registerSessionRefResolver } from "./session-ref-link";
 import { unregisterForPushNotifications } from "./push";
 import { useUserActive } from "./idle";
 import { startCloudPresence } from "./presence";
@@ -40,6 +41,7 @@ import {
 
 export type ComputerBinding = {
   id: string;
+  name?: string | null;
   boxId?: string;
   online?: boolean;
   lastSeenAt?: number | null;
@@ -58,7 +60,7 @@ export type ComputerBinding = {
  * direct box URL, only the session proxy (which is what actually authorized
  * them) knows how to reach it.
  */
-export type SharedComputerBinding = ComputerBinding & {
+export type SharedComputerBinding = Omit<ComputerBinding, "name"> & {
   shared: true;
   ownerUserId: string;
   /** The owner's raw binding id, for a unique tail when titles collide. */
@@ -112,6 +114,7 @@ export type Repo = { name: string; cwd: string };
 
 /** Shape returned by control-plane getCloudComputer. */
 export type CloudComputer = {
+  name?: string | null;
   status?: string;
   blockedReason?: string | null;
   instanceId?: string | null;
@@ -164,7 +167,7 @@ type OmgContextValue = {
 
 const Context = createContext<OmgContextValue | null>(null);
 
-async function controlPlane<T>(name: string, body: unknown = {}): Promise<T> {
+export async function controlPlane<T>(name: string, body: unknown = {}): Promise<T> {
   const token = await getAuthToken();
   if (!token) throw new Error("Please sign in again.");
   const response = await fetch(`${CONTROLPLANE_ORIGIN}/api/computer/${name}`, {
@@ -308,6 +311,12 @@ export function OmgProvider({ children }: PropsWithChildren) {
         : null,
     [bindingId],
   );
+  // Markdown links have no client in scope; a tapped "#session" reference
+  // resolves its short id through whichever client is current.
+  useEffect(() => {
+    registerSessionRefResolver(client);
+    return () => registerSessionRefResolver(null);
+  }, [client]);
 
   const probeToken = useRef(0);
   const probe = useCallback(async () => {

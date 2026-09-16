@@ -1,3 +1,4 @@
+import { ChatIdentityContext, useChatIdentity } from "../../src/omg/chat-identity";
 /**
  * A session: the transcript, and the composer.
  *
@@ -45,9 +46,13 @@
  * transcript is what should dominate the screen.
  */
 
+import { ImageGalleryProvider } from "../../src/omg/image-gallery";
+import { ImageGalleryRow, type ImageRect } from "../../src/omg/image-gallery-context";
+import { revealGalleryThumbnail, retryGalleryScroll } from "../../src/omg/image-gallery-scroll";
+import { transcriptImages } from "../../src/omg/image-gallery-data";
 import { useFocusEffect, useLocalSearchParams, useNavigation, useRouter } from "expo-router";
 import * as Haptics from "expo-haptics";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -74,7 +79,6 @@ import Reanimated, {
   useAnimatedStyle,
   useSharedValue,
   withTiming,
-  withDelay,
   cancelAnimation,
   runOnJS,
   Easing,
@@ -82,7 +86,7 @@ import Reanimated, {
 import { Text, TextInput } from "../../src/omg/text";
 import type { OmgConnectionStatus } from "@omg-dev/client";
 import { AgentSetupSheet } from "../../src/omg/agent-setup-sheet";
-import { SEND_DELAY, SEND_DURATION, SendOriginContext } from "../../src/omg/send-motion";
+import { SEND_DURATION, SendOriginContext } from "../../src/omg/send-motion";
 import { remainingReplySpace, sendTargetOffset, type SendOrigin } from "../../src/omg/send-motion-layout";
 import { HeldQueue, type HeldRow } from "../../src/omg/held-queue";
 
@@ -103,6 +107,7 @@ import { useKeyCommand } from "../../src/omg/key-commands";
 import { useAgentPicker } from "../../src/omg/session-options";
 import { COMPOSER_FADE_HEIGHT, EdgeFade, TOP_FADE_HEIGHT } from "../../src/omg/edge-fade";
 import { SkillSuggest } from "../../src/omg/skill-suggest";
+import { SessionMentionSuggest } from "../../src/omg/session-mention-suggest";
 import * as Clipboard from "expo-clipboard";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { OmgSession, OmgSessionPrompt } from "@omg-dev/protocol";
@@ -117,12 +122,14 @@ import {
 } from "../../src/components";
 import { useAttachments } from "../../src/omg/attachments";
 import { BotAvatar } from "../../src/omg/bot-avatar";
+import { WorkingIndicator } from "../../src/omg/working-indicator";
 import { filterBotChatEntries, stripBotLaunchEnvelope } from "../../src/omg/bot-transcript";
 import type { Bot } from "../../src/omg/bots";
 import { useDictation } from "../../src/omg/dictation";
 import { GlassSurface, LIQUID_GLASS } from "../../src/omg/glass";
 import { DropdownMenu, type MenuOption } from "../../src/omg/menu";
 import { agentLabel as agentDisplayName } from "../../src/omg/agent-icons";
+import { usePromptDraft, stashScope } from "../../src/omg/prompt-stash";
 import { useOmg } from "../../src/omg/provider";
 import { useTheme } from "../../src/omg/theme";
 import { useToast } from "../../src/omg/toast";
@@ -232,7 +239,8 @@ export function SessionScreenBody({
   const insets = useSafeAreaInsets();
   const window = useWindowDimensions();
   const { colors, type, space, radius } = useTheme();
-  const { client, agents, user } = useOmg();
+  const { client, agents, user, bindingId } = useOmg();
+  const chatIdentity = useChatIdentity(client, id, user?.email);
 
   const attachments = useAttachments(id ?? null);
   const dictation = useDictation(
@@ -395,7 +403,7 @@ export function SessionScreenBody({
    */
   const socketBusySeen = useRef(false);
   const [prompt, setPrompt] = useState<OmgSessionPrompt | null>(null);
-  const [draft, setDraft] = useState("");
+
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const toast = useToast();
@@ -486,9 +494,17 @@ export function SessionScreenBody({
     title: string;
     agent: string;
     model?: string | null;
+    /** Where the agent runs; the "#" picker ranks sibling sessions first. */
+    cwd?: string | null;
     /** Every id the machine files this session under: its own and the native one. */
     aliases: string[];
   } | null>(null);
+  const draftCache = usePromptDraft(stashScope(user?.email, bindingId), {
+    context: bot ? `bot:${bot.id}` : `session:${id}`,
+    sessionId: id ?? undefined, botId: bot?.id,
+    title: sessionInfo?.title ?? bot?.name ?? "Session",
+  });
+  const { text: draft, set: setDraft, stage: stageDraft, finish: finishDraft } = draftCache;
   /**
    * ASK-USER QUESTIONS RAISED BY THIS SESSION. An agent that calls
    * `omg_input` ends its turn and waits; the question is not in the
@@ -558,7 +574,9 @@ export function SessionScreenBody({
   // A cold start is seconds, and the only thing on screen would otherwise be
   // a message sitting there with nothing answering it.
   useEffect(() => {
-    if (resuming) toast.show("Waking the agent…");
+    if (!resuming) return;
+    const toastId = toast.show("Waking the agent…", { intent: "info" });
+    return () => { if (toastId !== undefined) toast.dismiss(toastId); };
   }, [resuming, toast]);
 
   const listRef = useAnimatedRef<FlatList<TranscriptItem>>();
@@ -575,6 +593,7 @@ export function SessionScreenBody({
   const footerHeightRef = useRef(0);
   const sendGeometry = useRef({ naturalHeight: 0, rowTotal: 0, bottomPadding: 0 });
   const scrollOffset = useRef(0);
+  const galleryRestore = useRef<{ index: number; failed: boolean } | null>(null);
   const sendScroll = useRef(false);
   const sendDuration = useSharedValue(SEND_DURATION);
   const sendTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -598,9 +617,8 @@ export function SessionScreenBody({
       if (!sendStarted.value) {
         sendStarted.value = true;
         runOnJS(dismissSendKeyboard)();
-        sendProgress.value = withDelay(sendDuration.value ? SEND_DELAY : 0,
-          withTiming(1, { duration: sendDuration.value, easing: Easing.out(Easing.cubic) },
-            (finished) => { if (finished) runOnJS(finishSendMotion)(); }));
+        sendProgress.value = withTiming(1, { duration: sendDuration.value, easing: Easing.bezier(0.2, 0.8, 0.2, 1) },
+          (finished) => { if (finished) runOnJS(finishSendMotion)(); });
       }
       scrollListTo(listRef, 0, sendFrom.value + (value.target - sendFrom.value) * value.progress, false);
     },
@@ -670,6 +688,7 @@ export function SessionScreenBody({
         title: found.title?.trim() || found.lastUserText?.trim() || "Session",
         agent: found.agent?.trim() || found.agentLabel?.trim() || "omg",
         model: found.model,
+        cwd: found.cwd ?? null,
         aliases: [found.sessionId, found.nativeSessionId].filter((v): v is string => !!v),
       });
       if (!socketBusySeen.current) setBusy(!!found.busy);
@@ -750,46 +769,51 @@ export function SessionScreenBody({
           break;
         case "message":
           if (!atBottomRef.current) setUnseen(true);
-          setMessages((prev) => {
-            // A held send lives in the queue card, not the transcript. A server
-            // echo confirms delivery, so do not carry its local queued badge
-            // onto a message the agent can already answer.
-            /**
-             * `stripBotLaunchEnvelope` here (not just at render time) is what
-             * keeps a bot's very first message from showing up twice. Its
-             * echo comes back as the whole launch prompt — the plumbing
-             * envelope plus the human's own line, folded together so the
-             * agent's boot and the first message can't race (see serve.ts's
-             * `POST /api/bots/:id/messages`) — which would otherwise never
-             * text-match the plain line the composer sent optimistically. A
-             * pure, namespace-marked no-op for every non-bot message.
-             */
-            const echoText = stripBotLaunchEnvelope(event.message.text ?? "");
-            const confirmed = prev.find((m) => isOptimisticId(m.id) && m.text === echoText);
-            // The echo keeps the optimistic row's key (see Entry.localKey), so
-            // the list sees one row settling rather than one leaving and one
-            // arriving — and it is NOT marked fresh, for the same reason.
-            const incoming: Entry = confirmed
-              ? { ...event.message, queued: undefined, localKey: confirmed.id ?? undefined }
-              : event.message;
-            const withoutOptimistic = prev.filter(
-              (m) => !(isOptimisticId(m.id) && m.text === echoText),
-            );
-            if (incoming.id && !confirmed) liveKeysRef.current.add(incoming.id);
-            if (incoming.id && withoutOptimistic.some((m) => m.id === incoming.id)) {
-              return withoutOptimistic.map((m) => (m.id === incoming.id ? incoming : m));
-            }
-            return [...withoutOptimistic, incoming];
+          // Network rendering yields to urgent input and scroll work.
+          startTransition(() => {
+            setMessages((prev) => {
+              // A held send lives in the queue card, not the transcript. A server
+              // echo confirms delivery, so do not carry its local queued badge
+              // onto a message the agent can already answer.
+              /**
+               * `stripBotLaunchEnvelope` here (not just at render time) is what
+               * keeps a bot's very first message from showing up twice. Its
+               * echo comes back as the whole launch prompt — the plumbing
+               * envelope plus the human's own line, folded together so the
+               * agent's boot and the first message can't race (see serve.ts's
+               * `POST /api/bots/:id/messages`) — which would otherwise never
+               * text-match the plain line the composer sent optimistically. A
+               * pure, namespace-marked no-op for every non-bot message.
+               */
+              const echoText = stripBotLaunchEnvelope(event.message.text ?? "");
+              const confirmed = prev.find((m) => isOptimisticId(m.id) && m.text === echoText);
+              // The echo keeps the optimistic row's key (see Entry.localKey), so
+              // the list sees one row settling rather than one leaving and one
+              // arriving — and it is NOT marked fresh, for the same reason.
+              const incoming: Entry = confirmed
+                ? { ...event.message, queued: undefined, localKey: confirmed.id ?? undefined }
+                : event.message;
+              const withoutOptimistic = prev.filter(
+                (m) => !(isOptimisticId(m.id) && m.text === echoText),
+              );
+              if (incoming.id && !confirmed) liveKeysRef.current.add(incoming.id);
+              if (incoming.id && withoutOptimistic.some((m) => m.id === incoming.id)) {
+                return withoutOptimistic.map((m) => (m.id === incoming.id ? incoming : m));
+              }
+              return [...withoutOptimistic, incoming];
+            });
+            // A completed message supersedes whatever was streaming.
+            setStreamText("");
+            setStreamThought("");
           });
-          // A completed message supersedes whatever was streaming.
-          setStreamText("");
-          setStreamThought("");
           break;
         case "draft":
           // The SDK accumulates the deltas and says which kind of draft this
           // is. Reasoning and reply share the wire channel and are told apart
           // only by that; the raw `ai_part` events are ignored here.
-          (event.draft.kind === "thinking" ? setStreamThought : setStreamText)(event.draft.text);
+          startTransition(() => {
+            (event.draft.kind === "thinking" ? setStreamThought : setStreamText)(event.draft.text);
+          });
           break;
         case "busy":
           socketBusySeen.current = true;
@@ -877,7 +901,7 @@ export function SessionScreenBody({
       scrollOffset.current = e.nativeEvent.contentOffset.y;
       if (e.nativeEvent.layoutMeasurement.height > 0) viewportHeight.current = e.nativeEvent.layoutMeasurement.height;
       // Layout noise, not a reader. See userMovedRef.
-      if (!userMovedRef.current) return;
+      if (!userMovedRef.current || galleryRestore.current) return;
 
       const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
       const bottom = contentOffset.y + layoutMeasurement.height >= contentSize.height - 48;
@@ -1136,6 +1160,8 @@ export function SessionScreenBody({
       if (!trimmed || !client || (!id && !onDeliver)) return;
       void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       for (const q of asks) void answerAsk(q, trimmed, false);
+      const stashId = stageDraft(trimmed);
+      let acceptedSend = false;
       const optimisticId = `local-${++localSeq}`;
       const optimistic: Entry = {
         id: optimisticId,
@@ -1207,6 +1233,7 @@ export function SessionScreenBody({
           if (coldStart) setResuming(true);
           const delivered = await onDeliver(trimmed, mode);
           if (!delivered?.sessionId) throw new Error("the bot did not return a conversation");
+          acceptedSend = true;
           setLive(true);
           setError(null);
           // No `router.replace` — a bot chat's URL names the BOT
@@ -1241,6 +1268,7 @@ export function SessionScreenBody({
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ sessionId: id, prompt: trimmed }),
           });
+          acceptedSend = true;
           setLive(true);
           setError(null);
           if (res.sessionId && res.sessionId !== id) {
@@ -1264,6 +1292,7 @@ export function SessionScreenBody({
           });
           // The send response owns the decision. Do not wait for a second
           // request or match text: two queued messages can have the same words.
+          acceptedSend = true;
           const accepted = result.msg;
           setHeld((prev) => {
             const rest = prev.filter((m) => m.id !== optimisticId && m.id !== accepted?.id);
@@ -1278,6 +1307,7 @@ export function SessionScreenBody({
           }
         } else {
           await client.sendMessage(id, trimmed);
+          acceptedSend = true;
         }
         setError(null);
         // Held sends returned above. Everything reaching this point has been
@@ -1293,9 +1323,9 @@ export function SessionScreenBody({
         sendActive.value = false;
         setHeld((prev) => prev.filter((m) => m.id !== optimisticId));
         setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
-        setDraft((current) => (current ? current : trimmed));
         setError(e instanceof Error ? e.message : String(e));
       } finally {
+        finishDraft(stashId, acceptedSend ? "sent" : "failed");
         if (queueRequest) {
           queueSendPending.current = false;
           void refreshHeld();
@@ -1304,7 +1334,7 @@ export function SessionScreenBody({
         setResuming(false);
       }
     },
-    [client, id, live, busy, router, onDeliver, asks, answerAsk, refreshHeld, reducedMotion, insets.top, insets.bottom, sendFrom, sendProgress, sendActive, sendDuration, sendReady, sendStarted, data, space.lg],
+    [client, id, live, busy, router, onDeliver, asks, answerAsk, stageDraft, finishDraft, setDraft, refreshHeld, reducedMotion, insets.top, insets.bottom, sendFrom, sendProgress, sendActive, sendDuration, sendReady, sendStarted, data, space.lg],
   );
 
   /** Shown for a beat after a long-press send, so the gesture confirms itself. */
@@ -1365,7 +1395,7 @@ export function SessionScreenBody({
         deliver();
       }
     },
-    [attachments, busy, contentReady, draft, sending, submit],
+    [attachments, busy, contentReady, draft, sending, submit, setDraft],
   );
 
   // Kept current for the dictation callback declared above it.
@@ -1539,7 +1569,7 @@ export function SessionScreenBody({
             }),
           });
           if (res?.sourceArchived === false) {
-            toast.show("New session opened, but the old session was not archived.");
+            toast.show("New session opened, but the old session was not archived.", { intent: "warning" });
           }
           if (res?.sessionId) router.replace(`/session/${res.sessionId}`);
         } catch (e) {
@@ -1553,9 +1583,10 @@ export function SessionScreenBody({
   /** The id, for pasting into another agent — what the web's "Copy reference" does. */
   const copyReference = useCallback(() => {
     if (!id) return;
-    void Clipboard.setStringAsync(id);
-    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    toast.show("Session reference copied");
+    void Clipboard.setStringAsync(id).then(
+      () => toast.show("Session reference copied", { intent: "success" }),
+      () => toast.show("Could not copy the session reference.", { intent: "error" }),
+    );
   }, [id, toast]);
 
   /**
@@ -1911,10 +1942,28 @@ export function SessionScreenBody({
   bottomPaddingRef.current = transcriptBottomPadding;
   composerMeasuredRef.current = composerHeight;
 
+  const galleryImages = useMemo(() => transcriptImages(data), [data]);
+  const galleryRows = useRef(data);
+  galleryRows.current = data;
+  const revealGalleryImage = useCallback(async (rowKey: string, measure: () => Promise<ImageRect | null>) => {
+    userMovedRef.current = true;
+    atBottomRef.current = false;
+    setAtBottom(false);
+    await revealGalleryThumbnail({
+      list: listRef, offset: scrollOffset, pending: galleryRestore,
+      findIndex: () => galleryRows.current.findIndex(row => row.key === rowKey),
+      measure,
+    });
+  }, [listRef]);
+
   return (
+    <ImageGalleryProvider images={galleryImages} onReveal={revealGalleryImage}>
     <Reanimated.View style={{ flex: 1 }}>
       <Reanimated.FlatList
         ref={listRef}
+        onScrollToIndexFailed={({ averageItemLength }) => {
+          retryGalleryScroll(listRef.current, galleryRestore.current, averageItemLength);
+        }}
         removeClippedSubviews={false}
         data={data}
         keyExtractor={(item) => item.key}
@@ -2034,13 +2083,19 @@ export function SessionScreenBody({
               style={{ paddingBottom: space.sm, paddingTop: speakerChanged ? 10 : 0 }}
             >
               <SendOriginContext.Provider value={sendTurn?.key === item.key && sendTurn.origin ? { origin: sendTurn.origin, progress: sendProgress, ready: sendReady } : null}>
+              <ImageGalleryRow.Provider value={item.key}>
               <OverlapRow id={`row:${item.key}`}>
+                <ChatIdentityContext.Provider value={chatIdentity}>
                 <TranscriptRow
+                  firstOfRun={!previous || transcriptSpeaker(previous) !== transcriptSpeaker(item)}
+                  lastOfRun={!data[index + 1] || transcriptSpeaker(data[index + 1]) !== transcriptSpeaker(item)}
                   item={item}
                   fresh={contentReady && liveKeysRef.current.has(item.key) && sendTurn?.key !== item.key}
                   bot={bot}
                 />
+                </ChatIdentityContext.Provider>
               </OverlapRow>
+              </ImageGalleryRow.Provider>
               </SendOriginContext.Provider>
             </View>
           );
@@ -2280,6 +2335,13 @@ export function SessionScreenBody({
         <AttachmentStrip items={attachments.items} onRemove={attachments.remove} />
         {/* "/" lists the box's skills above the field, as on the web. */}
         <SkillSuggest value={draft} onChangeText={setDraft} />
+        {/* "#" lists relevant sessions, this folder first, as on the web. */}
+        <SessionMentionSuggest
+          value={draft}
+          onChangeText={setDraft}
+          scope={{ cwd: sessionInfo?.cwd ?? null, sessionId: id }}
+          disabled={!!dictationTail}
+        />
         {/* Held sends, tucked under the field row that follows: the row paints
             over the card's bottom edge, as the web's HeldQueueCards sit under
             its composer bar. */}
@@ -2518,7 +2580,7 @@ export function SessionScreenBody({
                   ? "Press and hold to send it into the current turn"
                   : "Press and hold to queue it behind the current turn"
               }
-              accessibilityState={{ disabled: !canSend }}
+              accessibilityState={{ disabled: !canSend, busy: sending }}
               style={({ pressed }) => ({
                 width: 32,
                 height: 32,
@@ -2532,17 +2594,13 @@ export function SessionScreenBody({
               {/* Always the arrow. A "+" while the agent worked read as
                   "attach", and the hold-to-queue affordance was never in
                   the glyph anyway — it is in the hold. */}
-              {sending ? (
-                <ActivityIndicator size="small" color={colors.bg} />
-              ) : (
-                <Icon
-                  ios="arrow.up"
-                  android="arrow_upward"
-                  size={15}
-                  weight="semibold"
-                  color={colors.bg}
-                />
-              )}
+              <Icon
+                ios="arrow.up"
+                android="arrow_upward"
+                size={15}
+                weight="semibold"
+                color={colors.bg}
+              />
             </Pressable>
           ) : (
             /**
@@ -2622,6 +2680,7 @@ export function SessionScreenBody({
             the session's other verbs already are. */}
       </Reanimated.View>
     </Reanimated.View>
+    </ImageGalleryProvider>
   );
 }
 
@@ -2707,69 +2766,37 @@ function BotWorkingIndicator({ bot }: { bot: Bot }) {
   );
 }
 
-/** The small dark pill with animated dots shown while the agent is thinking. */
 /**
- * THE AGENT IS WORKING — the same chip as a tool badge, because it belongs to
- * the same row of events.
+ * THE AGENT IS WORKING — the footer slot for a turn that has started but has
+ * produced nothing yet.
  *
  * It used to be a solid black-on-white lozenge, the one object in the
  * transcript with an inverted fill: louder than the tool calls it sits among
- * and matching nothing. It is a chip now — card fill, 1pt border, pill radius,
- * 26pt minimum — so a turn in progress reads as the next thing in the run
- * rather than as a notification about it.
+ * and matching nothing. There is no chip now, because the tool rows around it
+ * lost their capsules too, and a bordered "Working" was the last card in a
+ * column of lines.
  *
- * The dots stay. Three of them, breathing in sequence, is the one animation
- * everybody already reads as "something is coming".
+ * The dots and the word ride ONE wave, owned by ./working-indicator, which is
+ * the same indicator the live tool-run row draws. Two hand-rolled copies used
+ * to drift out of phase with each other on screen.
  */
 function ThinkingPill() {
   const { colors, type } = useTheme();
-  const dots = useRef([new Animated.Value(0.3), new Animated.Value(0.3), new Animated.Value(0.3)])
-    .current;
-
-  useEffect(() => {
-    const loops = dots.map((value, i) =>
-      Animated.loop(
-        Animated.sequence([
-          Animated.delay(i * 160),
-          Animated.timing(value, { toValue: 1, duration: 340, useNativeDriver: true }),
-          Animated.timing(value, { toValue: 0.3, duration: 340, useNativeDriver: true }),
-          Animated.delay((dots.length - 1 - i) * 160),
-        ]),
-      ),
-    );
-    loops.forEach((loop) => loop.start());
-    return () => loops.forEach((loop) => loop.stop());
-  }, [dots]);
 
   return (
-    <View
+    <WorkingIndicator
+      text="Working"
+      dotColor={colors.textSecondary}
+      labelColor={colors.textMuted}
+      labelStyle={type.caption}
       style={{
         alignSelf: "flex-start",
-        flexDirection: "row",
-        alignItems: "center",
-        gap: 6,
         marginTop: 16,
         marginLeft: 4,
         minHeight: 26,
-        // No chip: the tool rows around it lost their capsules, so a bordered
-        // "Working" was the last card in a column of lines.
         paddingHorizontal: 4,
         paddingVertical: 5,
       }}
-    >
-      {dots.map((value, i) => (
-        <Animated.View
-          key={i}
-          style={{
-            width: 5,
-            height: 5,
-            borderRadius: 2.5,
-            backgroundColor: colors.textSecondary,
-            opacity: value,
-          }}
-        />
-      ))}
-      <Text style={{ ...type.caption, color: colors.textMuted }}>Working</Text>
-    </View>
+    />
   );
 }

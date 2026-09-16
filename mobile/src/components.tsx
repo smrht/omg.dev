@@ -4,13 +4,14 @@
  * where state comes from.
  */
 
+import { Sheet } from "./omg/sheet";
 import {
   ActivityIndicator,
   Image,
-  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
+  useWindowDimensions,
   View,
   type ViewStyle,
 } from "react-native";
@@ -44,6 +45,7 @@ import type { OmgColors } from "./omg/palette";
 import { DropdownMenu, type MenuOption } from "./omg/menu";
 import { AgentSetupSheet } from "./omg/agent-setup-sheet";
 import { SkillSuggest } from "./omg/skill-suggest";
+import { SessionMentionSuggest } from "./omg/session-mention-suggest";
 import { PressableScale, useListItemMotion } from "./omg/motion";
 import { useSwipeToCommit } from "./omg/swipe-row";
 import { useTheme } from "./omg/theme";
@@ -710,14 +712,14 @@ export const SESSION_ROW = {
   /** Fixed, not minimum — see the note on the row's own height. */
   height: 80,
   /** Horizontal margin between the row and the edge of its column. */
-  inset: 12,
+  inset: 6,
   /** Inset from the row's own edge to the mark. */
-  padding: 10,
+  padding: 16,
   /** The agent mark's box. */
   avatar: 36,
   gap: 12,
   textGap: 4,
-  paddingRight: 8,
+  paddingRight: 14,
 } as const;
 
 /** The mark's centre, measured from the left edge of the row's column. */
@@ -738,9 +740,16 @@ export function SessionCard({
   ended,
   onPress,
   onArchive,
+  onLongPress,
+  accessibilityHint,
   animateEntry = true,
+  compact = false,
+  selected = false,
 }: {
   title: string;
+  /** Smaller filled card for a parent session's expanded subagent list. */
+  compact?: boolean;
+  selected?: boolean;
   /**
    * The preview line. ALWAYS occupies its line even when empty — a row that
    * shrinks when a session has nothing to preview makes the list reflow as
@@ -766,6 +775,8 @@ export function SessionCard({
   onPress: () => void;
   /** Omit to make the row unswipeable — a running session has nothing to archive. */
   onArchive?: () => void;
+  onLongPress?: () => void;
+  accessibilityHint?: string;
   /**
    * Skip BOTH the mount-in slide/fade AND the resettle-on-reflow transition
    * — see the identical flag on `AutoFindingCard` for why. Suppressing only
@@ -827,7 +838,7 @@ export function SessionCard({
               left: 0,
               backgroundColor: colors.danger,
               ...corners,
-              marginHorizontal: SESSION_ROW.inset,
+              marginHorizontal: compact ? 0 : SESSION_ROW.inset,
               alignItems: "flex-end",
               justifyContent: "center",
               paddingRight: space.xl,
@@ -840,35 +851,17 @@ export function SessionCard({
       <Reanimated.View style={cardStyle} {...(swipeable ? panResponder.panHandlers : {})}>
         <PressableScale
           onPress={onPress}
-          scale={0.97}
+          onLongPress={onLongPress}
+          accessibilityHint={accessibilityHint}
+          scale={1}
           style={({ pressed }) => ({
             flexDirection: "row",
             alignItems: "center",
-            gap: SESSION_ROW.gap,
-            /**
-             * NOTHING AT REST. The web's rail row has no fill and no border
-             * until you touch it; the surface was the card's idea, and a list
-             * of filled rectangles is still a stack of cards however tightly
-             * it is packed.
-             */
-            backgroundColor: pressed ? colors.cardPressed : "transparent",
-            /**
-             * A ROW, NOT A CARD.
-             *
-             * This was a bordered card per session, on the argument that a
-             * session is a separate object and the web gave each one an edge.
-             * The web stopped doing that on 2026-08-22 (bc762a0e0): a card
-             * that carries a transcript "cannot be scanned, only read, so the
-             * list was long before it was useful". Its rail row is 60px flat
-             * with no border and no fill, and the phone now matches it — the
-             * comment that used to live here cited a web surface that no
-             * longer exists.
-             *
-             * The corner radius stays only so the pressed tint and the archive
-             * reveal have a shape; at rest there is nothing drawn at all.
-             */
+            gap: compact ? 10 : SESSION_ROW.gap,
+            // Main sessions are flat rows. Expanded subagents use compact cards.
+            backgroundColor: pressed ? colors.cardPressed : selected ? colors.accent : compact ? colors.card : "transparent",
             borderRadius: radius.md,
-            marginHorizontal: SESSION_ROW.inset,
+            marginHorizontal: compact ? 0 : SESSION_ROW.inset,
             /**
              * The mark needs room to be a mark.
              *
@@ -885,33 +878,16 @@ export function SessionCard({
             // big enough not to need the same help.
             paddingRight: SESSION_ROW.paddingRight,
             // Reserve both text lines so activity updates do not resize rows.
-            height: SESSION_ROW.height,
+            height: compact ? 64 : SESSION_ROW.height,
           })}
         >
-          <AgentAvatar agent={agent} size={SESSION_ROW.avatar} busy={busy} plain />
+          <AgentAvatar agent={agent} size={compact ? 28 : SESSION_ROW.avatar} busy={busy} plain />
           <View style={{ flex: 1, gap: SESSION_ROW.textGap, minWidth: 0 }}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0 }}>
-              {/* THE UNREAD DOT LEADS THE TITLE, the way it does on the web
-                  roster and on a bot row: one small filled disc in the tint,
-                  not a count and not a colour change on the text. It is inside
-                  the title row rather than the trailing slot so it cannot
-                  fight the timestamp for the edge. */}
-              {unread ? (
-                <View
-                  accessibilityRole="image"
-                  accessibilityLabel="Unread"
-                  style={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: 4,
-                    backgroundColor: colors.primary,
-                  }}
-                />
-              ) : null}
               <Text
                 numberOfLines={1}
                 style={{
-                  ...type.headline,
+                  ...(compact ? type.subhead : type.headline),
                   flexShrink: 1,
                   // Unread is not communicated by the dot alone: the title
                   // carries full strength weight while it is unread, and
@@ -927,7 +903,7 @@ export function SessionCard({
                 preview keeps its line rather than collapsing the row. */}
             <Text
               numberOfLines={1}
-              style={{ ...type.subhead, color: colors.textMuted }}
+              style={{ ...(compact ? type.caption : type.subhead), color: colors.textMuted }}
             >
               {subtitle ?? ""}
             </Text>
@@ -961,6 +937,16 @@ export function SessionCard({
             {blocked ? (
               <Icon ios="pause.fill" android="pause" size={12} color={colors.warning} />
             ) : null}
+            {/* Keep the trailing slot fixed when a reply is marked read. */}
+            <View style={{ width: 8, height: 8 }}>
+              {unread ? (
+                <View
+                  accessibilityRole="image"
+                  accessibilityLabel="Unread"
+                  style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: colors.primary }}
+                />
+              ) : null}
+            </View>
           </View>
         </PressableScale>
       </Reanimated.View>
@@ -990,6 +976,13 @@ export function SessionCard({
  *
  * Purely presentational: the screen owns the draft, the choices and the submit.
  */
+/** One line of the home composer, matching the field's `lineHeight` below. */
+const COMPOSER_LINE = 24;
+/** Never grows past this. Eight lines is a paragraph of task description. */
+const COMPOSER_MAX_LINES = 8;
+/** Never shrinks below this on a short window, or the cap stops meaning anything. */
+const COMPOSER_MIN_LINES = 3;
+
 export function HomeComposer({
   value,
   onChangeText,
@@ -997,6 +990,7 @@ export function HomeComposer({
   starting,
   projectLabel,
   projectOptions,
+  projectCwd,
   agent,
   agentLabel,
   agentOptions,
@@ -1004,6 +998,8 @@ export function HomeComposer({
   modelOptions,
   thinkingLabel,
   thinkingOptions,
+  accountOptions,
+  accountLabel,
   attachments,
   dictation,
   usage = [],
@@ -1016,6 +1012,8 @@ export function HomeComposer({
   starting?: boolean;
   projectLabel?: string | null;
   projectOptions: MenuOption[];
+  /** The folder the session would start in; the "#" picker ranks it first. */
+  projectCwd?: string | null;
   agent?: string | null;
   agentLabel?: string | null;
   agentOptions: MenuOption[];
@@ -1024,6 +1022,9 @@ export function HomeComposer({
   modelOptions?: MenuOption[];
   thinkingLabel?: string | null;
   thinkingOptions?: MenuOption[];
+  /** The box's Claude logins. Empty unless it holds more than one. */
+  accountOptions?: MenuOption[];
+  accountLabel?: string | null;
   /** The files going with this prompt, and how to pick more. */
   attachments: {
     items: Attachment[];
@@ -1051,7 +1052,9 @@ export function HomeComposer({
   /** The not-yet-settled words, when a live take is running. */
   const dictationTail =
     dictation.live && dictation.state === "recording" ? (dictation.partial ?? "").trim() : "";
-  const canStart = value.trim().length > 0 && !starting;
+  const hasMessage = value.trim().length > 0 || attachments.items.some((item) => item.path);
+  const uploading = attachments.items.some((item) => !item.path && !item.failed);
+  const canStart = hasMessage && !starting && !uploading;
   /** Where the finger went down on the mic, so an upward drag can cancel once. */
   const cancelSwipe = useRef<{ y: number; fired: boolean } | null>(null);
   const hairline = {
@@ -1065,6 +1068,30 @@ export function HomeComposer({
     agentOptions.length || modelOptions?.length || thinkingOptions?.length,
   );
   const [setupOpen, setSetupOpen] = useState(false);
+  const [inputHeight, setInputHeight] = useState(COMPOSER_LINE);
+  const promptText = dictationTail ? `${value}${value ? " " : ""}${dictationTail}` : value;
+  /**
+   * HOW TALL THIS IS ALLOWED TO GROW.
+   *
+   * It was a flat 120pt, which at this field's 24pt line is five lines. The
+   * session composer caps at the same 120 but sets a 21pt line, so it gets
+   * nearly six -- the home field was the shorter of the two while being the
+   * one you draft a whole task in. Benny asked for more room here.
+   *
+   * Expressed in LINES rather than points, so the cap cannot silently change
+   * meaning the next time the type scale moves, and bounded by a share of the
+   * window so a landscape phone or a Slide Over pane does not end up with a
+   * composer taller than the list it floats over. The field scrolls past the
+   * cap; nothing is unreachable.
+   */
+  const { height: windowHeight } = useWindowDimensions();
+  const maxInputHeight = Math.max(
+    COMPOSER_MIN_LINES * COMPOSER_LINE,
+    Math.min(COMPOSER_MAX_LINES * COMPOSER_LINE, Math.round(windowHeight * 0.3)),
+  );
+  const measuredInputHeight = promptText
+    ? Math.max(COMPOSER_LINE, Math.min(maxInputHeight, inputHeight))
+    : COMPOSER_LINE;
   return (
     <View
       /**
@@ -1103,7 +1130,14 @@ export function HomeComposer({
     >
       {/* "/" lists the box's skills above the field, as on the web. */}
       <SkillSuggest value={value} onChangeText={onChangeText} />
+      <SessionMentionSuggest
+        value={value}
+        onChangeText={onChangeText}
+        scope={{ cwd: projectCwd ?? null }}
+        disabled={!!dictationTail}
+      />
       {/* Liquid Glass on iOS 26+, a solid card everywhere else. */}
+      <AttachmentStrip items={attachments.items} onRemove={attachments.remove} />
       <GlassSurface
         variant="regular"
         fallbackColor={colors.card}
@@ -1111,8 +1145,9 @@ export function HomeComposer({
           flexDirection: "row",
           alignItems: "center",
           gap: space.sm,
-          borderRadius: radius.pill,
+          borderRadius: 26,
           minHeight: 52,
+          paddingVertical: 7,
           paddingLeft: space.sm,
           paddingRight: space.sm,
           overflow: "hidden",
@@ -1154,6 +1189,8 @@ export function HomeComposer({
           agentOptions={agentOptions}
           modelOptions={modelOptions}
           thinkingOptions={thinkingOptions}
+          accountOptions={accountOptions}
+          accountLabel={accountLabel}
           usageRing={
             agentUsage ? (
               <UsageRings
@@ -1179,7 +1216,7 @@ export function HomeComposer({
            * settled yet, so appending it here shows the whole sentence with no
            * double-counting.
            */
-          value={dictationTail ? `${value}${value ? " " : ""}${dictationTail}` : value}
+          value={promptText}
           onChangeText={onChangeText}
           /**
            * Not editable mid-take. The field's contents are partly a
@@ -1190,16 +1227,22 @@ export function HomeComposer({
           editable={!dictationTail}
           placeholder="What should we work on?"
           placeholderTextColor={colors.textMuted}
-          returnKeyType="send"
-          onSubmitEditing={() => {
-            if (canStart) onStart();
-          }}
+          multiline
+          submitBehavior="newline"
+          // iOS reports only the visible height when native scrolling is disabled.
+          // Grow to fit first; the field scrolls once its content exceeds 120pt.
+          scrollEnabled
+          onContentSizeChange={event => setInputHeight(Math.ceil(event.nativeEvent.contentSize.height))}
           style={{
             flex: 1,
             minWidth: 0,
+            height: measuredInputHeight,
             color: colors.text,
             ...type.body,
-            paddingVertical: space.sm,
+            fontSize: 18,
+            lineHeight: 24,
+            textAlignVertical: "top",
+            paddingVertical: 0,
           }}
         />
         {/* Attach sits in the field, at the trailing edge, next to the control
@@ -1217,7 +1260,7 @@ export function HomeComposer({
 
         {/* Dictate until there are words to send, then the same spot sends
             them — the rule the session composer follows. */}
-        {!canStart && !starting ? (
+        {!hasMessage && !starting ? (
           <Pressable
             onPress={dictation.toggle}
             /**
@@ -1270,27 +1313,24 @@ export function HomeComposer({
 
         {/* Arrives with the text and leaves with it. Circular and glyph-only:
             the Messages send button, not a labelled call to action. */}
-        {canStart || starting ? (
+        {hasMessage || starting ? (
           <PressableScale
             onPress={onStart}
             disabled={!canStart}
             accessibilityLabel="Start session"
+            accessibilityState={{ disabled: !canStart, busy: !!starting }}
             scale={0.94}
             dim={0.8}
             style={{
               alignItems: "center",
               justifyContent: "center",
-              backgroundColor: colors.text,
+              backgroundColor: !canStart ? colors.border : colors.text,
               borderRadius: radius.pill,
               width: 34,
               height: 34,
             }}
           >
-            {starting ? (
-              <ActivityIndicator size="small" color={colors.bg} />
-            ) : (
-              <Icon ios="arrow.up" android="arrow_upward" size={16} color={colors.bg} />
-            )}
+            <Icon ios="arrow.up" android="arrow_upward" size={16} color={!canStart ? colors.textMuted : colors.bg} />
           </PressableScale>
         ) : null}
       </GlassSurface>
@@ -1722,7 +1762,7 @@ export function VoiceMeter({ level, color }: { level?: number; color: string }) 
  * only exists while something is attached, so the composer keeps its height in
  * the common case.
  *
- * An upload in flight dims its thumbnail and shows a spinner over it; one that
+ * An upload in flight dims its thumbnail and shows byte progress over it; one that
  * failed goes red and stays put, because a row that removes itself is a row
  * you cannot retry.
  */
@@ -1776,7 +1816,15 @@ export function AttachmentStrip({
               />
             </View>
           )}
-          {!item.path && !item.failed ? (
+          {/*
+           * The ring means BYTES ARE MOVING, so it needs an upload to be
+           * happening. `progress` is undefined when there is no upload at all,
+           * which is the ordinary state on onboarding step 03: the file has
+           * been picked but there is no account and no Computer to send it to
+           * yet. A 0% ring there would claim a stalled transfer that was never
+           * started. The dimmed tile above already says "not delivered".
+           */}
+          {!item.path && !item.failed && item.progress !== undefined ? (
             <View
               style={{
                 position: "absolute",
@@ -1788,7 +1836,17 @@ export function AttachmentStrip({
                 justifyContent: "center",
               }}
             >
-              <ActivityIndicator size="small" color={colors.text} />
+              <View
+                accessibilityRole="progressbar"
+                accessibilityLabel={`Uploading ${item.name}`}
+                accessibilityValue={{ min: 0, max: 100, now: item.progress ?? 0 }}
+              >
+                <UsageRing pct={item.progress} size={36} color={colors.text}>
+                  <Text style={{ fontSize: 9, fontWeight: "600", color: colors.text }}>
+                    {item.progress}%
+                  </Text>
+                </UsageRing>
+              </View>
             </View>
           ) : null}
           {/* The remove target is deliberately bigger than the glyph: it sits
@@ -1882,8 +1940,8 @@ export function UsageSheet({
 }) {
   const { colors, type, space, radius } = useTheme();
   return (
-    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
-      <View style={{ flex: 1, backgroundColor: colors.bg }}>
+    <Sheet visible={visible} onClose={onClose}>
+      <View>
         <View
           style={{
             flexDirection: "row",
@@ -1899,7 +1957,7 @@ export function UsageSheet({
           </Pressable>
         </View>
 
-        <ScrollView contentContainerStyle={{ padding: space.lg, gap: space.lg }}>
+        <View style={{ padding: space.lg, gap: space.lg }}>
           {providers.length === 0 ? (
             <Text style={{ ...type.footnote, color: colors.textMuted }}>
               This machine reported no usage.
@@ -1988,9 +2046,9 @@ export function UsageSheet({
               </View>
             );
           })}
-        </ScrollView>
+        </View>
       </View>
-    </Modal>
+    </Sheet>
   );
 }
 

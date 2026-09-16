@@ -2,7 +2,7 @@ import { DarkTheme, DefaultTheme, router, Stack, ThemeProvider } from "expo-rout
 import { IpadWorkspaceLayout } from "../src/omg/sessions-screen";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Platform, StyleSheet, View } from "react-native";
+import { Linking, Platform, StyleSheet, View } from "react-native";
 import Reanimated, {
   Easing,
   useAnimatedStyle,
@@ -13,19 +13,26 @@ import Reanimated, {
 
 import { AiConsentScreen, useAiDataConsent } from "../src/omg/ai-consent";
 import {
-  IntroScreen,
   SetupScreen,
   rosterFromReadiness,
   useIntro,
   useOnboarding,
 } from "../src/omg/onboarding";
-import { BrandMark } from "../src/omg/brand-mark";
-import { LaunchScreen } from "../src/omg/launch";
+import { BrandWordmark } from "../src/omg/brand-mark";
+import { LaunchBackdrop, LaunchScreen } from "../src/omg/launch";
 import { useLucideFont } from "../src/omg/lucide";
 
 import { OmgProvider, useOmg } from "../src/omg/provider";
-import { useNotificationTapRouting } from "../src/omg/push";
+import { AgentVillageWidgetBridge } from "../src/omg/village-widget-bridge";
+import { AgentLiveActivityBridge } from "../src/omg/agent-live-activity";
+import { OnboardingAfterSignIn } from "../src/omg/onboarding-after";
+import { OnboardingFlow } from "../src/omg/onboarding-flow";
+import { shouldMarkOnboarded, shouldShowSetup } from "../src/omg/onboarding-gate";
+import { stashOnboardingChoice } from "../src/omg/onboarding-handoff";
+import { registerForPushNotifications, useNotificationTapRouting } from "../src/omg/push";
+import { useRootOpenRouting } from "../src/omg/root-open";
 import { useOtaUpdates } from "../src/omg/ota";
+import { launch } from "../src/omg/palette";
 import { useTheme } from "../src/omg/theme";
 import { ToastProvider } from "../src/omg/toast";
 
@@ -47,7 +54,8 @@ import { ToastProvider } from "../src/omg/toast";
  * the turn and this is the one thing on screen.
  */
 function Splash() {
-  const { colors, isDark } = useTheme();
+  const { isDark } = useTheme();
+  const launchTokens = isDark ? launch.dark : launch.light;
   const pulse = useSharedValue(0);
 
   useEffect(() => {
@@ -63,13 +71,25 @@ function Splash() {
     transform: [{ scale: 0.97 + pulse.value * 0.03 }],
   }));
 
+  /**
+   * SAME SURFACE AS LaunchScreen, borrowed rather than rebuilt.
+   *
+   * This screen and the launch screen are both "the app opening", and a second
+   * hand-rolled copy of the background is how one of them ends up on last
+   * quarter's colours. The backdrop is LaunchScreen's; only the caption and the
+   * exit are missing, because this one has nothing to say and no hand-off to
+   * play — it simply stops being rendered.
+   */
   return (
-    <View style={[styles.splash, { backgroundColor: colors.bg }]}>
-      <Reanimated.View style={breathe}>
-        <BrandMark size={64} holeColor={colors.bg} />
-      </Reanimated.View>
+    <LaunchBackdrop>
+      <View style={styles.splash}>
+        <Reanimated.View style={breathe}>
+          {/* The same lockup LaunchScreen shows, so the two cannot diverge. */}
+          <BrandWordmark size={40} color={launchTokens.text} holeColor={launchTokens.bg} />
+        </Reanimated.View>
+      </View>
       <StatusBar style={isDark ? "light" : "dark"} />
-    </View>
+    </LaunchBackdrop>
   );
 }
 
@@ -145,12 +165,51 @@ function LaunchGate() {
   );
 }
 
+/**
+ * Open a session, but not before there is a navigator to open it in.
+ *
+ * The onboarding paywall's exits leave the gate AND want to land on the session
+ * the flow created, and those two cannot happen in the same tick: while a gate
+ * is rendering there is no Stack, so a `router.push` from inside one pushes
+ * into a tree that does not exist. Rendering this INSIDE the signed-in tree
+ * means its effect cannot run until the Stack above it is mounted, whatever
+ * else had to clear first -- setup, a slow plan read, anything added later.
+ */
+function OpenWhenMounted({ sessionId, onOpened }: { sessionId: string; onOpened: () => void }) {
+  useEffect(() => {
+    router.push(`/session/${sessionId}`);
+    onOpened();
+  }, [sessionId, onOpened]);
+  return null;
+}
+
 function RootNavigator() {
-  const { authStatus, signOut, user, readiness, bindings, cloud, machinesLoaded, machinesError, probe } =
+  const { authStatus, signOut, user, readiness, bindings, cloud, client, machinesLoaded, machinesError, probe } =
     useOmg();
   const consent = useAiDataConsent(user?.id ?? null);
   const onboarding = useOnboarding(user?.id ?? null);
   const intro = useIntro();
+
+  /*
+   * Steps 04 to 06 are over for this launch. Local, not persisted: the flow is
+   * driven by the one-shot handoff stash, so a relaunch cannot repeat it -- and
+   * a persisted flag would be a second source of truth for the same fact.
+   */
+  const [afterSignInDone, setAfterSignInDone] = useState(false);
+  /**
+   * The new flow actually ran for this person, so setup below still owes them
+   * a visit -- even though buying a plan in step 06 has just made `established`
+   * true. Without this, paying would skip the connect step that Benny put
+   * AFTER the paywall on purpose, and only for the people who paid.
+   */
+  const [newArrival, setNewArrival] = useState(false);
+  const endAfterSignIn = useCallback((ran: boolean) => {
+    if (ran) setNewArrival(true);
+    setAfterSignInDone(true);
+  }, []);
+  /** Where the finished flow wants to land, held until a navigator exists. */
+  const [pendingSession, setPendingSession] = useState<string | null>(null);
+  const clearPendingSession = useCallback(() => setPendingSession(null), []);
 
   /*
    * Who is already established, by Benny's rule: an existing Computer OR a
@@ -177,9 +236,14 @@ function RootNavigator() {
    * is a state update during render, which React either warns about or turns
    * into a re-render loop depending on where it lands.
    */
+  // Both predicates live in onboarding-gate.ts with the rule they encode, and
+  // are pinned by scripts/onboarding-gate.native-check.ts.
+  const gate = { state: onboarding.state, established, newArrival, machinesLoaded };
   useEffect(() => {
-    if (onboarding.state === "needed" && machinesLoaded && established) onboarding.complete();
-  }, [onboarding, machinesLoaded, established]);
+    if (shouldMarkOnboarded({ state: onboarding.state, established, newArrival, machinesLoaded })) {
+      onboarding.complete();
+    }
+  }, [onboarding, machinesLoaded, established, newArrival]);
   /**
    * A tapped notification goes to the thing it is about.
    *
@@ -199,6 +263,11 @@ function RootNavigator() {
    * waiting costs nothing and the tap still lands after the gate clears.
    */
   useNotificationTapRouting(authStatus === "signed-in" && consent.state === "granted");
+  /*
+   * The other half of the destination-less open. Same gate and same reason: a
+   * widget tap on a cold start arrives before there is a Stack to pop within.
+   */
+  useRootOpenRouting(authStatus === "signed-in" && consent.state === "granted");
   /**
    * Land on sign-in the moment ANY path sets authStatus to "signed-out" —
    * an explicit Sign out, a session that expired underneath the app, a
@@ -271,10 +340,37 @@ function RootNavigator() {
      * email field without a flash of the pitch.
      */
     if (intro.state === "needed") {
+      /*
+       * THE REVAMPED FLOW, and the reason it sits exactly here.
+       *
+       * It replaces the three pitch panels, and it inherits their placement
+       * for the reason recorded above: INSIDE the signed-out branch, never as
+       * a gate over it. A gate above this branch is the #237 splash deadlock
+       * -- a condition goes permanently true and sign-in becomes unreachable
+       * with no way out but reinstalling. Nested here, whatever the flow
+       * decides, this branch still owns the signed-out tree.
+       *
+       * Its exits both land on the same sign-in Stack below. `intro.complete`
+       * is what marks the pitch as seen, so a person who reaches sign-in does
+       * not walk the flow again after a failed attempt.
+       */
       return (
         <>
           <StatusBar style={isDark ? "light" : "dark"} />
-          <IntroScreen onSignIn={intro.complete} />
+          <OnboardingFlow
+            /*
+             * The choice is not dropped -- it is stashed for the session that
+             * gets created after sign-in, which is the whole point of asking
+             * before authenticating. `prompt-stash` already survives the
+             * re-mount that signing in causes.
+             */
+            onSignIn={(choice) => {
+              void stashOnboardingChoice(choice);
+              intro.complete();
+            }}
+            onTerms={() => void Linking.openURL("https://omg.dev/terms")}
+            onPrivacy={() => void Linking.openURL("https://omg.dev/privacy")}
+          />
         </>
       );
     }
@@ -324,6 +420,7 @@ function RootNavigator() {
            */}
           <Stack.Protected guard={false}>
             <Stack.Screen name="index" options={{ title: "Sessions" }} />
+            <Stack.Screen name="archive" options={{ title: "Archive", headerLargeTitle: true }} />
             <Stack.Screen name="session/[id]" options={{ title: "Session" }} />
             <Stack.Screen name="computers" />
             <Stack.Screen name="settings" />
@@ -422,7 +519,46 @@ function RootNavigator() {
     return <Splash />;
   }
 
-  if (onboarding.state === "needed" && !established) {
+  /*
+   * Steps 04 to 06 of the revamp: the task they wrote before signing in, now
+   * running, then the real session, then the plan.
+   *
+   * ABOVE the setup gate on purpose. Benny's rule for the new flow is that
+   * connecting agent subscriptions happens after the paywall -- once somebody
+   * has seen their first session work, not before they have seen anything.
+   *
+   * Gated on `needed` so an established account never sees it, and on a local
+   * done flag so leaving it is final for this launch. It cannot hang: the
+   * component gives up on an unreachable Computer after LAUNCH_WAIT_MS and
+   * calls onDone, which drops through to exactly the gates below.
+   */
+  if (onboarding.state === "needed" && !afterSignInDone) {
+    const { agents } = rosterFromReadiness(readiness);
+    return (
+      <>
+        <StatusBar style={isDark ? "light" : "dark"} />
+        <OnboardingAfterSignIn
+          client={client}
+          ready={readiness?.status === "ready"}
+          // No cwd. The box has a default working directory and a first-run
+          // guess from this side would be worse than it.
+          agent={agents.find((a) => a.connected)?.key ?? ""}
+          runningCount={1}
+          onNotify={() => {
+            // Best effort. The permission prompt is the point; a failed token
+            // registration must not hold up the flow, and Settings has the
+            // repair path for it.
+            if (client) void registerForPushNotifications(client.transport, user?.email).catch(() => {});
+          }}
+          onOpenSession={setPendingSession}
+          onDone={endAfterSignIn}
+          splash={<Splash />}
+        />
+      </>
+    );
+  }
+
+  if (shouldShowSetup(gate)) {
     /*
      * The roster is whatever the Computer has told us so far. `waking` is a
      * real answer, not an error, so the screen says "starting up" instead of
@@ -568,6 +704,7 @@ function RootNavigator() {
               does not flash "Sessions" for the frame before that screen's
               layout effect runs. */}
           <Stack.Screen name="index" options={{ title: "" }} />
+          <Stack.Screen name="archive" options={{ title: "Archive", headerLargeTitle: true }} />
           <Stack.Screen name="session/[id]" options={{ title: "Session" }} />
           {/* Switching machines is the frequent action and belongs in the menu
               on the machine chip; pairing and per-machine detail still need a
@@ -623,6 +760,9 @@ function RootNavigator() {
           <Stack.Screen name="auto/[agentId]/[findingId]" options={{ title: "Finding" }} />
         </Stack.Protected>
       </Stack>
+      {pendingSession ? (
+        <OpenWhenMounted sessionId={pendingSession} onOpened={clearPendingSession} />
+      ) : null}
     </>
   );
 }
@@ -633,6 +773,8 @@ export default function Layout() {
   const { isDark } = useTheme();
   return (
     <OmgProvider>
+      <AgentLiveActivityBridge />
+      <AgentVillageWidgetBridge />
       {/**
        * TELL THE NAVIGATOR WHICH APPEARANCE THIS APP IS IN. It cannot see the
        * palette, and its default is LIGHT.

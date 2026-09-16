@@ -281,6 +281,8 @@ import {
   retryQueuedMessage,
 } from "./lib/queue-reconcile";
 import { HeldQueueCards } from "./components/held-queue-cards";
+import { SystemMessageLine } from "./components/system-message-line";
+import { classifyUserTurn } from "./lib/system-message";
 import { canDriveSession } from "./lib/session-runtime";
 import {
   prefetchTranscripts,
@@ -405,6 +407,7 @@ import {
   Bell,
   MoreVertical,
   Moon,
+  PanelLeftClose,
   PanelLeftOpen,
   Paperclip,
   Pause,
@@ -13391,6 +13394,21 @@ function RailStage({
             {/* Hosted replaces the LFG mark with omg.dev and moves project
                 scope to the action row so the lockup always has room. */}
             <div className="flex items-center gap-1.5">
+              {/* Leads the row, which is where the collapsed strip puts its
+                  expand button. The control then stays in one place in both
+                  states instead of moving when you use it. Collapsing used to
+                  be ⌘B only — a shortcut you could find nowhere but the `?`
+                  overlay — while expanding had a button, so the affordance
+                  existed in one direction. */}
+              <button
+                type="button"
+                onClick={() => setRailCollapsed((v) => !v)}
+                aria-label="Collapse sidebar"
+                title="Collapse sidebar (⌘B)"
+                className="flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                <PanelLeftClose className="size-4" />
+              </button>
               <RuntimeStatusBrand>
                 <ProductBrand hosted={hosted} />
               </RuntimeStatusBrand>
@@ -16315,6 +16333,37 @@ function SessionChatBody({
     }
   }
 
+  // A held card's send-now: steer this text only. Do not reuse sendMessage —
+  // that path also clears the composer and would attach whatever is still in
+  // the box.
+  const steerHeldText = useCallback(
+    (text: string) => {
+      const outgoingText = text.trim();
+      if (!sid || !outgoingText) return;
+      void ownedChatStreams
+        .run(sid, () =>
+          sendChatMessage(
+            {
+              text: outgoingText,
+              metadata: {
+                omgMessage: {
+                  role: "user",
+                  kind: "text",
+                  text: outgoingText,
+                  html: escapeHtml(outgoingText).replace(/\n/g, "<br>"),
+                  ts: Date.now(),
+                  pending: true,
+                },
+              },
+            },
+            { body: { mode: "steer" } },
+          ),
+        )
+        .catch((err) => onError(err instanceof Error ? err.message : String(err)));
+    },
+    [onError, ownedChatStreams, sendChatMessage, sid],
+  );
+
   // Re-queue a failed send. The next queue event repaints the bubble as
   // pending; delivery (and any further failure) flows from the server.
   const retryQueued = useCallback(
@@ -16409,6 +16458,7 @@ function SessionChatBody({
               busy={chatBusy}
               onChange={setHeldQueue}
               onError={onError}
+              onSendNow={steerHeldText}
             />
           ) : null}
           {/* The bar itself (not just the textarea) is the field now: attach, type,
@@ -20643,13 +20693,15 @@ function UserBubble({
 function OmgInstructionsBlock({
   instructions,
   version,
+  align = "end",
 }: {
   instructions: string;
   version: string | null;
+  align?: "end" | "center";
 }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="flex max-w-[85%] flex-col items-end">
+    <div className={cn("flex max-w-[85%] flex-col", align === "center" ? "items-center" : "items-end")}>
       <button
         type="button"
         className="flex items-center gap-1.5 rounded-lg border border-border/70 bg-muted/45 px-2.5 py-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
@@ -20865,6 +20917,10 @@ const MessageBubble = memo(function MessageBubble({
     () => (message.role === "user" ? parseOmgPromptEnvelope(message.text || "") : null),
     [message.role, message.text],
   );
+  const systemMessage = useMemo(
+    () => (message.role === "user" ? classifyUserTurn(message.text || "") : null),
+    [message.role, message.text],
+  );
   // Attachments ride along in the user's text as absolute upload paths (the
   // agent needs them); split them back out so the bubble shows the images.
   const userContent = useMemo(
@@ -21040,6 +21096,23 @@ const MessageBubble = memo(function MessageBubble({
     );
   }
 
+  if (systemMessage) {
+    const raw = omgEnvelope?.task ?? message.text ?? "";
+    return (
+      <div
+        className={cn("msg flex w-full min-w-0 flex-col items-center gap-1.5", entering && "lfg-msg-in")}
+      >
+        {omgEnvelope ? (
+          <OmgInstructionsBlock
+            instructions={omgEnvelope.instructions}
+            version={omgEnvelope.version}
+            align="center"
+          />
+        ) : null}
+        <SystemMessageLine system={systemMessage} raw={raw} />
+      </div>
+    );
+  }
   if (otherHumanSender) {
     return (
       <OtherHumanMessageBubble
@@ -21428,6 +21501,10 @@ export type ResumableSession = {
   // Roster email the session was attributed to (mirrors the server type), so
   // historical rows can respect the owner filter like live ones do.
   assignedUser?: string | null;
+  // When the session was archived. The list is ordered on this, so the row
+  // labels it too; null for rows that predate the field, which fall back to
+  // lastActivityAt exactly as the server's ORDER BY does.
+  archivedAt?: number | null;
 };
 
 // Facet counts + total returned alongside the resumable roster so the picker can

@@ -14,7 +14,7 @@
  * state, and its options already have an owner in computer-picker.ts.
  */
 
-export type SideNavPageKey = "live" | "notifications" | "schedules" | "settings";
+export type SideNavPageKey = "live" | "archive" | "notifications" | "schedules" | "settings";
 
 /** Every row key the nav can draw, pages plus the one action. */
 export type SideNavRowKey = SideNavPageKey | "shortcuts";
@@ -31,7 +31,12 @@ export type SideNavRow =
   | { kind: "action"; key: "shortcuts"; label: string };
 
 const PAGES: { key: SideNavPageKey; label: string; href: string }[] = [
-  { key: "live", label: "Live", href: "/" },
+  /**
+   * "Chat", not "Live". The key stays `live` because it is the route's identity
+   * and is matched against elsewhere; only the word a person reads changes.
+   */
+  { key: "live", label: "Chat", href: "/" },
+  { key: "archive", label: "Archive", href: "/archive" },
   { key: "notifications", label: "Notifications", href: "/notifications" },
   { key: "schedules", label: "Schedules", href: "/schedules" },
   { key: "settings", label: "Settings", href: "/settings" },
@@ -40,8 +45,8 @@ const PAGES: { key: SideNavPageKey; label: string; href: string }[] = [
 /**
  * Which page row a path belongs to.
  *
- * Live owns every path that is not one of the other pages — a transcript
- * (`/session/<id>`) opened from the list is still inside Live, and on the iPad
+ * Chat owns every path that is not one of the other pages — a transcript
+ * (`/session/<id>`) opened from the list is still inside Chat, and on the iPad
  * the rail stays on screen beside it, so leaving every row unselected there
  * would say the reader is nowhere.
  */

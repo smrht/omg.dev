@@ -9,24 +9,25 @@
  * switcher hidden behind a glyph that says nothing about any of them.
  *
  * ONE SET OF ROWS, TWO PRESENTATIONS. `SideNavPanel` draws the column.
- * `SideNavDrawer` slides that same panel in over the phone; the iPad rail
- * renders it inline as a footer, because a 320pt column is already on screen
- * and sliding a second one over it would be ceremony for nothing. The rows
- * themselves come from side-nav-items.ts, so neither presentation can drift
- * into carrying a different list.
+ * `SideNavDrawer` slides that same panel in, at every width including the
+ * iPad. It used to be pinned into the foot of the iPad rail instead, on the
+ * reasoning that a 320pt column was already on screen -- but that column was
+ * then carrying the account header, the project chips, the session list and
+ * six nav rows at once, and the list lost. The rows come from
+ * side-nav-items.ts either way, so no presentation can drift into carrying a
+ * different list.
  *
  * NOT A MODAL. The drawer is an absolutely-positioned overlay inside the Live
  * screen, so the computer row's `DropdownMenu` — a real SwiftUI `Menu`, see
  * menu.tsx — hangs off an ordinary view in the ordinary hierarchy, exactly
- * like every other menu in the app. The caller hides its navigation-bar items
- * while the drawer is open (the bar is transparent and draws nothing of its
- * own), so there is nothing left above the overlay to show through it.
+ * like every other menu in the app. The caller keeps its header row in page
+ * content, so the controls move with the page and stay below this overlay.
  *
  * The machine switcher is the picker's, not this file's: `computerOptions`
  * arrives already built by computer-picker.ts, which stays the single owner of
  * what switching a computer means.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BackHandler,
   Keyboard,
@@ -40,25 +41,28 @@ import {
 } from "react-native";
 import Reanimated, {
   Easing,
+  cancelAnimation,
   runOnJS,
   useAnimatedStyle,
-  useSharedValue,
+  type SharedValue,
   withTiming,
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { AndroidSymbol, SFSymbol } from "expo-symbols";
 
 import { Icon, StatusDot } from "../components";
+import { BrandWordmark } from "./brand-mark";
 import { GlassSurface } from "./glass";
 import { DropdownMenu, type MenuOption } from "./menu";
-import { PressableScale } from "./motion";
+import { PressableScale, useReduceMotionEnabled } from "./motion";
 import { sideNavRows, type SideNavRowKey } from "./side-nav-items";
 import { Text } from "./text";
 import { useTheme } from "./theme";
 
 /** The glyph for each row. Kept with the view so the row list stays testable. */
 const GLYPH: Record<SideNavRowKey, { ios: SFSymbol; android: AndroidSymbol }> = {
-  live: { ios: "bolt.fill", android: "bolt" },
+  live: { ios: "bolt", android: "bolt" },
+  archive: { ios: "archivebox", android: "archive" },
   notifications: { ios: "bell", android: "notifications" },
   schedules: { ios: "calendar.badge.clock", android: "schedule" },
   settings: { ios: "gearshape", android: "settings" },
@@ -66,7 +70,9 @@ const GLYPH: Record<SideNavRowKey, { ios: SFSymbol; android: AndroidSymbol }> = 
 };
 
 /** Wide enough for a machine name, never more than most of a phone. */
-export const SIDE_NAV_WIDTH = 288;
+export const SIDE_NAV_WIDTH = 320;
+export const SIDE_NAV_RADIUS = 56;
+export const sideNavWidth = (screenWidth: number) => Math.min(SIDE_NAV_WIDTH, Math.round(screenWidth * 0.72));
 
 export type SideNavProps = {
   /** Where the reader is, so the matching row can draw selected. */
@@ -106,7 +112,7 @@ function NavRow({
   onPress?: () => void;
   accessory?: React.ReactNode;
 }) {
-  const { colors, radius, type, space } = useTheme();
+  const { colors, radius, type } = useTheme();
   return (
     <PressableScale
       onPress={onPress}
@@ -117,9 +123,10 @@ function NavRow({
       style={({ pressed }: { pressed: boolean }) => ({
         flexDirection: "row",
         alignItems: "center",
-        gap: space.sm,
-        height: 44,
-        paddingHorizontal: space.sm,
+        gap: 12,
+        minHeight: 48,
+        paddingVertical: 10,
+        paddingHorizontal: 12,
         borderRadius: radius.md,
         /**
          * SELECTED IS A TINT, NOT A BLOCK. The folder pills next door already
@@ -133,19 +140,16 @@ function NavRow({
             : "transparent",
       })}
     >
-      <Icon
-        ios={ios}
-        android={android}
-        size={18}
-        color={selected ? colors.text : colors.textSecondary}
-      />
+      <View style={{ width: 28, alignItems: "center", justifyContent: "center" }}>
+        <Icon ios={ios} android={android} size={22} weight="regular" color={colors.text} />
+      </View>
       <Text
         numberOfLines={1}
         style={{
-          ...type.callout,
+          ...type.body,
           flex: 1,
           fontWeight: selected ? "600" : "400",
-          color: selected ? colors.text : colors.textSecondary,
+          color: colors.text,
         }}
       >
         {label}
@@ -172,6 +176,11 @@ export function SideNavPanel({
   const rows = sideNavRows({ pathname, keyboardShortcuts: !!onShortcuts });
   return (
     <View style={{ gap: space.xs }}>
+      {onDismiss ? (
+        <View style={{ paddingHorizontal: 12, paddingTop: 8, paddingBottom: 20 }}>
+          <BrandWordmark size={28} holeColor={colors.bg} />
+        </View>
+      ) : null}
       {/* THE MACHINE, FIRST. It is the context every row below it runs in:
           which box these sessions are on. The menu is the picker's own, so
           this row is a trigger and nothing more. */}
@@ -182,19 +191,20 @@ export function SideNavPanel({
           style={{
             flexDirection: "row",
             alignItems: "center",
-            gap: space.sm,
-            height: 48,
-            paddingHorizontal: space.sm,
+            gap: 12,
+            minHeight: 56,
+            paddingVertical: 10,
+            paddingHorizontal: 12,
             borderRadius: radius.md,
-            borderWidth: 1,
-            borderColor: colors.border,
           }}
         >
-          <Icon lucide="monitor" size={18} color={colors.textSecondary} />
+          <View style={{ width: 28, alignItems: "center" }}>
+            <Icon ios="desktopcomputer" android="computer" size={22} color={colors.text} />
+          </View>
           <View style={{ flex: 1, minWidth: 0 }}>
             <Text
-              numberOfLines={1}
-              style={{ ...type.callout, fontWeight: "600", color: colors.text }}
+              numberOfLines={2}
+              style={{ ...type.body, fontWeight: "600", color: colors.text }}
             >
               {machineName}
             </Text>
@@ -203,7 +213,7 @@ export function SideNavPanel({
           <Icon ios="chevron.up.chevron.down" android="unfold_more" size={12} color={colors.textMuted} />
         </View>
       </DropdownMenu>
-      <View style={{ height: 1, backgroundColor: colors.border, marginVertical: space.xs }} />
+      <View style={{ height: 12 }} />
       {rows.map((row) =>
         row.kind === "page" ? (
           <NavRow
@@ -235,27 +245,28 @@ export function SideNavPanel({
 }
 
 /**
- * The phone's drawer: the panel on translucent glass, over a scrim.
+ * The phone's opaque drawer. One progress value also moves the main screen.
  *
  * Drag it left, or tap the page beside it, to put it away. It keeps the same
  * card alive until it is off screen rather than unmounting on `visible`, so
  * the exit animation can actually run.
  */
-export function SideNavDrawer({
-  visible,
-  onClose,
-  ...panel
-}: SideNavProps & { visible: boolean; onClose: () => void }) {
-  const { colors, space } = useTheme();
-  const insets = useSafeAreaInsets();
-  const { width: screenWidth } = useWindowDimensions();
-  const width = Math.min(SIDE_NAV_WIDTH, Math.round(screenWidth * 0.84));
+/** One gesture owner for both the screen edge and the open drawer. */
+export function useSideNavGesture({ visible, onOpen, onClose, progress, enabled, width }: {
+  visible: boolean; onOpen: () => void; onClose: () => void;
+  progress: SharedValue<number>; enabled: boolean; width: number;
+}) {
+  const reducedMotion = useReduceMotionEnabled();
   const [mounted, setMounted] = useState(visible);
   const mountedRef = useRef(mounted);
   mountedRef.current = mounted;
-  const shift = useSharedValue(-width);
-  const scrim = useSharedValue(0);
   const closing = useRef(false);
+  const dragStart = useRef(1);
+  const openingDrag = useRef(false);
+  const openingBlocked = useRef(false);
+  const dragging = useRef(false);
+  const openRef = useRef(onOpen);
+  openRef.current = onOpen;
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
 
@@ -267,16 +278,15 @@ export function SideNavDrawer({
         setMounted(false);
         if (notify) closeRef.current();
       };
-      scrim.value = withTiming(0, { duration: 160 });
-      shift.value = withTiming(
-        -width,
-        { duration: 180, easing: Easing.out(Easing.quad) },
+      progress.value = withTiming(
+        0,
+        { duration: reducedMotion ? 0 : 220, easing: Easing.out(Easing.cubic) },
         (done) => {
           if (done) runOnJS(finish)();
         },
       );
     },
-    [scrim, shift, width],
+    [progress, reducedMotion],
   );
   const dismissRef = useRef(dismiss);
   dismissRef.current = dismiss;
@@ -289,9 +299,7 @@ export function SideNavDrawer({
       Keyboard.dismiss();
       closing.current = false;
       setMounted(true);
-      shift.value = -width;
-      scrim.value = withTiming(1, { duration: 170 });
-      shift.value = withTiming(0, { duration: 190, easing: Easing.out(Easing.cubic) });
+      if (!dragging.current) progress.value = withTiming(1, { duration: reducedMotion ? 0 : 260, easing: Easing.out(Easing.cubic) });
     } else if (mountedRef.current) {
       dismissRef.current(false);
     }
@@ -299,25 +307,51 @@ export function SideNavDrawer({
     // this effect, and listing it would replay the opening animation from
     // -width on the very next render, a visible stutter every time the nav
     // is opened.
-  }, [visible, shift, scrim, width]);
+  }, [visible, progress, reducedMotion]);
 
-  const pan = useRef(
+  const pan = useMemo(() =>
     PanResponder.create({
-      // Only a real leftward drag. Anything vertical belongs to the list of
-      // rows, which scrolls when the nav is taller than the screen.
-      onMoveShouldSetPanResponder: (_event, gesture) =>
-        gesture.dx < -6 && Math.abs(gesture.dx) > Math.abs(gesture.dy),
+      onStartShouldSetPanResponderCapture: () => {
+        // Descendant horizontal scrollers can exclude this touch sequence
+        // in onTouchStart, after this capture phase. Keep the exclusion even
+        // when the native scroll view cancels child touches during a drag.
+        openingBlocked.current = false;
+        return false;
+      },
+      // Capture only horizontal intent. Vertical list drags stay with the list.
+      onMoveShouldSetPanResponderCapture: (_event, gesture) =>
+        enabled && Math.abs(gesture.dx) > 8 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.5 &&
+        (mountedRef.current ? gesture.dx < 0 : !openingBlocked.current && gesture.x0 <= 24 && gesture.dx > 0),
+      onPanResponderGrant: () => {
+        openingDrag.current = !mountedRef.current;
+        dragging.current = true;
+        dragStart.current = progress.value;
+        if (openingDrag.current) {
+          Keyboard.dismiss();
+          setMounted(true);
+          openRef.current();
+        }
+        closing.current = false;
+        cancelAnimation(progress);
+      },
       onPanResponderMove: (_event, gesture) => {
-        shift.value = Math.min(0, gesture.dx);
+        progress.value = Math.max(0, Math.min(1, dragStart.current + gesture.dx / width));
       },
       onPanResponderRelease: (_event, gesture) => {
-        const far = gesture.dx < -width / 3;
-        const flick = gesture.vx < -0.5;
-        if (far || flick) dismissRef.current(true);
-        else shift.value = withTiming(0, { duration: 160 });
+        dragging.current = false;
+        const opens = gesture.vx > 0.5 || (gesture.vx >= -0.5 &&
+          progress.value >= (openingDrag.current ? 1 / 3 : 2 / 3));
+        if (opens) progress.value = withTiming(1, { duration: reducedMotion ? 0 : 160 });
+        else dismissRef.current(true);
+      },
+      onPanResponderTerminate: () => {
+        dragging.current = false;
+        if (openingDrag.current) dismissRef.current(true);
+        else progress.value = withTiming(1, { duration: reducedMotion ? 0 : 160 });
       },
     }),
-  ).current;
+    [progress, width, reducedMotion, enabled],
+  );
 
   // Android's back gesture closes the nav before it leaves the screen. This is
   // a plain overlay rather than a Modal (see the note at the top of this file),
@@ -331,10 +365,28 @@ export function SideNavDrawer({
     return () => subscription.remove();
   }, [mounted]);
 
-  const panelStyle = useAnimatedStyle(() => ({ transform: [{ translateX: shift.value }] }));
-  const scrimStyle = useAnimatedStyle(() => ({ opacity: scrim.value }));
+  return {
+    mounted, dismiss: () => dismissRef.current(true), panHandlers: pan.panHandlers,
+    blockOpeningGesture: () => { openingBlocked.current = true; },
+  };
+}
 
-  if (!mounted) return null;
+export function SideNavDrawer({ progress, controller, ...panel }: SideNavProps & {
+  progress: SharedValue<number>; controller: ReturnType<typeof useSideNavGesture>;
+}) {
+  const { colors, space } = useTheme();
+  const insets = useSafeAreaInsets();
+  const { width: screenWidth } = useWindowDimensions();
+  const width = sideNavWidth(screenWidth);
+  const panelStyle = useAnimatedStyle(() => ({ transform: [{ translateX: (progress.value - 1) * width }] }));
+  const scrimStyle = useAnimatedStyle(() => ({
+    opacity: progress.value,
+    transform: [{ translateX: width * progress.value }],
+    borderTopLeftRadius: SIDE_NAV_RADIUS * progress.value,
+    borderBottomLeftRadius: SIDE_NAV_RADIUS * progress.value,
+  }));
+
+  if (!controller.mounted) return null;
   return (
     <View
       // VoiceOver must not wander into the list behind an open drawer, and
@@ -342,15 +394,17 @@ export function SideNavDrawer({
       accessibilityViewIsModal
       style={[StyleSheet.absoluteFill, { zIndex: 200, elevation: 8 }]}
     >
-      <Reanimated.View style={[StyleSheet.absoluteFill, scrimStyle]}>
+      <Reanimated.View style={[StyleSheet.absoluteFill, {
+        overflow: "hidden", borderCurve: "continuous", borderWidth: StyleSheet.hairlineWidth, borderColor: colors.borderStrong,
+      }, scrimStyle]}>
         <Pressable
           style={StyleSheet.absoluteFill}
           accessibilityRole="button"
           accessibilityLabel="Close navigation"
-          onPress={() => dismissRef.current(true)}
+          onPress={controller.dismiss}
+          {...controller.panHandlers}
         >
-          {/* Understated: enough to push the page back, not enough to black
-              it out. The panel's own translucency does the rest. */}
+          {/* Dim the exposed main screen; the drawer itself is opaque. */}
           <View
             style={[
               StyleSheet.absoluteFill,
@@ -361,27 +415,24 @@ export function SideNavDrawer({
       </Reanimated.View>
       <Reanimated.View
         style={[{ position: "absolute", left: 0, top: 0, bottom: 0, width }, panelStyle]}
-        {...pan.panHandlers}
+        {...controller.panHandlers}
       >
-        <GlassSurface
-          variant="regular"
-          fallbackColor={colors.bg}
+        <View
           style={{
             flex: 1,
-            borderRightWidth: StyleSheet.hairlineWidth,
-            borderRightColor: colors.border,
+            backgroundColor: colors.bg,
           }}
         >
           <ScrollView
             contentContainerStyle={{
               paddingTop: insets.top + space.sm,
               paddingBottom: insets.bottom + space.lg,
-              paddingHorizontal: space.sm,
+              paddingHorizontal: 12,
             }}
           >
-            <SideNavPanel {...panel} />
+            <SideNavPanel {...panel} onDismiss={controller.dismiss} />
           </ScrollView>
-        </GlassSurface>
+        </View>
       </Reanimated.View>
     </View>
   );
@@ -399,24 +450,34 @@ export function SideNavButton({
   onPress,
   online,
   machineName,
+  floating = false,
 }: {
   onPress: () => void;
   online: boolean;
   machineName: string;
+  floating?: boolean;
 }) {
   const { colors } = useTheme();
-  return (
+  const button = (
     <Pressable
       onPress={onPress}
       accessibilityRole="button"
       accessibilityLabel={`Navigation. Computer: ${machineName}`}
       hitSlop={8}
-      style={{ width: 36, height: 36, alignItems: "center", justifyContent: "center" }}
+      style={{ width: floating ? 44 : 36, height: floating ? 44 : 36, alignItems: "center", justifyContent: "center" }}
     >
-      <Icon ios="sidebar.leading" android="menu" size={20} color={colors.textSecondary} />
-      <View style={{ position: "absolute", right: 5, bottom: 6 }}>
+      <View accessible={false} style={{ width: 20, height: 16, justifyContent: "center", gap: 5 }}>
+        <View style={{ width: 20, height: 2, borderRadius: 1, backgroundColor: colors.textSecondary }} />
+        <View style={{ width: 13, height: 2, borderRadius: 1, backgroundColor: colors.textSecondary }} />
+      </View>
+      <View style={{ position: "absolute", right: floating ? 9 : 5, bottom: floating ? 10 : 6 }}>
         <StatusDot busy={online} size={7} />
       </View>
     </Pressable>
   );
+  return floating ? (
+    <GlassSurface fallbackColor={colors.card} variant="regular" style={{ borderRadius: 22 }}>
+      {button}
+    </GlassSurface>
+  ) : button;
 }

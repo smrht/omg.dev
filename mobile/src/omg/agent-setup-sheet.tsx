@@ -12,18 +12,17 @@
  * session-options.ts are unchanged and nothing here decides what is selected.
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ActivityIndicator, Image, Modal, PanResponder, Platform, Pressable, ScrollView, StyleSheet, View } from "react-native";
-import Reanimated, { Easing, FadeIn, FadeInDown, FadeOut, FadeOutDown, LinearTransition, useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
+import { ActivityIndicator, Image, PanResponder, Platform, Pressable, StyleSheet, View } from "react-native";
+import Reanimated, { useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
 import * as Haptics from "expo-haptics";
 import { SymbolView } from "expo-symbols";
 
 import { Sheet } from "./sheet";
+import { SheetScrollView as ScrollView, useSheetExpanded } from "./sheet-scroll";
 import type { MenuOption } from "./menu";
 import { PressableScale } from "./motion";
 import { Text, TextInput } from "./text";
 import { useTheme } from "./theme";
-
-const LAYOUT = LinearTransition.duration(160).easing(Easing.out(Easing.quad));
 
 export function AgentSetupSheet({
   visible,
@@ -31,6 +30,8 @@ export function AgentSetupSheet({
   agentOptions,
   modelOptions,
   thinkingOptions,
+  accountOptions,
+  accountLabel,
   usageRing,
   usageLoading,
   title,
@@ -41,6 +42,14 @@ export function AgentSetupSheet({
   agentOptions: MenuOption[];
   modelOptions?: MenuOption[];
   thinkingOptions?: MenuOption[];
+  /**
+   * The box's Claude logins, when it holds more than one. A box can be signed
+   * in to several at once and only the web could ever see them; without this a
+   * person with two accounts could not tell which one a session would bill to.
+   */
+  accountOptions?: MenuOption[];
+  /** Who the next session will run as, when a login has been chosen. */
+  accountLabel?: string | null;
   /** The current agent's usage ring, drawn by the composer so this file does not import it. */
   usageRing?: ReactNode;
   usageLoading?: boolean;
@@ -54,22 +63,6 @@ export function AgentSetupSheet({
   action?: { label: string; onPress: () => void };
 }) {
   const { colors, type, space, radius } = useTheme();
-  /**
-   * The Modal unmounts on the same frame `visible` drops, which would cut the
-   * exit animation. Keep it mounted one beat longer so the card can slide
-   * away, then let the Modal go.
-   */
-  /**
-   * The agent row starts folded to the current agent. Opening the sheet is
-   * usually about the model or the level, and five marks in a row would
-   * shout over both. Tap the agent to see the others; tap one to choose it,
-   * and the row folds again.
-   */
-  const [agentsOpen, setAgentsOpen] = useState(false);
-  useEffect(() => {
-    if (!visible) setAgentsOpen(false);
-  }, [visible]);
-
   const pick = (option: MenuOption) => {
     if (option.disabled) return;
     void Haptics.selectionAsync();
@@ -79,127 +72,88 @@ export function AgentSetupSheet({
 
   return (
     <Sheet visible={visible} onClose={onClose}>
-              <View style={{ paddingBottom: space.lg, gap: space.lg }}>
-
-                {title ? (
-                  <Text style={{ ...type.headline, color: colors.text, paddingHorizontal: space.lg + 4 }}>
-                    {title}
+      <View style={{ paddingBottom: space.lg, gap: space.lg }}>
+        {title ? <Text style={{ ...type.headline, color: colors.text, paddingHorizontal: space.lg + 4 }}>{title}</Text> : null}
+        {agentOptions.length ? (
+          <View style={{ gap: space.sm }}>
+            <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: space.lg + 4, gap: space.sm }}>
+              <Text style={{ ...type.caption, color: colors.textMuted, flex: 1 }}>Agent</Text>
+              {usageRing ?? (usageLoading ? <ActivityIndicator size="small" color={colors.textMuted} /> : null)}
+            </View>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled"
+              contentContainerStyle={{ paddingHorizontal: space.lg, gap: 14 }}>
+              {agentOptions.map((option, index) => (
+                <AgentTile key={`${option.label}:${index}`} option={option} onPress={() => pick(option)} />
+              ))}
+            </ScrollView>
+          </View>
+        ) : null}
+        {/*
+          * WHICH LOGIN, when the box holds more than one.
+          *
+          * Above Model on purpose: the account decides which plan's limits and
+          * which usage ring apply, so it is a bigger choice than the model and
+          * belongs next to the agent it qualifies. Absent entirely when there
+          * is one account or none, because that is not a choice.
+          */}
+        {accountOptions?.length ? (
+          <View style={{ gap: space.sm }}>
+            <Heading>Account</Heading>
+            <View style={{ marginHorizontal: space.lg, gap: 6 }}>
+              {accountOptions.map((option, index) => (
+                <Pressable
+                  key={`${option.label}:${index}`}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: !!option.selected, disabled: !!option.disabled }}
+                  onPress={() => pick(option)}
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    gap: space.sm,
+                    paddingVertical: 10,
+                    paddingHorizontal: 14,
+                    borderRadius: radius.md,
+                    backgroundColor: option.selected ? colors.card : "transparent",
+                    opacity: option.disabled ? 0.45 : 1,
+                  }}
+                >
+                  <Text
+                    numberOfLines={1}
+                    style={{ ...type.body, color: colors.text, flex: 1 }}
+                  >
+                    {option.label}
                   </Text>
-                ) : null}
-
-                {agentOptions.length && currentAgent ? (
-                  <Reanimated.View layout={LAYOUT} style={{ gap: space.sm }}>
-                    <View
-                      style={{
-                        flexDirection: "row",
-                        alignItems: "center",
-                        paddingHorizontal: space.lg + 4,
-                        gap: space.sm,
-                      }}
-                    >
-                      <Text style={{ ...type.caption, color: colors.textMuted, flex: 1 }}>Agent</Text>
-                      {usageRing ??
-                        (usageLoading ? <ActivityIndicator size="small" color={colors.textMuted} /> : null)}
-                    </View>
-                    {agentsOpen ? (
-                      <Reanimated.View entering={FadeIn.duration(120)} layout={LAYOUT}>
-                        <ScrollView
-                          horizontal
-                          showsHorizontalScrollIndicator={false}
-                          keyboardShouldPersistTaps="handled"
-                          contentContainerStyle={{ paddingHorizontal: space.lg, gap: 14 }}
-                        >
-                          {agentOptions.map((option, index) => (
-                            <AgentTile
-                              key={`${option.label}:${index}`}
-                              option={option}
-                              onPress={() => {
-                                pick(option);
-                                setAgentsOpen(false);
-                              }}
-                            />
-                          ))}
-                        </ScrollView>
-                      </Reanimated.View>
-                    ) : (
-                      <Reanimated.View
-                        entering={FadeIn.duration(120)}
-                        layout={LAYOUT}
-                        style={{ paddingHorizontal: space.lg }}
-                      >
-                        <PressableScale
-                          onPress={() => setAgentsOpen(true)}
-                          scale={0.97}
-                          accessibilityRole="button"
-                          accessibilityLabel={`${currentAgent.label} agent. Change`}
-                          style={{
-                            flexDirection: "row",
-                            alignItems: "center",
-                            gap: space.md,
-                            alignSelf: "flex-start",
-                            paddingRight: space.lg,
-                            paddingLeft: 4,
-                            paddingVertical: 4,
-                            borderRadius: radius.pill,
-                            backgroundColor: colors.card,
-                          }}
-                        >
-                          <View
-                            style={{
-                              width: 36,
-                              height: 36,
-                              borderRadius: 18,
-                              alignItems: "center",
-                              justifyContent: "center",
-                              backgroundColor: colors.bg,
-                            }}
-                          >
-                            <Mark option={currentAgent} size={20} />
-                          </View>
-                          <Text style={{ ...type.subhead, fontWeight: "600", color: colors.text }}>
-                            {currentAgent.label}
-                          </Text>
-                          <SymbolIf name="chevron.down" color={colors.textMuted} />
-                        </PressableScale>
-                      </Reanimated.View>
-                    )}
-                  </Reanimated.View>
-                ) : null}
-
-                {modelOptions?.length ? (
-                  <Reanimated.View layout={LAYOUT} style={{ gap: space.sm }}>
-                    <Heading>Model</Heading>
-                    <ModelList options={modelOptions} onPick={pick} />
-                  </Reanimated.View>
-                ) : null}
-
-                {thinkingOptions?.length ? (
-                  <Reanimated.View layout={LAYOUT} style={{ gap: space.sm }}>
-                    <Heading>Thinking</Heading>
-                    <View style={{ marginHorizontal: space.lg }}>
-                      <Slider options={thinkingOptions} onPick={pick} />
-                    </View>
-                  </Reanimated.View>
-                ) : null}
-
-                {action ? (
-                  <Reanimated.View layout={LAYOUT} style={{ marginHorizontal: space.lg }}>
-                    <PressableScale
-                      onPress={action.onPress}
-                      scale={0.98}
-                      accessibilityRole="button"
-                      style={{
-                        alignItems: "center",
-                        paddingVertical: 12,
-                        borderRadius: radius.lg,
-                        backgroundColor: colors.text,
-                      }}
-                    >
-                      <Text style={{ ...type.headline, color: colors.bg }}>{action.label}</Text>
-                    </PressableScale>
-                  </Reanimated.View>
-                ) : null}
+                  {option.selected ? (
+                    <SymbolView name="checkmark" size={13} weight="semibold" tintColor={colors.text} />
+                  ) : null}
+                </Pressable>
+              ))}
+            </View>
+          </View>
+        ) : null}
+        <View style={{ gap: space.sm }}>
+          <Heading>Model</Heading>
+          <ModelList key={`${visible}:${currentAgent?.label}`} options={modelOptions ?? []} onPick={pick} />
+        </View>
+        <View style={{ gap: space.sm }}>
+          <Heading>Thinking</Heading>
+          <View style={{ marginHorizontal: space.lg }}>
+            {thinkingOptions?.length ? <Slider options={thinkingOptions} onPick={pick} /> : (
+              <View style={{ height: TRACK, justifyContent: "center" }}>
+                <Text style={{ ...type.footnote, color: colors.textMuted }}>No thinking level for this model</Text>
               </View>
+            )}
+          </View>
+        </View>
+        {action ? (
+          <View style={{ marginHorizontal: space.lg }}>
+            <PressableScale onPress={action.onPress} scale={0.98} accessibilityRole="button"
+              style={{ alignItems: "center", paddingVertical: 12, borderRadius: radius.lg, backgroundColor: colors.text }}>
+              <Text style={{ ...type.headline, color: colors.bg }}>{action.label}</Text>
+            </PressableScale>
+          </View>
+        ) : null}
+      </View>
     </Sheet>
   );
 }
@@ -318,38 +272,30 @@ function Row({ option, first, onPress }: { option: MenuOption; first: boolean; o
   );
 }
 
-/** How many models fit before the list gets a search field and a ceiling. */
-const MODEL_SEARCH_FROM = 8;
+/** Stable space keeps controls in place across agents and search results. */
 const MODEL_ROWS_SHOWN = 5.5;
 const MODEL_MAX_RESULTS = 40;
 
-/**
- * The inset model list. Short lists are just rows. A box that reports a
- * whole provider catalogue (forty `xai/grok-*` and `openai/gpt-*` names)
- * gets a search field above the rows, a ceiling of about five rows with
- * the rest behind a scroll, and the current model pinned to the top so
- * it never has to be found.
- */
+/** Search and rows keep their footprint even for short or empty catalogues. */
 function ModelList({ options, onPick }: { options: MenuOption[]; onPick: (option: MenuOption) => void }) {
   const { colors, type, space, radius } = useTheme();
   const [query, setQuery] = useState("");
-  const searchable = options.length >= MODEL_SEARCH_FROM;
+  const expanded = useSheetExpanded();
   const q = query.trim().toLowerCase();
   const shown = useMemo(() => {
     const matched = q ? options.filter((o) => o.label.toLowerCase().includes(q)) : options;
-    if (q || !searchable) return matched.slice(0, MODEL_MAX_RESULTS);
+    if (q || options.length < 8) return matched.slice(0, MODEL_MAX_RESULTS);
     const current = matched.find((o) => o.selected);
     return [...(current ? [current] : []), ...matched.filter((o) => o !== current)].slice(
       0,
       MODEL_MAX_RESULTS,
     );
-  }, [options, q, searchable]);
+  }, [options, q]);
   const hidden = (q ? options.filter((o) => o.label.toLowerCase().includes(q)).length : options.length) - shown.length;
 
   return (
     <View style={{ marginHorizontal: space.lg, gap: space.sm }}>
-      {searchable ? (
-        <View
+      <View
           style={{
             flexDirection: "row",
             alignItems: "center",
@@ -371,20 +317,19 @@ function ModelList({ options, onPick }: { options: MenuOption[]; onPick: (option
             clearButtonMode="while-editing"
             style={{ flex: 1, ...type.callout, color: colors.text, paddingVertical: 0 }}
           />
-        </View>
-      ) : null}
+      </View>
       <View style={{ borderRadius: radius.xl, backgroundColor: colors.card, overflow: "hidden" }}>
         <ScrollView
           bounces={false}
           nestedScrollEnabled
           keyboardShouldPersistTaps="handled"
-          style={searchable ? { maxHeight: 44 * MODEL_ROWS_SHOWN } : undefined}
+          style={{ height: 44 * (expanded ? 10.5 : MODEL_ROWS_SHOWN) }}
         >
           {shown.map((option, index) => (
             <Row key={`${option.label}:${index}`} option={option} first={index === 0} onPress={() => onPick(option)} />
           ))}
           {!shown.length ? (
-            <Text style={{ ...type.footnote, color: colors.textMuted, padding: space.md }}>No model matches</Text>
+            <Text style={{ ...type.footnote, color: colors.textMuted, padding: space.md }}>{options.length ? "No model matches" : "No models available"}</Text>
           ) : null}
           {hidden > 0 ? (
             <Text style={{ ...type.footnote, color: colors.textMuted, padding: space.md }}>

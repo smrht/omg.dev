@@ -13,6 +13,7 @@ import { defaultModelForAgent } from "../agent-catalog.ts";
 import { PATHS } from "../config.ts";
 import { notifyAll, type PushNotification } from "../push.ts";
 import { runInCwd } from "./cwd-lock.ts";
+import { WATCH_AGENT_OPENING } from "./watch-agent-signature.ts";
 import { claudeAccountConfigDir, resolveClaudeAccount } from "../claude-accounts.ts";
 import { claudeAccountEnv } from "../claude-creds.ts";
 import {
@@ -60,7 +61,9 @@ surface nothing. Only surface something concrete, high-leverage, and actionable
 gather your own context. Decide what, if anything, is worth surfacing as a
 notification right now. Be strict: most runs should surface nothing. Only
 surface something concrete, high-leverage, and actionable — never filler.`;
-  return `You are an autonomous watch agent. Carry out the instruction below.
+  // The opening sentence is shared with the resume-cache scan, which uses it to
+  // keep scheduled runs out of the archive picker. See watch-agent-signature.ts.
+  return `${WATCH_AGENT_OPENING} Carry out the instruction below.
 
 ${tools}
 

@@ -10,11 +10,14 @@ import {
   admissionResidentPool,
   agentLaunchMemoryBudget,
   computerAgentAdmissionContext,
+  isScheduleSpawned,
 } from "../agent-admission.ts";
 import { PATHS, appVersion, installInfo, localServeBaseUrl } from "../config.ts";
 import { desktopRuntimeReadyPayload } from "../desktop-parent.ts";
 import { handleServerAccessRequest } from "../server-access.ts";
 import { createCloudAccount } from "../cloud-account.ts";
+import { generateSessionTitle } from "../session-auto-title.ts";
+import { hasHostedOmgAiProxy } from "../omg-provider.ts";
 import { createCloudMachineProxy, type CloudProxySocketData } from "../cloud-machine-proxy.ts";
 import {
   importSessionPins,
@@ -357,6 +360,7 @@ import {
   getManagedSessionCreation,
   listManaged,
   patchManaged,
+  replaceManagedTitle,
   removeManaged,
   type ManagedSession,
 } from "../managed.ts";
@@ -1421,6 +1425,12 @@ function persistManagedResume(session: Session): void {
     fastMode: session.fastMode === true || session.serviceTier === "fast",
     assignedUser: session.assignedUser,
     resumable: true,
+    scheduled: isScheduleSpawned(session.spawnedBy),
+    // This function runs only from closeLiveSession, so reaching it IS the
+    // archive event. Stamping Date.now() rather than reusing mtimeMs is the
+    // point: mtimeMs is the last turn, which can be hours or days older, and
+    // sorting the picker on it buried a session the moment it was archived.
+    archivedAt: Date.now(),
   };
   const rows: Parameters<typeof upsertResumableRows>[0] = [{
     ...base,
@@ -8320,16 +8330,21 @@ a{color:#60a5fa}
         // drops rows removed from that list (roster_hidden). The Resume >
         // Sessions picker omits the param and keeps seeing every row.
         const roster = url.searchParams.get("roster") === "1";
-        const { sessions, total, facets } = await queryResumable({
+        // Headless schedule runs are hidden unless the caller asks for them.
+        // They are the bulk of the catalog on a box with active auto agents
+        // and none of them is a conversation a human wants to resume.
+        const includeScheduled = url.searchParams.get("includeScheduled") === "1";
+        const { sessions, total, facets, scheduledTotal } = await queryResumable({
           limit,
           offset,
           search,
           agent,
           project,
+          includeScheduled,
           excludeIds: liveIds,
           roster,
         });
-        return json({ sessions, total, facets });
+        return json({ sessions, total, facets, scheduledTotal });
       }
 
       // Candidates for the composer's `#` session picker: live fleet plus the
@@ -9142,6 +9157,7 @@ a{color:#60a5fa}
                         ? resolvedModel ?? PI_DEFAULT_MODEL
                         : resolvedModel;
         const requestedTitle = body?.title?.trim().slice(0, 200);
+        const fallbackTitle = body?.prompt?.slice(0, 72);
         const resolvedRole = requestedRole || roleForUser(assignedUser).id;
         sessionRole = resolvedRole !== OWNER_ROLE_ID ? resolvedRole : undefined;
         const claim = addManaged({
@@ -9216,6 +9232,19 @@ a{color:#60a5fa}
         if (r.nativeSessionId) patchManaged(tmuxName, { nativeSessionId: r.nativeSessionId });
         if (CODING_AGENT_ADAPTERS[agent].transport === "command-file")
           patchManaged(tmuxName, { launchState: "running" });
+        // Keep creation fast and resilient. The prompt-derived title appears
+        // immediately, then managed AI may replace it. A human rename wins the
+        // compare-and-swap if it happens before this best-effort call finishes.
+        if (hasHostedOmgAiProxy() && !requestedTitle && fallbackTitle) {
+          void generateSessionTitle(body?.prompt)
+            .then((generatedTitle) => {
+              if (!generatedTitle) return;
+              if (replaceManagedTitle(tmuxName, fallbackTitle, generatedTitle)) {
+                invalidateListSessionsCache();
+              }
+            })
+            .catch(() => {});
+        }
         // The spawn (and the launchState patch above) changed what the session
         // list contains, so retire any snapshot taken during it.
         invalidateListSessionsCache();

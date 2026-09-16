@@ -5,6 +5,105 @@ read off the EAS docs.
 
 ## Current state
 
+### Compact system-message OTA — 2026-09-13
+
+Production group `61552f09-8310-49f2-91bd-c074cb7e81ce` carries
+`a44af5bd6fd61e8c72cd8992d7c63232152dc5dc` for runtime **1.0.6**,
+iOS and Android. Workflow
+[`34745712215`](https://github.com/BennyKok/omg.dev/actions/runs/34745712215)
+succeeded. EAS JSON readback confirms both platforms, runtime and commit.
+It also carries the prompt stash/archive update below. No native surface changed.
+
+Session `7d641a40` supplied the compact system-message classifier and sheet
+header changes. Integration bounds long labels and keeps the pure tests under
+root `test/`. Background tasks, subagent reports, peer/bot messages, question
+answers, fork/continue openers, rotation notices and routines now share one
+expandable system line. Sheet close buttons use a padded 36pt disc.
+
+Verification: 13 focused tests and root/mobile typechecks pass. Full suite:
+3729 pass, one skip, the same 11 baseline failures. The pinned iPhone 17 Pro
+fixture shows all eight families, long-title fit, ordinary bubbles, and sheet
+open/dismiss behavior. Fixture and Metro were removed/stopped; device released.
+The source session also checked real background/answer rows on Pro Max.
+Continue and fork still share the server prompt and read “Started from”.
+Physical-phone activation remains unverified.
+
+
+### Prompt stash and archive OTA — 2026-09-13
+
+Production update `87d5b160-89c8-4580-a0cb-469a5384c05f` carries
+`daefe8f4b6bae9c641d8c1e6a9308cfa1e1ed805` for runtime **1.0.6** only
+(iOS and Android), published by workflow
+[`34745307682`](https://github.com/BennyKok/omg.dev/actions/runs/34745307682).
+`eas update:view --json` confirms both platform records, runtime and commit.
+No native dependency changed from build 46. No new binary was submitted.
+
+Drafts now persist locally per account, Computer and session. The sidebar
+Archive page offers session search/resume and a Stash tab to restore or remove
+saved prompts. Home drafts and sent-prompt recovery use the same store.
+
+Verification: 21 focused tests pass; root and mobile typechecks pass; CI iOS
+export and publish pass. Full suite retains 11 known baseline failures; its
+additional stale client-build prerequisite error passed on a focused rerun.
+A native fixture on pinned iPhone 17 Pro verified distinct drafts, persistence
+across app termination/relaunch, stash restore and resume response navigation.
+The archive response was stubbed. Real signed-in resume and physical-phone
+activation remain unverified. The fixture was not included in the update.
+The device was shut down and the fixture Metro stopped after verification.
+
+
+### 1.0.6 build 46 — uploaded and VALID (2026-09-13)
+
+Candidate `0964f06ea` combines Live Activities, the two-line drawer button,
+launch and skeleton contrast changes, and the native `#` session picker.
+`app.json` targets version/runtime **1.0.6**. The combined changes are landed.
+EAS build `ee3d1381-23ac-42ef-8409-60fff7090145` targets version **1.0.6 (46)**
+from `be397adc50211faf86068807b197ca0f7d52dbb8`, workflow
+[`34743057976`](https://github.com/BennyKok/omg.dev/actions/runs/34743057976),
+which completed successfully at 06:43:53 UTC. The build finished at 06:41:05 UTC.
+EAS submission `3b2e9140-de2f-4f53-a3d8-bb5292f2a304` succeeded at 06:43:49 UTC.
+Apple API readback confirms build `bdff52fa-f166-444d-86cb-c50be01d1ba0`,
+version **1.0.6 (46)**, uploaded at 06:42:15 UTC, processing **VALID**, not expired.
+TestFlight tester availability and physical-phone activation remain unverified.
+No public App Store version or review submission was created.
+
+The first workflow `34742906346` stopped before EAS because the purpose-string
+check found both app and widget plists. The check now selects the app package
+and excludes extension plists. All four generated app purpose strings pass.
+
+Verification:
+
+- 44 focused reference tests pass. Root, mobile, and web typechecks pass.
+- Full suite: 3,699 pass, one skip, and the same 11 existing failures.
+- EAS 22 `build:inspect --stage archive` includes the shared token source at
+  `packages/protocol/src/session-mention-token.ts`; its hash matches the checkout.
+- Live Activities were built and seen in all four presentations from the
+  integrated source `fe6202d21`. The full combined JS candidate loads on that
+  native client with Live Activities intact.
+- Drawer and picker checks use isolated native fixtures. HomeComposer insertion
+  works with the software keyboard and keeps focus. Chat uses a stand-in field;
+  real signed-in chat layout and reference navigation remain unverified.
+- The final picker renderer shows 24pt coding-agent icons, with no folder labels
+  or status dots. Its native HomeComposer and chat fixture captures show the
+  software keyboard; selecting a Home row preserves focus and inserts the token.
+  Candidate rows are stub data. Mobile typecheck passes after this visual change.
+- Light and dark skeleton fixtures use files identical to this candidate.
+  No fixture route, mock data, or Live Activities revert is in the candidate.
+
+Signing is ready. The user's signed-in Chrome on the Linux box allowed the
+App Group `group.dev.omg.computer` (`HGJW6VQ3HX`) to be registered and linked to
+both App IDs. EAS regenerated the app profile `A9UPTK842R` and created the
+extension profile `U455PR9782`, using the existing distribution certificate.
+Apple API readback and decoded profile entitlements confirm both profiles are
+ACTIVE and include `com.apple.security.application-groups` with exactly that
+group. The app profile also contains `aps-environment: production`.
+
+Hosted Live Activity lifecycle and production APNs credentials are deployed at
+vibes `12cc4f7d3` (workflow `34743984699`). Runtime source hashes match; the
+registration table and fleet-status route are verified. APNs responds to a synthetic
+token with `BadDeviceToken`. No phone was registered at verification time, so
+physical-device push delivery remains unverified.
+
 ### Build 44 submission failure (2026-09-12)
 
 Build `fb2a122a-61e0-4037-a85f-281bea17ff2c` (1.0.4, build 44,
@@ -39,8 +138,8 @@ the UI fixes with unchanged 1.0.4 native configuration.
 | ASC API key | `P37PJ5VSHN`, issuer `8e538491-9c7f-4ddf-88ba-4bf3e4f81fa6`, ADMIN |
 | App Store | **LIVE since 2026-09-01T02:04:11Z** — version 1.0, build 37, released manually. `asc-status` now reports `Store: LIVE ... storefront us`. |
 | `asc-status` store probe | Fixed 2026-09-01. It had called the iTunes lookup with no `country`, which answered `resultCount 0` for a live app three times out of three, so it printed `Store: not live` for hours after release and the review-watch bot repeated it. It now asks `us,hk,gb,jp` in order and reports the first storefront that answers. A total lookup failure reads as unknown, not as not-live. **The script lives at `~/.local/bin/asc-status` and is NOT in this repository**, so the fix is on this box only. |
-| Latest iOS upload | **1.0.5 (45)** — built from `7f7e8cc65`, workflow `34672791382`, EAS build `9c9c01ef-78d8-431b-9394-dbb867d32ec7`. Uploaded to App Store Connect 2026-09-12 04:30 UTC, submission `aacc9b07-d681-46b7-9f3e-b6afd50e0f62`. Apple processing / TestFlight availability is not yet confirmed. Includes `expo-document-picker` for Choose File, the keyboard shortcut modules introduced in build 43, and the queue/sheet fixes. Build 43 was the last upload previously confirmed VALID. Build 44 was rejected because the 1.0.4 train closed. The native Files sheet passed the simulator check below; physical-phone activation remains unverified. |
-| EAS Update | live, branch `production`, runtimeVersion policy `appVersion`. Two runtimes are in the field: `1.0.5` last group `9d1bedc3-5acc-498d-9921-264bfc20c34d` (2026-09-12, `92f6da4ea`, main); `1.0.4` last group `aaddb400-d4c6-41c9-ad21-95fff1663115` (2026-09-12, `1b32cb06e`, main with only app version held at 1.0.4). Both include full-screen project creation, the translucent chat navigation background, live fleet status on Home, the single-line chat title, send morph and reply space, roomier Live rows, separate chat header, Latest scroll fix, inline queue confirmation, immediate queue placement, and combined work-row fixes. Publish BOTH for every phone-visible change until 1.0.4 is retired; check the installed version before attributing a missing change. |
+| Latest iOS upload | **1.0.6 (46)** — built from `be397adc5`, workflow `34743057976`, EAS build `ee3d1381-23ac-42ef-8409-60fff7090145`. Uploaded to App Store Connect 2026-09-13 06:42:15 UTC; submission `3b2e9140-de2f-4f53-a3d8-bb5292f2a304` succeeded. Apple processing is **VALID**. Includes Live Activities, the two-line drawer button, launch/skeleton contrast, and the native session picker with coding-agent icons. TestFlight tester availability and phone activation remain unverified. |
+| EAS Update | live, branch `production`, runtimeVersion policy `appVersion`. Two runtimes are in the field: `1.0.5` last group `b255261f-3722-452d-b37a-094940917478` (2026-09-12, `672a61e94`, main); `1.0.4` last group `e693b442-1bd5-415b-93bf-d1b46ebeaff2` (2026-09-12, `7bae59c86`, main with only app version held at 1.0.4). Both include the stable drawer header and avatar during swipes, session rows without press shrinking, the larger header avatar, edge-swipe opening, the native glass navigation button, the opaque push sidebar, wider row highlights, trailing unread dots, compact subagent stacks and expandable cards, Live side navigation, unread badges, smaller agent icons, selected-model chat subtitles, neutral reconnect text, and all prior project, navigation, fleet status, send morph, scroll and queue UI fixes. The server queue handoff fix is deployed separately at `284abba25`. Publish BOTH for every phone-visible change until 1.0.4 is retired; check the installed version before attributing a missing change. |
 
 ## Publish log (`production` channel)
 
@@ -107,6 +206,134 @@ command didn't error."
 | 2026-09-12 | `37876cb1-cc0f-490b-80a3-c92d1fecf8f4` | `370bfb29b` (`main`, run `34676092226`) | The same code as `bb49b0fc`, for runtime 1.0.5. Benny's phone is on native build 45 (1.0.5, cut from `7f7e8cc65`), which predates every phone fix from today and cannot receive a 1.0.4 group; his screenshot after `bb49b0fc` still showed eight raw `shell` rows. The machine folds this session for any capable socket (37 messages, 0 raw) and sends raw only to a socket that declares nothing, which build 45 does on the hosted path. | Published from `main` with no override; `app.json` is 1.0.5 there. Native surface vs build 45 (`7f7e8cc65`): only `mobile/package.json` moved (pure-JS `@omg-dev/*` bumps). Coordinated with session 542a7801, which verifies the EAS source independently. Not checked on a device before publishing. Read back with `eas update:view --json`: ios+android, runtime 1.0.5, `gitCommitHash 370bfb29b`. |
 | 2026-09-12 | `4dbfae7e-87ee-4afe-a4f4-4564495bf6b0` | `1f7658e53` | Queue refresh continues when empty while the screen is active and refreshes on foreground return. Delivered messages no longer inherit a local Queued badge. Queue/composer height changes no longer run competing layout animations. Sheets animate their existing dragged card off screen before unmounting and blur the composer before opening. | Published for runtime `1.0.4` from `release/ios-1.0.4-e7a545`; native configuration, dependencies, plugins and modules are unchanged from `cd3d7186b`. Workflow `34672790564` passed typecheck and Metro export. Group, runtime and commit independently verified with `eas update:view`. iPhone simulator checks covered the queue card and sheet dismissal. The UI fixes also landed on main in `7f7e8cc65` for build 45. Superseded by `ee60972a`: this first compatibility branch omitted the concurrent server-work-row client update. |
 | 2026-09-12 | `ee60972a-fc3a-4b93-b1cb-cbed81cfeae5` | `1779f4f79` | Queue and sheet fixes plus the concurrent server-work-row client update. | The maintenance branch was merged with current main (`b9cc97262`); its only mobile diff from main is app version 1.0.4 instead of 1.0.5. Native configuration and dependencies match the previously cleared 1.0.4 runtime. Workflow `34673038633` passed mobile typecheck and Metro export. `eas update:view` independently confirmed iOS and Android runtime 1.0.4, group and commit. |
+
+### Drawer header stays aligned during swipes (2026-09-12)
+
+The moving page now carries both header controls. The avatar remains visible until it moves beyond the screen edge. The greeting uses the same 16-point gap as the closed native header, removing its horizontal jump. Native glass stays on the closed navigation controls; the moving controls use matching glass surfaces.
+
+- Runtime 1.0.5: group `b255261f-3722-452d-b37a-094940917478`, workflow `34710167395`, source `672a61e94c17b7c06a3300867379462dc5ecda0c`.
+- Runtime 1.0.4: group `e693b442-1bd5-415b-93bf-d1b46ebeaff2`, workflow `34710181981`, source `7bae59c86fd07f9bb799ac3ce3c73cf1261bb9bc`. Fresh branch `ota/drawer-header-1.0.4` differs only in the app version.
+- Both groups were read back with EAS: production, iOS and Android, expected runtime and source commit.
+- Root and mobile type checks passed. Both workflows passed type check, Metro export and the native compatibility gate.
+- Native verification on pinned iPhone 17 Pro: partial drag with the avatar still visible, cancelled drag returning to the original positions, full opening and swipe closing. Recording: `/tmp/e7a545-header-swipe.mp4`; held and cancelled screenshots: `/tmp/e7a545-header-held.png`, `/tmp/e7a545-header-cancel.png`.
+- Physical-phone activation remains unverified.
+
+### Session rows keep their size on press (2026-09-12)
+
+`SessionCard` now uses scale 1. The pressed background remains, and tapping still opens the session. This applies to full and compact child rows.
+
+- Runtime 1.0.5: group `91866af5-1f7c-4e20-9699-5301440a2bc7`, workflow `34709461555`, source `e7b5f8ab6a25f6b3218d1710c4827337ff216d76`.
+- Runtime 1.0.4: group `4f96a53b-d15d-4236-a071-d909c12f4b5a`, workflow `34709463764`, source `6c558246501c6feb4a29dd5892c089666e95e1f0`. Fresh branch `ota/row-press-1.0.4` differs only in the app version.
+- Both groups were read back with EAS: production, iOS and Android, expected runtime and source commit.
+- Root and mobile type checks passed. On the pinned iPhone 17 Pro simulator, the row kept its size while held, showed its pressed background, and opened the session on release. Evidence: `/tmp/e7a545-row-rest-verified.png`, `/tmp/e7a545-row-held-verified.png`, `/tmp/e7a545-row-open-verified.png`.
+- Physical-phone activation remains unverified.
+
+### Header avatar fills its button (2026-09-12)
+
+The selected user's avatar is 36pt instead of 24pt inside the same 36pt trigger. The native bar supplies the outer glass inset. The photograph fills most of the button while its tap area stays the same.
+
+| Runtime | Group | Source | Workflow |
+|---|---|---|---|
+| 1.0.5 | `4ffa3787-076d-4487-9b4b-39f9e37135c3` | `c3522afce2656389a7e5e571b1d1d706b41dfcd0` | `34708821616` |
+| 1.0.4 | `8122056f-78e6-4384-8f0d-fc591cfaa227` | `386d0131031d268f0e916793d16d0563a7d2fca3` | `34708825225` |
+
+Root and mobile typechecks passed. The selected profile photo and opening its user menu were checked on the pinned iPhone 17 Pro. Both production workflows passed. EAS readback confirmed both platforms, runtime, production branch and exact commit for each group. The fresh 1.0.4 branch changes only the app version. No native dependency changed. Physical-phone activation remains unverified.
+
+### Edge swipe and native glass navigation button (2026-09-12)
+
+A horizontal swipe from the first 24pt of the left edge opens the phone drawer. The page follows the finger through the same shared progress used for closing. A short swipe cancels; distance or a quick flick settles it open. Vertical movement stays with the session list. The wide iPad rail does not capture this gesture.
+
+The drawer button is a separate native navigation-bar item with its glass background enabled. The greeting remains a separate item without a background. The moving page uses the existing GlassSurface for the equivalent button while the drawer is open. No native module or dependency changed.
+
+| Runtime | Group | Source | Workflow |
+|---|---|---|---|
+| 1.0.5 | `50720cea-0ab0-41bb-939e-af985f8e87f3` | `555ad7758b5333e0049a3bb6cc9a175a289e38b6` | `34708125650` |
+| 1.0.4 | `c6e87bcc-aaac-4ad9-be29-c3b4ddcac303` | `e0c3018ef17efb9e821a589ac83ba43d880e8f3d` | `34708128229` |
+
+Root and mobile typechecks passed. On the pinned iPhone 17 Pro, a native recording verified edge opening, swipe closing, short-swipe cancellation, vertical list scrolling and the glass button. Both production workflows passed their typecheck, Metro export and native compatibility checks. EAS readback confirmed the exact commits, runtimes, production branch and both platforms. The 1.0.4 branch differs from the verified source only in app version. Physical-phone activation remains unverified.
+
+### Opaque push sidebar and session row spacing (2026-09-12)
+
+The phone sidebar is opaque. Opening it moves the main page to the right and rounds its exposed left edge. One shared animation controls the page, drawer and dimming. Dragging can interrupt the animation without a jump. Backdrop taps and swipe dismissal were checked on the pinned iPhone 17 Pro simulator.
+
+Session row outer inset is 6pt. Inner padding is 16pt left and 14pt right. This widens the pressed highlight while keeping content aligned. Unread dots sit in a reserved trailing slot beside the activity time, including compact subagent cards.
+
+| Runtime | Group | Source | Workflow |
+|---|---|---|---|
+| 1.0.5 | `1b0bcb67-1181-4b69-a8fb-fb5e701ff927` | `6674652548ccd5f675176495935667cc61c13fad` | `34697983560` |
+| 1.0.4 | `c72338c5-e4bb-4e9d-9df5-34cd38bc69eb` | `42a4db22248c8ece564d50106f370dca2a954071` | `34697999107` |
+
+Both workflows passed. EAS readback confirmed production, iOS and Android, runtime and exact source commit. The 1.0.4 branch was cut fresh from main with only the app version held back. No native dependency changed. Root and mobile typechecks passed. Native screenshots and a recording verified the drawer, row highlight and trailing dots. Physical-phone update activation remains unverified.
+
+Native verification used Xcode 26.6 after license acceptance and first-launch checks passed. Live Activities remains a separate local validation task and is not included in this update. For the local Metro check, `EXPO_PACKAGER_PROXY_URL=http://localhost:8098` was required because the Mac reverse-tunnel port differed from the Linux Metro port. The manifest launch URL and connected device were checked before capturing final evidence.
+
+### Compact subagent stacks (2026-09-12)
+
+Live keeps the parent session as a full row and collapses its descendants into
+an overlapping stack of up to four 24pt agent icons. A count shows the full
+family size. Tapping the stack expands 64pt cards with 28pt agent icons,
+titles, previews, timestamps, and status. Nested descendants stay reachable.
+The collapsed group shows working counts and an unread dot. Opening a child
+uses the existing session navigation and read acknowledgement.
+
+Root and mobile typechecks passed. Native verification on pinned iPhone
+`2DDC0F84-B433-49C6-8675-87E7A98CB60E` covered collapse/expand, opening the
+actual Xcode subagent chat, and returning to Home. A temporary five-child
+fixture verified overlapping icons, the four-icon cap, total count, compact
+cards, and collapse. The fixture was removed before landing. No new dependency
+or native module was added. This mobile UI change is delivered by OTA; it does
+not require another CLI release.
+
+- Runtime 1.0.5: `a2e9b6ce-dc71-41cf-b92a-7b29d8da1f9c`, workflow
+  `34692602210`, source `dfb5fe93c`.
+- Runtime 1.0.4: `cecbcb1e-5fdb-450f-8168-b074ee2e08fe`, workflow
+  `34692621441`, source `8f825e2c4`. Branch `ota/subagent-stack-1.0.4`
+  was cut from main with only the app version line changed.
+
+Both workflows passed typecheck, Metro export, and native compatibility
+checks. EAS readback verified both platforms, runtime versions, and commits.
+Phone activation remains unverified. The simulator was released back to the
+separate Xcode upgrade and Live Activities task after the UI check.
+
+### Side navigation, unread badges and stable queues (2026-09-12)
+
+Live now has a phone side drawer for pages and the existing computer picker.
+The same navigation sits in the iPad rail. Agent icons are 36pt within the
+existing 80pt rows. Chat subtitles show the selected model, and reconnect text
+uses the neutral secondary text color.
+
+Unread dots come from the server with the viewer identity. Fleet status frames
+cannot clear them. Opening a row clears its dot locally; the chat acknowledges
+read state only after the transcript loads and its latest reply is visible.
+A busy-to-idle status transition refreshes the viewer-specific unread state.
+
+The missing queue bar was a server handoff bug, not lost persistence. One idle
+tick released every held message into the agent's private queue. The server now
+releases only the oldest held message, waits for unresolved sends, and checks a
+fresh busy state before another release. Existing private-queue messages are
+left intact to avoid duplicate sends. The runtime fix deployed at `284abba25`.
+
+Verification: 66 focused tests passed. Root and mobile typechecks passed.
+The full suite had 3676 passing tests, one skip, and the same 11 failures seen
+on the unchanged base. Native checks passed on pinned iPhone 17 Pro
+`2DDC0F84-B433-49C6-8675-87E7A98CB60E` and iPad Pro 11
+`B234E3D3-A525-4CCB-AD46-00E593B3E2CF`: drawer and computer picker, page
+navigation, swipe dismissal, portrait/landscape rail, smaller icons, model
+subtitle, and real unread dots clearing after reading while other dots remain.
+A real held queue also survived full app termination and relaunch. Neutral
+reconnect styling was checked with a temporary native fixture, then removed.
+
+- Runtime 1.0.5: `18a8fa60-3700-4b70-973f-9a7306506b4a`, workflow
+  `34691845977`, source `284abba25`.
+- Runtime 1.0.4: `6d55c9aa-4570-4e13-b47f-b635b0a39dfe`, workflow
+  `34691866267`, source `b17486bf4`. Branch `ota/navigation-unread-1.0.4`
+  was cut from main with only the app version line changed.
+
+Both workflows passed typecheck, Metro export, and native compatibility
+checks. EAS readback verified both platforms, runtime versions, and commits.
+No native module changed. Phone activation remains unverified.
+Live Activities and the Mac Xcode upgrade are separate work and are not
+included in these updates.
 
 ### Full-screen New Project (2026-09-12)
 

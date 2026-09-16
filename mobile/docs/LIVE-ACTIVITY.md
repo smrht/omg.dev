@@ -1,10 +1,60 @@
-# Live Activity — design, not built
+# Live Activity
 
-Status: **design only**, per the Phase 2 instruction this doc came out of. Nothing here is
-wired up. Written 2026-08-15 alongside the native push work in `src/omg/push.ts` and
-`src/push-native.ts` on the machine — read those first; this reuses the same backend
-notification-worthy events (a session running/blocked, a question waiting) rather than
-inventing a third source of truth.
+Status: **iOS 1.0.6 (46) uploaded and Apple processing VALID. Hosted lifecycle and
+production APNs credentials deployed on 2026-09-13 at vibes `12cc4f7d3`.**
+
+Production readback confirms matching source hashes, the token table, loaded APNs
+configuration, and a successful fleet-status route probe. Apple responds to a
+synthetic token with `BadDeviceToken`; this verifies connectivity, not phone delivery.
+No device was registered at verification time. Open build 46 and select a user-owned
+Computer to register the phone. Physical-device start/update/end remain unverified.
+
+## Native redesign
+
+The pending 1.0.8 binary adds session rows, bundled agent marks, and a native
+first-use widget preview. The widget gallery and preview use the name `omg.dev`.
+The widget kind remains `OmgAgentVillage`, so existing placements keep their identity.
+
+This does not change ordinary notification icons. Gmail-style notification icons
+were discussed in the source session but have not been implemented.
+
+## Implemented path
+
+```
+lfg connect → relay → hosted control plane → APNs → ActivityKit
+                                              ↑
+                               iOS registers both token types
+```
+
+- `src/commands/connect.ts` sends `fleet.status` only when the aggregate changes.
+- `src/omg/agent-live-activity.tsx` defines the lock-screen and Dynamic Island views.
+- `expo-widgets` generates the Widget Extension and enables push-to-start.
+- The hosted control plane stores tokens and owns start, update, and end pushes.
+- The lock screen receives counts and up to three session rows (id, short title,
+  agent identity, and state), plus a total for overflow. Titles are limited to
+  72 characters and truncated to one visual line. The user approved title display
+  in the September 14 redesign. Prompts, questions, transcripts, and separate
+  project fields are excluded. IDs are deep-link targets and are not displayed.
+- The lock screen and expanded Island show title rows. Compact mode uses a static
+  cluster of bundled agent marks. Unknown agents use the omg mark; missing titles
+  use the agent name. Older count-only senders keep a usable summary.
+- Agent marks and the village gallery backgrounds are bundled in the extension.
+  An empty widget timeline receives a native garden preview before app data exists.
+  The app remains the sole owner of the real village timeline.
+- These extension assets and the gallery fallback require a new native binary
+  (runtime 1.0.8). An OTA for 1.0.7 cannot add them.
+
+The hosted control plane needs these secrets:
+
+- `OMG_APNS_KEY_ID`
+- `OMG_APNS_TEAM_ID`
+- `OMG_APNS_PRIVATE_KEY`
+- `OMG_APNS_ENV=sandbox` for development builds. Production is the default.
+
+This first version follows the currently selected, user-owned Computer. Cloud Computers
+and Computers shared by another user do not register a Live Activity.
+
+## Original design record
 
 ## The ask
 

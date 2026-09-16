@@ -5,10 +5,26 @@
 // no Google button (see GOOGLE_IOS_CLIENT_ID in src/omg/config.ts).
 module.exports = ({ config }) => {
   const iosClientId = process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID;
-  if (!iosClientId) return config;
+  const plugins = [
+    ...(config.plugins ?? []),
+    "./plugins/with-activity-icons.js",
+    ["expo-widgets", {
+      enablePushNotifications: true,
+      widgets: [{
+        name: "OmgAgentVillage",
+        displayName: "omg.dev",
+        description: "See your agents working and waiting for you.",
+        ios: {
+          supportedFamilies: ["systemSmall", "systemMedium", "systemLarge"],
+          contentMarginsDisabled: true,
+        },
+      }],
+    }],
+  ];
+  if (!iosClientId) return { ...config, plugins };
   const iosUrlScheme = `com.googleusercontent.apps.${iosClientId.replace(/\.apps\.googleusercontent\.com$/, "")}`;
   return {
     ...config,
-    plugins: [...(config.plugins ?? []), ["@react-native-google-signin/google-signin", { iosUrlScheme }]],
+    plugins: [...plugins, ["@react-native-google-signin/google-signin", { iosUrlScheme }]],
   };
 };
