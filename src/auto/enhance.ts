@@ -179,6 +179,14 @@ export async function refineAutoPrompt(
   const out = await generate(buildRefinePrompt({ ...input, feedback, cwd }), cwd, onLog);
   const cleaned = stripFence(out).trim();
   if (!cleaned) throw new Error("refiner produced no output");
+  // A rewrite is the WHOLE instruction, so it cannot legitimately shrink to a
+  // fragment. When the feedback reads like a chat message ("just answer ok")
+  // the model answers it instead of editing, and saving that reply would wipe
+  // the agent (measured 16-09-2026: a 6018-char instruction became "ok").
+  const floor = Math.min(200, Math.floor(input.prompt.trim().length / 2));
+  if (cleaned.length < floor) {
+    throw new Error(`refiner returned a fragment (${cleaned.length} chars), instruction left unchanged`);
+  }
   return cleaned;
 }
 

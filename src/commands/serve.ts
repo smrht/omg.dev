@@ -7246,9 +7246,61 @@ a{color:#60a5fa}
           // of the same instruction; the first one wins.
           if (!markRefining(agent.id)) return err(409, "this agent is already being updated from feedback");
           console.log(`[auto] refining ${agent.id} from feedback (${feedback.length} chars)`);
+          // Feedback on a finding is an instruction NOW as much as a lesson for
+          // later: "that's wrong, do X instead" (Sam, 16-09-2026). The rewrite
+          // below only changes the next scheduled run, so on its own it looked
+          // like nothing happened. Graduate the finding into a real session
+          // seeded with the owner's words first — the same launch the reply
+          // arrow does — and let the rewrite run behind it. The session decides
+          // whether the words are work to do or only a reporting note.
+          // (fork: refine-act)
+          if (finding) {
+            const composed =
+              `An automated watch agent ("${agent.name}") flagged this:\n\n` +
+              `${finding.title}\n\n` +
+              (finding.reasoning.length
+                ? `Reasoning:\n${finding.reasoning.map((r) => `- ${r}`).join("\n")}\n\n`
+                : "") +
+              (finding.suggest ? `Suggested fix: ${finding.suggest}\n\n` : "") +
+              `The owner replied to this finding with:\n"${feedback}"\n\n` +
+              "Treat that reply as the instruction. If it corrects the facts, wants something other than the " +
+              "suggested fix, or asks for the work to be done: do exactly that now, in this repo, and verify it. " +
+              "If it is only feedback about how the watch agent should report (what to flag, what to skip), " +
+              "answer in one line and stop — the agent's standing instruction is being rewritten separately.";
+            const launchAgent = agent.agent ?? "aisdk";
+            const launchModel = agent.model;
+            const levels = thinkingLevelsForAgent(launchAgent, launchModel);
+            const roster = userRoster();
+            void (async () => {
+              const r = await fetch(`http://127.0.0.1:${PORT}/api/sessions/new`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  cwd: agent.cwd || undefined,
+                  prompt: composed,
+                  title: finding.title.trim().slice(0, 200) || undefined,
+                  user: roster.length === 1 ? roster[0]?.email : undefined,
+                  agent: launchAgent,
+                  model: launchModel,
+                  thinkingLevel: levels?.length ? agent.thinkingLevel : undefined,
+                }),
+              });
+              const data = (await r.json().catch(() => null)) as { sessionId?: string; error?: string } | null;
+              if (!r.ok || !data?.sessionId) {
+                throw new Error(data?.error ?? `session launch failed (${r.status})`);
+              }
+              await updateFinding(finding.id, { status: "session", sessionId: data.sessionId });
+              console.log(`[auto] feedback on ${finding.id} started session ${data.sessionId} (${launchAgent}/${launchModel ?? "default"})`);
+            })().catch((e) => {
+              console.error(`[auto] feedback session for ${finding.id} failed: ${e instanceof Error ? e.message : String(e)}`);
+            });
+          }
           void (async () => {
             const { refineAutoPrompt } = await import("../auto/enhance.ts");
-            const cwd = await resolveAutoCwd(agent.cwd);
+            // No repo inspection for a rewrite: the current instruction already
+            // names the real paths, and the Read/Grep/Glob pass is what made a
+            // one-line correction take ~100 s (measured 16-09-2026, 103 s).
+            const cwd = undefined;
             const prompt = await refineAutoPrompt(
               {
                 name: agent.name,
@@ -7288,8 +7340,10 @@ a{color:#60a5fa}
             // Reading removes the answered item from the open list, while a
             // genuine recurrence can still escalate. Dismissed would instead
             // tell the next run never to surface this title again.
+            // Graduated above → already "session"; only a plain rewrite marks read.
             if (finding && finding.status === "open") {
-              await updateFinding(finding.id, { status: "read" });
+              const now = (await listFindings()).find((x) => x.id === finding.id);
+              if (now?.status === "open") await updateFinding(finding.id, { status: "read" });
             }
           })().then(
             () => settleRefine(agent.id),
