@@ -196,7 +196,7 @@ describe("caller identity threading", () => {
 // while the server finished and saved anyway. These pin that it answers
 // first and does the work after, publishing its progress for the poll.
 describe("POST /api/auto/agents/:id/refine (feedback → rewritten instruction)", () => {
-  const handler = block("/refine$/", 4500);
+  const handler = block("/refine$/", 9000);
 
   test("claims the agent before answering, and refuses a second concurrent rewrite", () => {
     expect(handler).toContain('if (!markRefining(agent.id)) return err(409');
