@@ -8,6 +8,8 @@ import { getGlobalSettingsSync } from "./settings.ts";
 
 type ProviderKey = CodingAgentKind;
 
+export type ModelPricing = { input: number; cached: number; output: number };
+
 export type DiscoveredModelProvider = {
   key: ProviderKey;
   ok: boolean;
@@ -18,6 +20,8 @@ export type DiscoveredModelProvider = {
   variants?: Record<string, string[]>;
   /** Per-model thinking levels, such as Devin's variant suffixes. */
   thinkingLevelsByModel?: Record<string, string[]>;
+  /** USD per 1M tokens per raw variant uid (Devin's cost_summary), for usage estimates. */
+  pricing?: Record<string, ModelPricing>;
   error?: string;
   refreshedAt: number;
   durationMs: number;
@@ -357,6 +361,7 @@ function parseModels(key: ProviderKey, text: string): {
   labels: Record<string, string>;
   variants?: Record<string, string[]>;
   thinkingLevelsByModel?: Record<string, string[]>;
+  pricing?: Record<string, ModelPricing>;
 } {
   if (key === "codex" || key === "codex-aisdk") return parseCodexModels(text);
   if (key === "grok") return parseBulletModels(text);
@@ -491,13 +496,56 @@ async function discoverMuseProvider(started: number, refreshedAt: number): Promi
  * label, and the family's variant suffixes as that model's thinking levels.
  * The adaptive router always leads; private slugs fall back to their alias.
  */
+/**
+ * Devin's cost_summary reads "$10 / 1M Input · $0.25 / 1M Cached input · $50 / 1M Output"
+ * (or "Free"). Parsed once at discovery so usage estimates never shell out.
+ */
+export function parseDevinCostSummary(text: unknown): ModelPricing | null {
+  if (typeof text !== "string") return null;
+  if (/free/i.test(text) && !/\$/.test(text)) return { input: 0, cached: 0, output: 0 };
+  const pick = (re: RegExp): number | null => {
+    const m = text.match(re);
+    return m ? Number.parseFloat(m[1]!) : null;
+  };
+  const input = pick(/\$([\d.]+)\s*\/\s*1M\s*Input/i);
+  const cached = pick(/\$([\d.]+)\s*\/\s*1M\s*Cached/i);
+  const output = pick(/\$([\d.]+)\s*\/\s*1M\s*Output/i);
+  if (input == null || output == null) return null;
+  return { input, cached: cached ?? input, output };
+}
+
+/** Raw Fusion uid: fusion-<lead>-<level>[-fast|-priority]-sidekick-<sidekick>. */
+export const DEVIN_FUSION_UID_RE =
+  /^fusion-(.+?)-(none|minimal|low|medium|high|xhigh|max)(-fast|-priority)?-sidekick-(.+)$/;
+
+/**
+ * Picker id for one Fusion combo (lead family + sidekick), thinking level left
+ * open. Short on purpose: the picker truncates around 30 characters, and the
+ * raw uids (fusion-gpt-6-astra-sidekick-gpt-5-6-luna-high) all cut off at the
+ * same place. "fusion:astra-6+luna-high" reads whole. The exact lead/sidekick
+ * come back from the combo's discovered variants, not from parsing this id.
+ */
+export function devinFusionComboId(lead: string, sidekick: string): string {
+  const short = (slug: string): string =>
+    slug
+      .replace(/^claude-/, "")
+      .replace(/^gpt-(\d+(?:-\d+)*)-([a-z]+)$/, "$2-$1")
+      .replace(/^gpt-\d+(?:-\d+)*-/, "")
+      .replace(/-medium$/, "-med");
+  return `fusion:${short(lead)}+${short(sidekick)}`;
+}
+
+/** Sidekicks Sam does not want offered (15-09-2026: GLM 5.2 never, only 5.3 — which Fusion lacks). */
+export const DEVIN_FUSION_HIDDEN_SIDEKICKS = new Set(["glm-5-2"]);
+
 export function parseDevinModels(text: string): {
   models: string[];
   labels: Record<string, string>;
   thinkingLevelsByModel?: Record<string, string[]>;
   variants?: Record<string, string[]>;
+  pricing?: Record<string, ModelPricing>;
 } {
-  type DevinVariant = { uid: string; label: string };
+  type DevinVariant = { uid: string; label: string; pricing: ModelPricing | null };
   type DevinFamily = {
     slug: string;
     model: string;
@@ -510,7 +558,7 @@ export function parseDevinModels(text: string): {
       slug?: unknown;
       family_label?: unknown;
       aliases?: unknown;
-      variants?: Array<{ model_uid?: unknown; label?: unknown }>;
+      variants?: Array<{ model_uid?: unknown; label?: unknown; cost_summary?: unknown; cost_tier?: unknown }>;
     }>;
   };
   try {
@@ -532,7 +580,13 @@ export function parseDevinModels(text: string): {
     const model = slug.startsWith("MODEL_PRIVATE") && aliases.length ? aliases[0]! : slug;
     const variants = (family.variants ?? []).flatMap((variant) => {
       const uid = typeof variant.model_uid === "string" ? cleanId(variant.model_uid) : null;
-      return uid ? [{ uid, label: typeof variant.label === "string" ? variant.label : uid }] : [];
+      return uid
+        ? [{
+            uid,
+            label: typeof variant.label === "string" ? variant.label : uid,
+            pricing: parseDevinCostSummary(variant.cost_summary ?? variant.cost_tier),
+          }]
+        : [];
     });
     if (!variants.length) continue;
     families.push({
@@ -547,6 +601,10 @@ export function parseDevinModels(text: string): {
   const labels: Record<string, string> = {};
   const thinkingLevelsByModel: Record<string, string[]> = {};
   const variantsByModel: Record<string, string[]> = {};
+  const pricing: Record<string, ModelPricing> = {};
+  for (const family of families) {
+    for (const variant of family.variants) if (variant.pricing) pricing[variant.uid] = variant.pricing;
+  }
   const adaptive = families.find((family) => family.slug === "adaptive");
   if (adaptive) {
     models.push(adaptive.model);
@@ -555,7 +613,7 @@ export function parseDevinModels(text: string): {
     variantsByModel[adaptive.model] = adaptive.variants.map((variant) => variant.uid);
   }
   const newestFirst = [...families]
-    .filter((family) => family.slug !== "adaptive")
+    .filter((family) => family.slug !== "adaptive" && family.slug !== "fusion")
     .sort((a, b) => {
       const depth = Math.max(a.version.length, b.version.length);
       for (let index = 0; index < depth; index += 1) {
@@ -582,11 +640,51 @@ export function parseDevinModels(text: string): {
     thinkingLevelsByModel[family.model] = levels;
     variantsByModel[family.model] = family.variants.map((variant) => variant.uid);
   }
+  // Fusion is one family with ~175 uids (lead × level × fast × sidekick). One
+  // picker entry per lead+sidekick combo; the level (and fast) stay pickable
+  // through the normal thinking/fast controls, composeDevinModel rebuilds the
+  // exact uid. Lead order follows the plain families above (newest first).
+  const fusion = families.find((family) => family.slug === "fusion");
+  if (fusion) {
+    type Combo = { id: string; lead: string; sidekick: string; levels: Set<string>; uids: string[] };
+    const combos = new Map<string, Combo>();
+    for (const variant of fusion.variants) {
+      const match = variant.uid.match(DEVIN_FUSION_UID_RE);
+      if (!match) continue;
+      const [, lead, level, , rawSidekick] = match;
+      // A fast lead pairs with the sidekick's own fast uid (…-high-priority);
+      // that is the same combo, fast mode re-adds the suffix when composing.
+      const sidekick = rawSidekick!.replace(/-priority$/, "");
+      if (DEVIN_FUSION_HIDDEN_SIDEKICKS.has(sidekick)) continue;
+      const id = devinFusionComboId(lead!, sidekick);
+      const combo = combos.get(id) ?? { id, lead: lead!, sidekick: sidekick!, levels: new Set(), uids: [] };
+      combo.levels.add(level!);
+      combo.uids.push(variant.uid);
+      combos.set(id, combo);
+    }
+    const leadRank = (lead: string): number => {
+      const index = models.findIndex((model) => model.replace(/\./g, "-") === lead);
+      return index < 0 ? Number.MAX_SAFE_INTEGER : index;
+    };
+    const ordered = [...combos.values()].sort(
+      (a, b) => leadRank(a.lead) - leadRank(b.lead) || a.sidekick.localeCompare(b.sidekick),
+    );
+    for (const combo of ordered) {
+      if (models.includes(combo.id)) continue;
+      models.push(combo.id);
+      labels[combo.id] = `Fusion: ${combo.lead} + ${combo.sidekick}`;
+      thinkingLevelsByModel[combo.id] = [...combo.levels].sort(
+        (a, b) => levelOrder.indexOf(a) - levelOrder.indexOf(b),
+      );
+      variantsByModel[combo.id] = combo.uids;
+    }
+  }
   return {
     models,
     labels,
     thinkingLevelsByModel: Object.keys(thinkingLevelsByModel).length ? thinkingLevelsByModel : undefined,
     variants: Object.keys(variantsByModel).length ? variantsByModel : undefined,
+    pricing: Object.keys(pricing).length ? pricing : undefined,
   };
 }
 
@@ -653,6 +751,7 @@ async function discoverProvider(key: ProviderKey): Promise<DiscoveredModelProvid
         parsed.thinkingLevelsByModel && Object.keys(parsed.thinkingLevelsByModel).length
           ? parsed.thinkingLevelsByModel
           : undefined,
+      pricing: parsed.pricing && Object.keys(parsed.pricing).length ? parsed.pricing : undefined,
       refreshedAt,
       durationMs: Math.round((performance.now() - started) * 1000) / 1000,
     };

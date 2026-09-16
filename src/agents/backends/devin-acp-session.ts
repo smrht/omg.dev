@@ -4,7 +4,9 @@
 // prompts share context and cancellation stays immediate. Credentials come from
 // `devin auth login` (~/.local/share/devin/credentials.toml) or WINDSURF_API_KEY.
 import { spawn } from "node:child_process";
+import { appendFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
+import { composeDevinFusionModel, isDevinFusionCombo } from "../../agent-catalog.ts";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { PATHS } from "../../config.ts";
@@ -42,8 +44,9 @@ export async function cmdDevinAcpSession(argv: string[]): Promise<void> {
   // Devin expresses thinking level as a variant suffix on the family slug
   // (claude-opus-5 + high -> claude-opus-5-high). The adaptive router picks
   // its own level, so it never takes a suffix.
-  const model =
-    thinkingLevel && requestedModel !== "adaptive"
+  const model = isDevinFusionCombo(requestedModel)
+    ? composeDevinFusionModel(requestedModel, thinkingLevel ?? undefined)
+    : thinkingLevel && requestedModel !== "adaptive"
       ? `${requestedModel}-${thinkingLevel}`
       : requestedModel;
   const managedName = arg(argv, "--managed-name") ?? "";
@@ -76,7 +79,7 @@ export async function cmdDevinAcpSession(argv: string[]): Promise<void> {
         Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
         Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
       );
-      const state: AcpUpdateState = { draft: "", thought: "", replaying: false };
+      const state: AcpUpdateState & { lastUsageFingerprint?: string } = { draft: "", thought: "", replaying: false };
       const app = acp.client({ name: "omg.dev" })
         .onRequest(acp.methods.client.session.requestPermission, async ({ params }) => {
           // Autopilot: keur tool-permissions zonder vragen goed. Liever een
@@ -111,17 +114,34 @@ export async function cmdDevinAcpSession(argv: string[]): Promise<void> {
             try {
               const usageDir = join(PATHS.data, "devin-usage");
               await mkdir(usageDir, { recursive: true });
+              const turn = {
+                inputTokens: update._meta?.["cognition.ai/inputTokens"] ?? null,
+                outputTokens: update._meta?.["cognition.ai/outputTokens"] ?? null,
+                cachedReadTokens: update._meta?.["cognition.ai/cachedReadTokens"] ?? null,
+                cachedWriteTokens: update._meta?.["cognition.ai/cachedWriteTokens"] ?? null,
+              };
               await Bun.write(
                 join(usageDir, `${key}.json`),
                 JSON.stringify({
                   updatedAt: Date.now(),
                   used: update.used ?? null,
                   size: update.size ?? null,
-                  inputTokens: update._meta?.["cognition.ai/inputTokens"] ?? null,
-                  outputTokens: update._meta?.["cognition.ai/outputTokens"] ?? null,
-                  cachedReadTokens: update._meta?.["cognition.ai/cachedReadTokens"] ?? null,
+                  ...turn,
                 }),
               );
+              // Devin has no account-level usage API (gemeten 15-09-2026: v3
+              // 404, enterprise 403), so the picker's usage source is this
+              // box's own ledger: one line per turn. Devin emits the same
+              // usage_update twice per turn (second one tagged with
+              // subagent_context), hence the dedupe on identical numbers.
+              const fingerprint = JSON.stringify(turn);
+              if (fingerprint !== state.lastUsageFingerprint) {
+                state.lastUsageFingerprint = fingerprint;
+                appendFileSync(
+                  join(usageDir, "ledger.jsonl"),
+                  JSON.stringify({ at: Date.now(), key, model, ...turn }) + "\n",
+                );
+              }
             } catch {
               // Usage is cosmetic: never break a turn over a snapshot write.
             }

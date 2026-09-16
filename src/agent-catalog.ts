@@ -4,7 +4,7 @@ export { OMG_MODELS } from "./omg-models.ts";
 import type { Agent } from "./agents/registry.ts";
 import type { AutoAgent } from "./auto/store.ts";
 import type { CodingAgentInfo, CodingAgentKind } from "./coding-agents.ts";
-import { readModelDiscoveryCacheSync } from "./model-discovery.ts";
+import { readModelDiscoveryCacheSync, DEVIN_FUSION_UID_RE } from "./model-discovery.ts";
 import { CODEX_MUSE_MODELS, museSubscriptionKey } from "./agents/backends/codex-muse.ts";
 import { PI_AUTH_PROVIDER_IDS } from "./pi-auth.ts";
 import type { Session } from "./sessions.ts";
@@ -317,12 +317,68 @@ export function devinModelSupportsFast(model?: string | null): boolean {
   return variants.some((uid) => /-(fast|priority)$/.test(uid));
 }
 
+/**
+ * Picker id of one Fusion combo: "fusion:<lead>+<sidekick>" (short form from
+ * discovery) or the older "fusion-<lead>-sidekick-<sidekick>"; neither carries a level.
+ */
+const DEVIN_FUSION_COMBO_RE = /^fusion-(.+)-sidekick-(.+)$/;
+const DEVIN_FUSION_SHORT_RE = /^fusion:.+\+.+$/;
+
+/** A Fusion uid that already carries its level (and maybe fast) is complete. */
+export function isDevinFusionUid(model?: string | null): boolean {
+  return !!model && DEVIN_FUSION_UID_RE.test(model);
+}
+
+export function isDevinFusionCombo(model?: string | null): boolean {
+  if (!model) return false;
+  if (DEVIN_FUSION_SHORT_RE.test(model)) return true;
+  return DEVIN_FUSION_COMBO_RE.test(model) && !DEVIN_FUSION_UID_RE.test(model);
+}
+
+/** Lead + sidekick of a combo id: from its discovered variants, else from the long id. */
+function devinFusionParts(model: string, variants: string[]): { lead: string; sidekick: string } | null {
+  for (const uid of variants) {
+    const match = uid.match(DEVIN_FUSION_UID_RE);
+    if (match) return { lead: match[1]!, sidekick: match[4]!.replace(/-priority$/, "") };
+  }
+  const match = model.match(DEVIN_FUSION_COMBO_RE);
+  return match ? { lead: match[1]!, sidekick: match[2]! } : null;
+}
+
+/**
+ * Fusion uids carry the level in the middle (fusion-<lead>-<level>[-fast]-
+ * sidekick-<sidekick>[-priority]), so the plain suffix rule does not apply.
+ * Without an explicit level Devin's own default (medium) is used; fast picks
+ * the discovered uid whose lead carries -fast/-priority.
+ */
+export function composeDevinFusionModel(
+  model: string,
+  thinkingLevel?: string,
+  fastMode?: boolean,
+): string {
+  const devin = readModelDiscoveryCacheSync()?.providers?.devin;
+  const variants = devin?.variants?.[model] ?? [];
+  const parts = devinFusionParts(model, variants);
+  if (!parts) return model;
+  const { lead, sidekick } = parts;
+  const levels = devin?.thinkingLevelsByModel?.[model] ?? [];
+  const level = thinkingLevel ?? (levels.includes("medium") || !levels.length ? "medium" : levels[0]!);
+  const plain = `fusion-${lead}-${level}-sidekick-${sidekick}`;
+  if (!fastMode) return plain;
+  const fastPrefix = new RegExp(`^fusion-${lead}-${level}-(fast|priority)-sidekick-`);
+  return variants.find((uid) => fastPrefix.test(uid)) ?? `fusion-${lead}-${level}-fast-sidekick-${sidekick}`;
+}
+
 export function composeDevinModel(
   model: string,
   thinkingLevel?: string,
   fastMode?: boolean,
 ): string {
   if (model === "adaptive") return model;
+  if (isDevinFusionCombo(model)) return composeDevinFusionModel(model, thinkingLevel, fastMode);
+  // Already a complete Fusion uid (a resumed session, or the harness re-entering
+  // with the composed model): never stack a second level on it.
+  if (isDevinFusionUid(model)) return model;
   const norm = model.replace(/\./g, "-");
   if (!thinkingLevel && !fastMode) return model;
   const variants = readModelDiscoveryCacheSync()?.providers?.devin?.variants?.[model] ?? [];
