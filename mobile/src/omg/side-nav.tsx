@@ -48,9 +48,9 @@ import Reanimated, {
   withTiming,
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import type { AndroidSymbol, SFSymbol } from "expo-symbols";
 
-import { Icon, StatusDot } from "../components";
+import { StatusDot } from "../components";
+import { LucideIcon, type LucideName } from "./lucide";
 import { BrandWordmark } from "./brand-mark";
 import { GlassSurface } from "./glass";
 import { DropdownMenu, type MenuOption } from "./menu";
@@ -59,14 +59,32 @@ import { sideNavRows, type SideNavRowKey } from "./side-nav-items";
 import { Text } from "./text";
 import { useTheme } from "./theme";
 
-/** The glyph for each row. Kept with the view so the row list stays testable. */
-const GLYPH: Record<SideNavRowKey, { ios: SFSymbol; android: AndroidSymbol }> = {
-  live: { ios: "bolt", android: "bolt" },
-  archive: { ios: "archivebox", android: "archive" },
-  notifications: { ios: "bell", android: "notifications" },
-  schedules: { ios: "calendar.badge.clock", android: "schedule" },
-  settings: { ios: "gearshape", android: "settings" },
-  shortcuts: { ios: "keyboard", android: "keyboard" },
+/**
+ * The glyph for each row. Kept with the view so the row list stays testable.
+ *
+ * THIS COLUMN IS LUCIDE, and it is the exception rather than the new rule.
+ *
+ * Everywhere else in the app a glyph is an SF Symbol, because those carry the
+ * system's optical weights and match the bar, the keyboard and the menus for
+ * free. The side navigation is the one surface where the set has to read as
+ * ONE family: eight rows stacked in a column, where SF Symbols' varying
+ * optical weights and widths showed up as a ragged edge that a single icon
+ * cannot -- `bolt` is dense, `archivebox` is airy, and stacked they looked
+ * borrowed from different apps.
+ *
+ * Lucide is one stroke weight by construction, so the column lines up. Do not
+ * take this as licence to convert other screens; see lucide.tsx for why the
+ * font is here at all.
+ */
+const GLYPH: Record<SideNavRowKey, LucideName> = {
+  // "Chat", so a speech bubble rather than the old `bolt`, which said
+  // "fast" about a page that is a conversation.
+  live: "message-circle",
+  archive: "archive",
+  notifications: "bell",
+  schedules: "calendar-clock",
+  settings: "settings",
+  shortcuts: "keyboard",
 };
 
 /** Wide enough for a machine name, never more than most of a phone. */
@@ -99,15 +117,13 @@ export type SideNavProps = {
 
 function NavRow({
   label,
-  ios,
-  android,
+  glyph,
   selected,
   onPress,
   accessory,
 }: {
   label: string;
-  ios: SFSymbol;
-  android: AndroidSymbol;
+  glyph: LucideName;
   selected?: boolean;
   onPress?: () => void;
   accessory?: React.ReactNode;
@@ -141,7 +157,7 @@ function NavRow({
       })}
     >
       <View style={{ width: 28, alignItems: "center", justifyContent: "center" }}>
-        <Icon ios={ios} android={android} size={22} weight="regular" color={colors.text} />
+        <LucideIcon name={glyph} size={22} color={colors.text} />
       </View>
       <Text
         numberOfLines={1}
@@ -199,7 +215,7 @@ export function SideNavPanel({
           }}
         >
           <View style={{ width: 28, alignItems: "center" }}>
-            <Icon ios="desktopcomputer" android="computer" size={22} color={colors.text} />
+            <LucideIcon name="monitor" size={22} color={colors.text} />
           </View>
           <View style={{ flex: 1, minWidth: 0 }}>
             <Text
@@ -210,7 +226,7 @@ export function SideNavPanel({
             </Text>
           </View>
           <StatusDot busy={online} size={7} />
-          <Icon ios="chevron.up.chevron.down" android="unfold_more" size={12} color={colors.textMuted} />
+          <LucideIcon name="chevrons-up-down" size={12} color={colors.textMuted} />
         </View>
       </DropdownMenu>
       <View style={{ height: 12 }} />
@@ -219,7 +235,7 @@ export function SideNavPanel({
           <NavRow
             key={row.key}
             label={row.label}
-            {...GLYPH[row.key]}
+            glyph={GLYPH[row.key]}
             selected={row.current}
             onPress={() => {
               onDismiss?.();
@@ -232,7 +248,7 @@ export function SideNavPanel({
           <NavRow
             key={row.key}
             label={row.label}
-            {...GLYPH[row.key]}
+            glyph={GLYPH[row.key]}
             onPress={() => {
               onDismiss?.();
               onShortcuts?.();
@@ -263,7 +279,7 @@ export function useSideNavGesture({ visible, onOpen, onClose, progress, enabled,
   const closing = useRef(false);
   const dragStart = useRef(1);
   const openingDrag = useRef(false);
-  const openingBlocked = useRef(false);
+  const blocked = useRef<"none" | "opening" | "all">("none");
   const dragging = useRef(false);
   const openRef = useRef(onOpen);
   openRef.current = onOpen;
@@ -312,16 +328,16 @@ export function useSideNavGesture({ visible, onOpen, onClose, progress, enabled,
   const pan = useMemo(() =>
     PanResponder.create({
       onStartShouldSetPanResponderCapture: () => {
-        // Descendant horizontal scrollers can exclude this touch sequence
+        // Descendant controls can exclude this touch sequence
         // in onTouchStart, after this capture phase. Keep the exclusion even
         // when the native scroll view cancels child touches during a drag.
-        openingBlocked.current = false;
+        blocked.current = "none";
         return false;
       },
       // Capture only horizontal intent. Vertical list drags stay with the list.
       onMoveShouldSetPanResponderCapture: (_event, gesture) =>
-        enabled && Math.abs(gesture.dx) > 8 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.5 &&
-        (mountedRef.current ? gesture.dx < 0 : !openingBlocked.current && gesture.x0 <= 24 && gesture.dx > 0),
+        enabled && blocked.current !== "all" && Math.abs(gesture.dx) > 8 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.5 &&
+        (mountedRef.current ? gesture.dx < 0 : blocked.current === "none" && gesture.x0 <= 24 && gesture.dx > 0),
       onPanResponderGrant: () => {
         openingDrag.current = !mountedRef.current;
         dragging.current = true;
@@ -367,7 +383,8 @@ export function useSideNavGesture({ visible, onOpen, onClose, progress, enabled,
 
   return {
     mounted, dismiss: () => dismissRef.current(true), panHandlers: pan.panHandlers,
-    blockOpeningGesture: () => { openingBlocked.current = true; },
+    blockOpeningGesture: () => { if (blocked.current !== "all") blocked.current = "opening"; },
+    blockGesture: () => { blocked.current = "all"; },
   };
 }
 

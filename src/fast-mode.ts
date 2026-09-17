@@ -8,13 +8,8 @@ export type FastModeResolution =
   | { ok: true; enabled: boolean; serviceTier?: CodexServiceTier }
   | { ok: false; error: string };
 
-export function agentSupportsFastMode(agent: string): boolean {
-  return agent === "codex" ||
-    agent === "codex-aisdk" ||
-    agent === "claude" ||
-    agent === "aisdk" ||
-    agent === "devin";
-}
+import { agentSupportsFastMode } from "../packages/protocol/src/fast-mode-support.ts";
+export { agentSupportsFastMode };
 
 /**
  * Validate Fast independently from reasoning effort.

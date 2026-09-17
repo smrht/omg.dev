@@ -5,6 +5,7 @@ describe("session Fast mode", () => {
   test("supports Codex and Claude without coupling to thinking effort", () => {
     expect(agentSupportsFastMode("codex-aisdk")).toBe(true);
     expect(agentSupportsFastMode("aisdk")).toBe(true);
+    expect(agentSupportsFastMode("devin")).toBe(true);
     expect(agentSupportsFastMode("opencode")).toBe(false);
 
     expect(resolveSessionFastMode({

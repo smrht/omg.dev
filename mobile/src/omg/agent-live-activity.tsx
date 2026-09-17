@@ -42,17 +42,24 @@ export function AgentActivity(props: AgentActivityProps, environment: LiveActivi
    */
   const YEAR_MS = 365 * 24 * 60 * 60 * 1000;
   /**
-   * NO SPINNER. It was tried, and iOS will not turn it.
+   * NO RING OF ANY KIND. Both sorts were built, shipped and removed.
    *
-   * `progressViewStyle("circular")` with no value renders SwiftUI's activity
-   * indicator, and on a Lock Screen it draws as a STATIC empty ring -- a Live
-   * Activity does not run an arbitrary animation loop any more than a widget
-   * does. Seen on the simulator: an empty circle sitting beside each time,
-   * reading like an unticked checkbox.
+   * An INDETERMINATE spinner -- `progressViewStyle("circular")` with no value
+   * -- draws as a static empty ring, because a Live Activity runs no animation
+   * loop any more than a widget does. It read as an unticked checkbox beside
+   * every row.
    *
-   * A determinate ring is not available either: `ProgressView(timerInterval:)`
-   * would animate, but it needs an END to fill towards and a coding run has
-   * none. So the running signal is the clock itself, which genuinely moves.
+   * A DETERMINATE ring, `ProgressView(timerInterval:)`, genuinely animates:
+   * SwiftUI computes it on the device outside the timeline, like the clock. It
+   * was added anyway, against a flat ten-minute horizon, and it failed for the
+   * SAME reason as the first rather than a new one. A coding run lasts hours,
+   * so the ring sits pinned at full essentially always -- and a full circle
+   * that never moves is precisely the static disc the indeterminate one drew.
+   * Benny, looking at it on a real row: "maybe remove the circle thing?"
+   *
+   * The lesson is not "use the other ProgressView". It is that a ring beside
+   * an elapsed time has nothing left to say: the clock already moves, and it
+   * is exact. Do not add a third one.
    */
   const labels: Record<string, string> = { claude: "Claude", codex: "Codex", cursor: "Cursor", copilot: "Copilot", deepseek: "DeepSeek", devin: "Devin", grok: "Grok", hermes: "Hermes", jcode: "Jcode", muse: "Muse", opencode: "OpenCode", pi: "pi", fx: "fx", omg: "omg" };
   /**

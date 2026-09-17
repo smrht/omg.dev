@@ -302,7 +302,7 @@ import {
 import { createCleanupHandler } from "../session-cleanup.ts";
 import { buildSessionUsageReport, findSessionDevServerPids } from "../session-usage.ts";
 import { capReclaimCandidate, memoryReclaimCandidates } from "../idle-archive.ts";
-import { CODING_AGENT_ADAPTERS, resolveActiveSessionAgent, usesCommandFileRuntime } from "../coding-agent-adapters.ts";
+import { CODING_AGENT_ADAPTERS, pickDefaultSessionAgent, resolveActiveSessionAgent, usesCommandFileRuntime } from "../coding-agent-adapters.ts";
 import { launchCodingAgentSession } from "../coding-agent-provider.ts";
 import {
   enqueueTranscriptIndex,
@@ -8347,23 +8347,17 @@ a{color:#60a5fa}
         return json({ sessions, total, facets, scheduledTotal });
       }
 
-      // Candidates for the composer's `#` session picker: live fleet plus the
-      // durable catalog, same-folder rows first, then newest first. Unlike
-      // /api/sessions/resumable this INCLUDES live sessions, because a
-      // reference to a running session is the common case.
+      // Candidates for the composer's `#` session picker: live fleet only,
+      // same-folder rows first, then newest first. Closed catalog rows are
+      // not mentionable.
       if (path === "/api/sessions/mentionable" && req.method === "GET") {
         const query = url.searchParams.get("q")?.trim() || undefined;
         const cwd = url.searchParams.get("cwd")?.trim() || undefined;
         const excludeId = url.searchParams.get("exclude")?.trim() || undefined;
         const limit = Math.max(1, Math.min(50, Number(url.searchParams.get("limit")) || 20));
         const live = await listSessionsCached().catch(() => [] as Session[]);
-        const [inFolder, anywhere] = await Promise.all([
-          cwd ? queryResumable({ search: query, cwd, limit }) : null,
-          queryResumable({ search: query, limit }),
-        ]);
         const sessions = rankSessionMentions({
           live,
-          historical: [...(inFolder?.sessions ?? []), ...anywhere.sessions],
           cwd,
           query,
           excludeId,
@@ -8950,7 +8944,14 @@ a{color:#60a5fa}
         // Resolved below once the user tag is known: an explicit role wins,
         // else the tagged user's role (src/policy/roles.ts members).
         let sessionRole: string | undefined;
-        const agent = resolveActiveSessionAgent(body?.agent);
+        // No agent named: let the box choose one it can actually run, honouring
+        // its own defaultAgent setting. See pickDefaultSessionAgent.
+        const agent = body?.agent
+          ? resolveActiveSessionAgent(body.agent)
+          : pickDefaultSessionAgent(
+              await listCodingAgentsCached(),
+              (await getGlobalSettings()).defaultAgent,
+            );
         if (!agent) {
           if (body?.agent === "hermes") return err(410, "agent \"hermes\" has been removed");
           return err(400, `unknown coding agent "${body?.agent ?? ""}"`);

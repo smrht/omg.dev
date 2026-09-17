@@ -298,8 +298,19 @@ function RootNavigator() {
     previousAuthStatusRef.current = authStatus;
     if (wasSignedIn && authStatus === "signed-out") {
       router.dismissTo("/sign-in");
+      /*
+       * And show the welcome flow again, because a signed-out device is a new
+       * arrival by every test this app can apply. It also makes the flow
+       * reviewable at all: the flag was written once and never cleared, so
+       * after the first sign-in the only way back to it was a reinstall.
+       *
+       * AFTER `dismissTo`, deliberately. Resetting flips the signed-out branch
+       * from the sign-in Stack to the flow, which is not a navigator; popping
+       * has to happen while the stack it is popping is still mounted.
+       */
+      intro.reset();
     }
-  }, [authStatus]);
+  }, [authStatus, intro]);
   const { colors, isDark } = useTheme();
   // Shares the splash with auth, rather than flashing an icon-less bar for a
   // frame: the font resolves from a bundled asset, so this is never a wait
@@ -368,6 +379,13 @@ function RootNavigator() {
               void stashOnboardingChoice(choice);
               intro.complete();
             }}
+            /*
+             * Apple and Google sign in inside the drawer, so the prompt is
+             * saved here and the intro is deliberately NOT completed:
+             * completing it swaps this branch for the sign-in Stack and would
+             * unmount the drawer in the middle of authenticating.
+             */
+            onStash={stashOnboardingChoice}
             onTerms={() => void Linking.openURL("https://omg.dev/terms")}
             onPrivacy={() => void Linking.openURL("https://omg.dev/privacy")}
           />

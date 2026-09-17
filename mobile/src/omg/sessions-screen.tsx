@@ -88,6 +88,7 @@ import {
   type AutoFindingRow,
 } from "./auto-agents";
 import { useComputerPicker } from "./computer-picker";
+import { NavGestureContext } from "./nav-gesture-context";
 import { SideNavButton, SIDE_NAV_RADIUS, SideNavDrawer, sideNavWidth, useSideNavGesture } from "./side-nav";
 import {
   clearSessionUnread,
@@ -109,6 +110,11 @@ import { useUsage } from "./usage";
 import { DropdownMenu } from "./menu";
 import { useAgentPicker, useProjectPicker } from "./session-options";
 import { useOmg } from "./provider";
+import {
+  prefetchTranscripts,
+  TRANSCRIPT_PAGE,
+  transcriptCacheKey,
+} from "./transcript-cache";
 import { useToast } from "./toast";
 import { SessionListSkeleton } from "./skeleton";
 import { useTheme } from "./theme";
@@ -197,6 +203,7 @@ function SessionFamily({
           />
         ) : null}
         <SessionCard
+          sessionId={session.sessionId}
           title={session.title || session.lastUserText || "Untitled session"}
           subtitle={sessionPreview(session)}
           timestamp={relativeTime(session.lastActivityAt ?? session.startedAt)}
@@ -836,6 +843,42 @@ export function SessionsScreen({
   );
 
   /**
+   * WARM THE TOP OF THE LIST SO THE FIRST OPEN PAINTS TOO.
+   *
+   * The cache in transcript-cache.ts makes a RE-open instant on its own. This
+   * sweep extends that to the first open of the sessions a reader is most
+   * likely to tap, which on a phone is the handful of rows above the fold.
+   * It runs after a delay, serially, and never competes with the fetch for a
+   * session the reader actually opened; a failure is silent, because the
+   * session screen still fetches normally.
+   *
+   * The order passed is the order on screen, not the order the machine
+   * returned, so the warmed rows are the visible ones.
+   */
+  const prefetchKeys = useMemo(
+    () =>
+      projectGroups.flatMap((group) =>
+        group.nodes.map((node) =>
+          transcriptCacheKey(bindingId, sessionStableId(node.session)),
+        ),
+      ),
+    [projectGroups, bindingId],
+  );
+  useEffect(() => {
+    if (!client || !prefetchKeys.length) return;
+    prefetchTranscripts(
+      prefetchKeys,
+      async (key) => {
+        // The key carries the binding; the id is what the machine understands.
+        const sid = key.slice(key.indexOf(":") + 1);
+        const res = await client.getMessages(sid, TRANSCRIPT_PAGE);
+        return res.messages ?? [];
+      },
+      TRANSCRIPT_PAGE,
+    );
+  }, [client, prefetchKeys]);
+
+  /**
    * Still needed, but only to COUNT — the ambient header says how many agents
    * are building, and archive is refused on a running session. Neither one
    * sections the list any more.
@@ -1007,6 +1050,8 @@ export function SessionsScreen({
           agent: agentPicker.agent,
           model: agentPicker.model ?? undefined,
           thinkingLevel: agentPicker.thinking ?? undefined,
+          fastMode: agentPicker.fastMode,
+          claudeAccountId: agentPicker.claudeAccountId,
           cwd,
         }),
       });
@@ -1015,7 +1060,7 @@ export function SessionsScreen({
       if (res?.sessionId) openSession(res.sessionId);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [client, agentPicker.agent, agentPicker.model, agentPicker.thinking, load],
+    [client, agentPicker.agent, agentPicker.model, agentPicker.thinking, agentPicker.fastMode, agentPicker.claudeAccountId, load],
   );
 
   const startSession = useCallback(
@@ -1047,6 +1092,7 @@ export function SessionsScreen({
               // capacity left when it hears nothing, which beats this app
               // pinning one at random.
               claudeAccountId: agentPicker.claudeAccountId,
+              fastMode: agentPicker.fastMode,
               cwd: projectPicker.cwd ?? undefined,
             }),
           },
@@ -1070,6 +1116,9 @@ export function SessionsScreen({
       client,
       agentPicker.agent,
       agentPicker.model,
+      agentPicker.thinking,
+      agentPicker.claudeAccountId,
+      agentPicker.fastMode,
       projectPicker.cwd,
       draft,
       stageDraft,
@@ -1316,6 +1365,8 @@ export function SessionsScreen({
       thinkingOptions={agentPicker.thinkingOptions}
       accountOptions={agentPicker.accountOptions}
       accountLabel={agentPicker.claudeAccountLabel}
+      fastMode={agentPicker.fastMode}
+      onToggleFast={agentPicker.toggleFast}
       attachments={attachments}
       dictation={dictation}
       usage={usage}
@@ -1405,6 +1456,7 @@ export function SessionsScreen({
 
   return (
     <SessionUnreadContext.Provider value={unreadSessions}>
+    <NavGestureContext.Provider value={navGesture.blockGesture}>
     <View style={{ flex: 1, backgroundColor: colors.bg, overflow: "hidden" }} {...navGesture.panHandlers}>
     <Reanimated.View style={[{ flex: 1, backgroundColor: colors.bg, overflow: "hidden", borderCurve: "continuous" }, navPageStyle]}>
       {/* One persistent row moves with the page throughout the drawer transition. */}
@@ -2004,6 +2056,7 @@ export function SessionsScreen({
           }
         />
     </View>
+    </NavGestureContext.Provider>
     </SessionUnreadContext.Provider>
   );
 }

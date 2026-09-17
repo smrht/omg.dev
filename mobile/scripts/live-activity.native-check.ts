@@ -98,13 +98,28 @@ test("a running session shows an elapsed timer counting up from its start", () =
 });
 
 /**
- * A spinner was tried and iOS will not turn it: an indeterminate ProgressView
- * draws as a STATIC empty ring on a Lock Screen, which reads like an unticked
- * checkbox next to every running session. Seen on the simulator. The clock is
- * the running signal, because it is the thing that actually moves.
+ * NO RING BESIDE THE CLOCK. Both kinds were tried and both failed the same way.
+ *
+ * An indeterminate spinner draws as a static empty ring on a Lock Screen,
+ * because a Live Activity runs no animation loop. A determinate
+ * `ProgressView(timerInterval:)` does animate -- but against any flat horizon
+ * a coding run pins it at full within minutes and it spends the rest of the
+ * session as an unmoving disc, which is the same thing the first one drew.
+ *
+ * So the rule is the broad one again, and this time it is broad because the
+ * narrow version was tried in production and removed. The clock is the running
+ * signal; it moves, and it is exact.
  */
-test("no frozen progress ring sits beside the clock", () => {
-  expect(running({ startedAt: 1_700_000_000_000 }).filter(node => node.type === "ProgressView")).toHaveLength(0);
+test("no progress ring is rendered in any state", () => {
+  for (const startedAt of [1_700_000_000_000, null, undefined, 0]) {
+    expect(running({ startedAt }).filter(node => node.type === "ProgressView")).toHaveLength(0);
+  }
+  const blocked = nodes(render({
+    machineName: "Mac", runningCount: 0, blockedCount: 1, attentionSessionId: "s1",
+    updatedAt: 1, sessionCount: 1,
+    sessions: [{ id: "s1", title: "Waiting", agent: "claude", state: "blocked", startedAt: 1_700_000_000_000 }],
+  }, { colorScheme: "dark" }).banner);
+  expect(blocked.filter(node => node.type === "ProgressView")).toHaveLength(0);
 });
 
 test("a session the box never stamped falls back to a word, not 1970", () => {

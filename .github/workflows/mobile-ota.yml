@@ -69,6 +69,27 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # SEVEN OF THE NATIVE CHECKS RENDER COMPONENTS, and they do it through
+      # `web/src/test-support/render`, importing React from the WEB workspace's
+      # node_modules. The step above installs `mobile/` only -- a separate npm
+      # graph -- so on a runner those seven died at import with
+      # "Cannot find module '../../web/node_modules/react/jsx-dev-runtime'".
+      #
+      # They passed locally the whole time, because a dev box has the root
+      # workspace installed already. That is exactly the shape of gap that let
+      # eight check files go unrun for months: green here, absent there.
+      - name: Install the workspace deps the render harness needs
+        working-directory: ${{ github.workspace }}
+        run: |
+          bun install --frozen-lockfile
+          # Asserted, not assumed: the checks import React by PATH from the web
+          # workspace, so a hoist that put it somewhere else would break them
+          # again with the same unhelpful "module not found" at import.
+          if [ ! -d web/node_modules/react ]; then
+            echo "::error::web/node_modules/react is missing after a workspace install; the render-harness checks cannot run."
+            exit 1
+          fi
+
       - name: Type check
         run: bunx tsc --noEmit
 
@@ -84,10 +105,43 @@ jobs:
       - name: Native behaviour checks
         run: bun run test:native
 
+      # EXPO_PUBLIC_* IS INLINED AT BUNDLE TIME, AND eas.json CANNOT HELP HERE.
+      #
+      # The Google client id lives in eas.json under `build.<profile>.env`,
+      # which `eas build` reads and `eas update` does not. So every OTA
+      # published without it inlined `""`, `googleSignInConfigured` came out
+      # false, and the Google button VANISHED from a binary that shipped with
+      # it. Silently: no error, no crash, one fewer way to sign in.
+      #
+      # Read from eas.json rather than pasted here, so there is one source of
+      # truth and the two cannot drift. The value is a public client
+      # identifier, not a secret -- see the note beside it in eas.json.
+      - name: Carry the public Google client id into the bundle
+        run: |
+          # eas.json carries comments, so it is JSONC and `require` chokes on
+          # it. One well-known key, read with a regex, needs no parser.
+          id=$(grep -m1 -o '"EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID"[[:space:]]*:[[:space:]]*"[^"]*"' eas.json | sed 's/.*: *"\(.*\)"$/\1/')
+          if [ -z "$id" ]; then
+            echo "::error::eas.json has no production EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID; an OTA would drop the Google button."
+            exit 1
+          fi
+          echo "EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID=$id" >> "$GITHUB_ENV"
+
       # An OTA publish has no review stage in front of it, so the export has to
       # pass here rather than break on someone's phone.
       - name: Metro export smoke test
         run: bunx expo export --platform ios
+
+      # The export is the same bundle the publish will ship, so assert the id
+      # actually reached it. The step above can be right and still produce a
+      # bundle without it -- a renamed variable, a changed gate, a config
+      # plugin -- and the failure mode is invisible on a device.
+      - name: Check the exported bundle can offer Google sign-in
+        run: |
+          if ! grep -rqF "$EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID" dist; then
+            echo "::error::The exported bundle does not contain the Google client id. Publishing would remove the Google button."
+            exit 1
+          fi
 
       # OTA cannot carry native code. If the native surface moved since the last
       # build, publishing JS that expects it can crash on launch. Fail loudly and

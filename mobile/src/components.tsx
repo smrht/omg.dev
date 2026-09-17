@@ -5,6 +5,7 @@
  */
 
 import { Sheet } from "./omg/sheet";
+import { useBlockNavGesture } from "./omg/nav-gesture-context";
 import {
   ActivityIndicator,
   Image,
@@ -14,10 +15,13 @@ import {
   useWindowDimensions,
   View,
   type ViewStyle,
+  type LayoutRectangle,
 } from "react-native";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import Reanimated, {
   Easing,
+  LinearTransition,
+  ReduceMotion,
   useAnimatedStyle,
   useSharedValue,
   withRepeat,
@@ -46,9 +50,10 @@ import { DropdownMenu, type MenuOption } from "./omg/menu";
 import { AgentSetupSheet } from "./omg/agent-setup-sheet";
 import { SkillSuggest } from "./omg/skill-suggest";
 import { SessionMentionSuggest } from "./omg/session-mention-suggest";
-import { PressableScale, useListItemMotion } from "./omg/motion";
+import { PressableScale, useListItemMotion, useReduceMotionEnabled } from "./omg/motion";
 import { useSwipeToCommit } from "./omg/swipe-row";
 import { useTheme } from "./omg/theme";
+import { SessionActivityField, SessionActivityTitle, useSessionActivity } from "./omg/session-activity";
 
 /**
  * Tailwind's `bg-success/30` in a language React Native understands. The web
@@ -693,8 +698,8 @@ export function SectionHeader({
  * follows, because two surfaces describing the same session two ways is the
  * problem both changes were trying to solve.
  *
- * Avatar left, one-line title, muted one-line subtitle, state right: a spinner
- * while working, a green dot when idle, a pause glyph when blocked.
+ * Avatar left, one-line title, muted one-line subtitle. Working lights the
+ * row background; unread and blocked keep their trailing dot and pause.
  */
 /**
  * THE ROW'S GEOMETRY, published because the tree lines have to hit it.
@@ -730,6 +735,7 @@ export const SESSION_ROW_MARK_X =
 export const SESSION_ROW_MARK_Y = SESSION_ROW.height / 2;
 
 export function SessionCard({
+  sessionId,
   title,
   subtitle,
   timestamp,
@@ -746,6 +752,7 @@ export function SessionCard({
   compact = false,
   selected = false,
 }: {
+  sessionId?: string | null;
   title: string;
   /** Smaller filled card for a parent session's expanded subagent list. */
   compact?: boolean;
@@ -799,6 +806,8 @@ export function SessionCard({
   // different concerns with different lifetimes, and PressableScale is
   // reused by four other pressables that have no list to belong to.
   const listMotion = useListItemMotion();
+  const activity = useSessionActivity(!!busy && !blocked && !ended);
+  const [textBounds, setTextBounds] = useState<LayoutRectangle>();
 
   // The archive backdrop has to match the row it is revealed from, or the red
   // shows past the corners as four sharp ears.
@@ -853,6 +862,7 @@ export function SessionCard({
           onPress={onPress}
           onLongPress={onLongPress}
           accessibilityHint={accessibilityHint}
+          accessibilityState={{ busy: !!busy && !blocked && !ended }}
           scale={1}
           style={({ pressed }) => ({
             flexDirection: "row",
@@ -881,11 +891,14 @@ export function SessionCard({
             height: compact ? 64 : SESSION_ROW.height,
           })}
         >
-          <AgentAvatar agent={agent} size={compact ? 28 : SESSION_ROW.avatar} busy={busy} plain />
-          <View style={{ flex: 1, gap: SESSION_ROW.textGap, minWidth: 0 }}>
+          <SessionActivityField identity={sessionId ?? title} activity={activity} textBounds={textBounds} cornerRadius={radius.md}
+            horizontalOutset={compact ? 0 : SESSION_ROW.inset} />
+          <AgentAvatar agent={agent} size={compact ? 28 : SESSION_ROW.avatar} plain />
+          <View onLayout={({ nativeEvent: { layout } }) => setTextBounds((old) =>
+            old && old.x === layout.x && old.y === layout.y && old.width === layout.width && old.height === layout.height ? old : layout)}
+            style={{ flex: 1, gap: SESSION_ROW.textGap, minWidth: 0 }}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0 }}>
-              <Text
-                numberOfLines={1}
+              <SessionActivityTitle title={title} activity={activity}
                 style={{
                   ...(compact ? type.subhead : type.headline),
                   flexShrink: 1,
@@ -895,9 +908,7 @@ export function SessionCard({
                   fontWeight: unread ? "700" : "600",
                   color: colors.text,
                 }}
-              >
-                {title}
-              </Text>
+              />
             </View>
             {/* Rendered unconditionally — see the prop's note. An empty
                 preview keeps its line rather than collapsing the row. */}
@@ -908,10 +919,6 @@ export function SessionCard({
               {subtitle ?? ""}
             </Text>
           </View>
-          {/* One definition of "is this session working?", shared with the
-              web — see SessionStatusDot. A spinner here was louder than the
-              web's pulsing dot and in the brand orange rather than warning
-              amber, so the two surfaces disagreed about the same session. */}
           {/* WHEN IT LAST MOVED, then what state it is in.
               The list had no time on it at all, so a session that moved thirty
               seconds ago looked exactly like one that moved yesterday. The web
@@ -931,9 +938,7 @@ export function SessionCard({
                 {timestamp}
               </Text>
             ) : null}
-            {/* No amber dot while busy: the agent mark beside the row already
-                wears the working ring, and two live indicators on one row read
-                as two different things happening. Blocked keeps its pause. */}
+            {/* Working uses the row's ambient field. Blocked keeps its pause. */}
             {blocked ? (
               <Icon ios="pause.fill" android="pause" size={12} color={colors.warning} />
             ) : null}
@@ -969,10 +974,10 @@ export function SessionCard({
  * app could only ever start one kind of session in one directory, on a product
  * whose entire point is choosing.
  *
- * Send is a send button, not "Start", and it only exists once there is
- * something to send. A permanently visible, permanently dimmed button is a
- * control that reads as broken; the field is self-evidently a thing you type
- * into, so nothing is lost by letting the button arrive with the text.
+ * Focus gives the text its own line and moves the agent, attachment, voice,
+ * and send controls underneath. Voice stays available after text exists.
+ * While recording, one inline capsule replaces Mic and Send so cancel and
+ * confirm occupy the same stable area.
  *
  * Purely presentational: the screen owns the draft, the choices and the submit.
  */
@@ -982,6 +987,16 @@ const COMPOSER_LINE = 24;
 const COMPOSER_MAX_LINES = 8;
 /** Never shrinks below this on a short window, or the cap stops meaning anything. */
 const COMPOSER_MIN_LINES = 3;
+
+/**
+ * The composer's surface, animatable.
+ *
+ * Created once at module scope: `createAnimatedComponent` builds a new
+ * component type, and doing that inside a render would give React a different
+ * type every frame and remount the whole composer -- which is the bug the
+ * fixed field slot below exists to prevent, reintroduced by the cure.
+ */
+const AnimatedGlassSurface = Reanimated.createAnimatedComponent(GlassSurface);
 
 export function HomeComposer({
   value,
@@ -1000,6 +1015,8 @@ export function HomeComposer({
   thinkingOptions,
   accountOptions,
   accountLabel,
+  fastMode,
+  onToggleFast,
   attachments,
   dictation,
   usage = [],
@@ -1025,6 +1042,8 @@ export function HomeComposer({
   /** The box's Claude logins. Empty unless it holds more than one. */
   accountOptions?: MenuOption[];
   accountLabel?: string | null;
+  fastMode?: boolean;
+  onToggleFast?: () => void;
   /** The files going with this prompt, and how to pick more. */
   attachments: {
     items: Attachment[];
@@ -1047,7 +1066,8 @@ export function HomeComposer({
   usageLoading?: boolean;
   bottomInset?: number;
 }) {
-  const { colors, isDark, radius, type, space } = useTheme();
+  const { colors, isDark, radius, type, space, motion } = useTheme();
+  const blockNavGesture = useBlockNavGesture();
   const [usageSheet, setUsageSheet] = useState<"agent" | "all" | null>(null);
   /** The not-yet-settled words, when a live take is running. */
   const dictationTail =
@@ -1055,8 +1075,6 @@ export function HomeComposer({
   const hasMessage = value.trim().length > 0 || attachments.items.some((item) => item.path);
   const uploading = attachments.items.some((item) => !item.path && !item.failed);
   const canStart = hasMessage && !starting && !uploading;
-  /** Where the finger went down on the mic, so an upward drag can cancel once. */
-  const cancelSwipe = useRef<{ y: number; fired: boolean } | null>(null);
   const hairline = {
     borderWidth: isDark ? StyleSheet.hairlineWidth : 0,
     borderColor: colors.borderSoft,
@@ -1068,7 +1086,9 @@ export function HomeComposer({
     agentOptions.length || modelOptions?.length || thinkingOptions?.length,
   );
   const [setupOpen, setSetupOpen] = useState(false);
+  const [setupPage, setSetupPage] = useState<"root" | "profiles">("root");
   const [inputHeight, setInputHeight] = useState(COMPOSER_LINE);
+  const [composerFocused, setComposerFocused] = useState(false);
   const promptText = dictationTail ? `${value}${value ? " " : ""}${dictationTail}` : value;
   /**
    * HOW TALL THIS IS ALLOWED TO GROW.
@@ -1092,8 +1112,152 @@ export function HomeComposer({
   const measuredInputHeight = promptText
     ? Math.max(COMPOSER_LINE, Math.min(maxInputHeight, inputHeight))
     : COMPOSER_LINE;
+  const expanded = composerFocused || hasMessage || dictation.state !== "idle";
+  /**
+   * ONE VALUE DRIVES THE MORPH, so the parts cannot arrive out of step.
+   *
+   * `flexDirection` is a discrete layout property: row does not tween into
+   * column, and nothing can make it. What sells the change is everything
+   * around it moving together -- the box growing, the corners opening from 26
+   * to 30, the padding relaxing -- and the field gliding from beside the
+   * controls to above them, which the `layout` transitions below carry.
+   *
+   * Reduce Motion is honoured by jumping the same value rather than by
+   * skipping the styles, so the composer still ends in exactly the same shape.
+   */
+  const stillMotion = useReduceMotionEnabled();
+  const morph = useSharedValue(expanded ? 1 : 0);
+  useEffect(() => {
+    morph.value = stillMotion
+      ? (expanded ? 1 : 0)
+      : withTiming(expanded ? 1 : 0, {
+          duration: motion.fast,
+          easing: Easing.bezier(...motion.easeSmoothOut),
+        });
+  }, [expanded, morph, stillMotion, motion.fast, motion.easeSmoothOut]);
+  /*
+   * The arithmetic is INLINE, not a helper.
+   *
+   * `useAnimatedStyle` runs on the UI runtime. A tidy `lerp` defined out here
+   * is an ordinary JS-thread closure, and calling one from a worklet throws
+   * "Tried to synchronously call a Remote Function" at runtime -- which the
+   * check harness cannot see, because it mocks `useAnimatedStyle` as a plain
+   * call on the JS thread. Caught on a device.
+   *
+   * Plain numbers like `space.sm` are captured by value and are fine.
+   */
+  const collapsedPad = space.sm;
+  const morphStyle = useAnimatedStyle(() => {
+    const t = morph.value;
+    return {
+      borderRadius: 26 + 4 * t,
+      paddingTop: 7 + 7 * t,
+      paddingBottom: 7 + 5 * t,
+      paddingHorizontal: collapsedPad + (14 - collapsedPad) * t,
+    };
+  });
+  /*
+   * The children glide to their new places instead of jumping. Without this
+   * the box animates and its contents teleport inside it, which reads as a
+   * glitch rather than a morph.
+   */
+  const slide = LinearTransition.duration(motion.fast)
+    .easing(Easing.bezier(...motion.easeSmoothOut))
+    .reduceMotion(stillMotion ? ReduceMotion.Always : ReduceMotion.Never);
+  const agentControl = hasSetup ? (
+    <PressableScale
+      onPress={() => { setSetupPage("root"); setSetupOpen(true); }}
+      onLongPress={agent === "aisdk" && accountOptions?.length ? () => { setSetupPage("profiles"); setSetupOpen(true); } : undefined}
+      scale={0.94}
+      accessibilityRole="button"
+      accessibilityLabel={`${agentLabel ?? "Coding agent"}, ${modelLabel ?? "default model"}, ${thinkingLabel ?? "default thinking"}. Change`}
+      accessibilityActions={agent === "aisdk" && accountOptions?.length ? [{ name: "profiles", label: "Choose Claude profile" }] : undefined}
+      onAccessibilityAction={event => { if (event.nativeEvent.actionName === "profiles") { setSetupPage("profiles"); setSetupOpen(true); } }}
+      style={{ width: 44, height: 44, alignItems: "center", justifyContent: "center" }}
+    >
+      <AgentAvatar agent={agent} size={32} />
+    </PressableScale>
+  ) : (
+    <AgentAvatar agent={agent} size={32} />
+  );
+  const attachmentControl = (
+    <DropdownMenu options={attachments.options} style={{ width: 34, height: 34 }}>
+      <View
+        accessibilityRole="button"
+        accessibilityLabel="Attach a file"
+        style={{ width: 34, height: 34, alignItems: "center", justifyContent: "center" }}
+      >
+        <Icon ios="plus" android="add" size={20} color={colors.textSecondary} />
+      </View>
+    </DropdownMenu>
+  );
+  const micControl = (
+    <Pressable
+      onPress={dictation.toggle}
+      disabled={dictation.state !== "idle"}
+      accessibilityRole="button"
+      accessibilityLabel="Dictate a prompt"
+      accessibilityState={{ disabled: dictation.state !== "idle" }}
+      style={({ pressed }) => ({
+        width: 34,
+        height: 34,
+        alignItems: "center",
+        justifyContent: "center",
+        opacity: pressed ? 0.6 : 1,
+      })}
+    >
+      <Icon ios="mic" android="mic" size={18} color={colors.textSecondary} />
+    </Pressable>
+  );
+  const sendControl = (
+    <PressableScale
+      onPress={onStart}
+      disabled={!canStart}
+      accessibilityLabel="Start session"
+      accessibilityState={{ disabled: !canStart, busy: !!starting }}
+      scale={0.94}
+      dim={0.8}
+      style={{
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: canStart ? colors.text : colors.secondary,
+        borderRadius: 20,
+        width: 40,
+        height: 40,
+      }}
+    >
+      <Icon ios="arrow.up" android="arrow_upward" size={17} color={canStart ? colors.bg : colors.textMuted} />
+    </PressableScale>
+  );
+  const inputControl = (
+    <TextInput
+      value={promptText}
+      onChangeText={onChangeText}
+      editable={!dictationTail}
+      placeholder="What should we work on?"
+      placeholderTextColor={colors.textMuted}
+      multiline
+      submitBehavior="newline"
+      scrollEnabled
+      onFocus={() => setComposerFocused(true)}
+      onBlur={() => setComposerFocused(false)}
+      onContentSizeChange={event => setInputHeight(Math.ceil(event.nativeEvent.contentSize.height))}
+      style={{
+        flex: expanded ? undefined : 1,
+        width: expanded ? "100%" : undefined,
+        minWidth: 0,
+        height: measuredInputHeight,
+        color: colors.text,
+        ...type.body,
+        fontSize: 18,
+        lineHeight: 24,
+        textAlignVertical: "top",
+        paddingVertical: 0,
+      }}
+    />
+  );
   return (
-    <View
+    <View onTouchStart={blockNavGesture}
       /**
        * SOLID, NOT GLASS — deliberately, unlike the pills inside it.
        *
@@ -1138,18 +1302,19 @@ export function HomeComposer({
       />
       {/* Liquid Glass on iOS 26+, a solid card everywhere else. */}
       <AttachmentStrip items={attachments.items} onRemove={attachments.remove} />
-      <GlassSurface
+      <AnimatedGlassSurface
         variant="regular"
         fallbackColor={colors.card}
-        style={{
-          flexDirection: "row",
-          alignItems: "center",
-          gap: space.sm,
-          borderRadius: 26,
+        // The height change is a layout change, so the container's own
+        // transition carries it; the corners and padding are style changes and
+        // ride `morphStyle`.
+        layout={slide}
+        style={[morphStyle, {
+          flexDirection: expanded ? "column" : "row",
+          alignItems: expanded ? "stretch" : "center",
+          gap: expanded ? 14 : space.sm,
+          borderCurve: "continuous",
           minHeight: 52,
-          paddingVertical: 7,
-          paddingLeft: space.sm,
-          paddingRight: space.sm,
           overflow: "hidden",
           shadowColor: colors.text,
           shadowOpacity: isDark || LIQUID_GLASS ? 0 : 0.08,
@@ -1157,183 +1322,85 @@ export function HomeComposer({
           shadowOffset: { width: 0, height: 4 },
           elevation: 2,
           ...(LIQUID_GLASS ? {} : hairline),
-        }}
+        }]}
       >
-        {/* The avatar IS the agent picker. It already showed which agent would
-            run, so making it the control means the answer and the way to
-            change it are the same object, rather than adding a second
-            affordance that says the same thing.
-
-            It opens AgentSetupSheet: one card with agent, model and thinking
-            all visible, instead of a native menu with a submenu per row. */}
-        {/* No affordance badge. A chevron tucked under the avatar was a 14pt
-            label explaining a control that opens the moment you touch it —
-            the kind of hint that makes an interface look unsure of itself.
-            Pressing it teaches it once and for good. */}
-        {hasSetup ? (
-          <PressableScale
-            onPress={() => setSetupOpen(true)}
-            scale={0.94}
-            accessibilityRole="button"
-            accessibilityLabel={`${agentLabel ?? "Coding agent"}, ${modelLabel ?? "default model"}, ${thinkingLabel ?? "default thinking"}. Change`}
-            style={{ width: 38, height: 38, alignItems: "center", justifyContent: "center" }}
-          >
-            <AgentAvatar agent={agent} size={32} />
-          </PressableScale>
-        ) : (
-          <AgentAvatar agent={agent} size={32} />
-        )}
-        <AgentSetupSheet
-          visible={setupOpen}
-          onClose={() => setSetupOpen(false)}
-          agentOptions={agentOptions}
-          modelOptions={modelOptions}
-          thinkingOptions={thinkingOptions}
-          accountOptions={accountOptions}
-          accountLabel={accountLabel}
-          usageRing={
-            agentUsage ? (
-              <UsageRings
-                size={28}
-                windows={agentUsage.available ? orderWindows(agentUsage.windows ?? []) : []}
-              />
-            ) : null
-          }
-          usageLoading={usageLoading}
-        />
-        <TextInput
-          /**
-           * THE LIVE TRANSCRIPT GOES IN THE FIELD, not above it.
-           *
-           * It spent a version as a dimmed caption over the composer, which
-           * put the words you were saying somewhere other than the box they
-           * were about to become — you watched one place and typed in
-           * another. Dictation is typing with your voice, so it belongs in the
-           * field, exactly where typed words would be.
-           *
-           * Committed chunks are already IN `value` (that is what `onText`
-           * does); `partial` is only ever the tail the transcriber has not
-           * settled yet, so appending it here shows the whole sentence with no
-           * double-counting.
-           */
-          value={promptText}
-          onChangeText={onChangeText}
-          /**
-           * Not editable mid-take. The field's contents are partly a
-           * provisional tail that will be REPLACED when the transcriber
-           * settles it, so a keystroke landing in the middle of that would be
-           * silently eaten. You are speaking, not typing.
-           */
-          editable={!dictationTail}
-          placeholder="What should we work on?"
-          placeholderTextColor={colors.textMuted}
-          multiline
-          submitBehavior="newline"
-          // iOS reports only the visible height when native scrolling is disabled.
-          // Grow to fit first; the field scrolls once its content exceeds 120pt.
-          scrollEnabled
-          onContentSizeChange={event => setInputHeight(Math.ceil(event.nativeEvent.contentSize.height))}
-          style={{
-            flex: 1,
-            minWidth: 0,
-            height: measuredInputHeight,
-            color: colors.text,
-            ...type.body,
-            fontSize: 18,
-            lineHeight: 24,
-            textAlignVertical: "top",
-            paddingVertical: 0,
-          }}
-        />
-        {/* Attach sits in the field, at the trailing edge, next to the control
-            that sends. Both act on the message, so both belong to the box that
-            holds it. */}
-        <DropdownMenu options={attachments.options} style={{ width: 30, height: 30 }}>
-          <View
-            accessibilityRole="button"
-            accessibilityLabel="Attach a file"
-            style={{ width: 30, height: 30, alignItems: "center", justifyContent: "center" }}
-          >
-            <Icon ios="paperclip" android="attach_file" size={17} color={colors.textMuted} />
-          </View>
-        </DropdownMenu>
-
-        {/* Dictate until there are words to send, then the same spot sends
-            them — the rule the session composer follows. */}
-        {!hasMessage && !starting ? (
-          <Pressable
-            onPress={dictation.toggle}
-            /**
-             * THE SAME RECORDING CONTROL AS THE CHAT COMPOSER — meter while
-             * listening, hold or swipe up to throw the take away.
-             *
-             * This screen had the old red stop square long after the session
-             * screen stopped using one, so the same act looked like two
-             * different features depending which composer you were in.
-             */
-            onLongPress={dictation.cancel}
-            delayLongPress={400}
-            onTouchStart={(e) => {
-              cancelSwipe.current = { y: e.nativeEvent.pageY, fired: false };
-            }}
-            onTouchMove={(e) => {
-              const swipe = cancelSwipe.current;
-              if (!swipe || swipe.fired || dictation.state !== "recording") return;
-              if (swipe.y - e.nativeEvent.pageY > 44) {
-                swipe.fired = true;
-                dictation.cancel?.();
-              }
-            }}
-            accessibilityRole="button"
-            accessibilityLabel={
-              dictation.state === "recording" ? "Stop and start the session" : "Dictate a prompt"
-            }
-            accessibilityHint={
-              dictation.state === "recording"
-                ? "Swipe up or hold to discard this recording"
-                : undefined
-            }
-            style={({ pressed }) => ({
-              width: 30,
-              height: 30,
-              alignItems: "center",
-              justifyContent: "center",
-              opacity: pressed ? 0.6 : 1,
-            })}
-          >
-            {dictation.state === "transcribing" ? (
-              <ActivityIndicator size="small" color={colors.textMuted} />
-            ) : dictation.state === "recording" ? (
-              <VoiceMeter level={dictation.level} color={colors.danger} />
+        {/*
+         * THE FIELD KEEPS ITS SLOT IN BOTH LAYOUTS, and that is the whole
+         * reason this is written as three fixed positions instead of two
+         * branches.
+         *
+         * It used to be `expanded ? <>{field}{controls}</> : <>{agent}{field}
+         * {attach}{mic}</>`, which put the TextInput at index 0 in one branch
+         * and index 1 in the other. React reconciles unkeyed siblings BY
+         * POSITION, so flipping `expanded` compared the field against the
+         * agent avatar, found different types, and unmounted the field to
+         * mount a new one.
+         *
+         * Both bugs Benny reported came out of that single remount:
+         *
+         *  - The first tap did not open the keyboard. Focusing set `expanded`,
+         *    which destroyed the very field that had just taken focus, so the
+         *    keyboard had nothing to attach to.
+         *  - The composer did not morph back. The destroyed field could not
+         *    deliver its `onBlur`, so `composerFocused` stayed true and the
+         *    box never collapsed.
+         *
+         * Keeping the field at a fixed index means React UPDATES it in place.
+         * Everything around it may still be rebuilt freely; none of it holds
+         * focus. `null` holds a slot, so the indices stay aligned.
+         */}
+        {expanded ? null : agentControl}
+        {inputControl}
+        {expanded ? (
+          <Reanimated.View layout={slide} style={{ minHeight: 40, flexDirection: "row", alignItems: "center", gap: 8 }}>
+            {agentControl}
+            {attachmentControl}
+            <View style={{ flex: 1 }} />
+            {dictation.state === "idle" ? (
+              <>
+                {micControl}
+                {sendControl}
+              </>
             ) : (
-              <Icon ios="mic" android="mic" size={17} color={colors.textMuted} />
+              <InlineVoiceRecorder
+                state={dictation.state}
+                level={dictation.level}
+                onCancel={() => dictation.cancel?.()}
+                onConfirm={dictation.toggle}
+              />
             )}
-          </Pressable>
-        ) : null}
-
-        {/* Arrives with the text and leaves with it. Circular and glyph-only:
-            the Messages send button, not a labelled call to action. */}
-        {hasMessage || starting ? (
-          <PressableScale
-            onPress={onStart}
-            disabled={!canStart}
-            accessibilityLabel="Start session"
-            accessibilityState={{ disabled: !canStart, busy: !!starting }}
-            scale={0.94}
-            dim={0.8}
-            style={{
-              alignItems: "center",
-              justifyContent: "center",
-              backgroundColor: !canStart ? colors.border : colors.text,
-              borderRadius: radius.pill,
-              width: 34,
-              height: 34,
-            }}
-          >
-            <Icon ios="arrow.up" android="arrow_upward" size={16} color={!canStart ? colors.textMuted : colors.bg} />
-          </PressableScale>
-        ) : null}
-      </GlassSurface>
+          </Reanimated.View>
+        ) : (
+          <Reanimated.View layout={slide} style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
+            {attachmentControl}
+            {micControl}
+          </Reanimated.View>
+        )}
+      </AnimatedGlassSurface>
+      <AgentSetupSheet
+        visible={setupOpen}
+        onClose={() => setSetupOpen(false)}
+        agentOptions={agentOptions}
+        modelOptions={modelOptions}
+        thinkingOptions={thinkingOptions}
+        accountOptions={accountOptions}
+        accountLabel={accountLabel}
+        modelLabel={modelLabel}
+        agentLabel={agentLabel}
+        fastMode={fastMode}
+        onToggleFast={onToggleFast}
+        initialPage={setupPage}
+        usageDetails={<UsageDetails providers={usage.filter(provider => provider.kind === providerKindForAgent(agent))} />}
+        usageRing={
+          agentUsage ? (
+            <UsageRings
+              size={20}
+              windows={agentUsage.available ? orderWindows(agentUsage.windows ?? []) : []}
+            />
+          ) : null
+        }
+        usageLoading={usageLoading}
+      />
 
       {/* UNDER the box: what the fleet has spent on the left, where the next
           session runs on the right. Both are facts ABOUT the message you are
@@ -1755,6 +1822,113 @@ export function VoiceMeter({ level, color }: { level?: number; color: string }) 
 }
 
 /**
+ * The inline voice control shared by both composers.
+ *
+ * This deliberately stays a regular capsule. The composer around it uses
+ * continuous corners, but the recorder replaces two circular controls and
+ * should retain that simpler geometry. Confirm ends the take through the
+ * existing dictation owner; cancel drops it through that same owner.
+ */
+export function InlineVoiceRecorder({
+  state,
+  level,
+  onCancel,
+  onConfirm,
+}: {
+  state: "recording" | "transcribing";
+  level?: number;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const { colors } = useTheme();
+  const recording = state === "recording";
+
+  return (
+    <View
+      accessibilityLabel={recording ? "Voice recording controls" : "Transcribing voice"}
+      style={{
+        width: 126,
+        height: 40,
+        padding: 3,
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 5,
+        borderRadius: 20,
+        backgroundColor: colors.bg,
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: colors.border,
+        shadowColor: "#000000",
+        shadowOpacity: 0.18,
+        shadowRadius: 8,
+        shadowOffset: { width: 0, height: 3 },
+      }}
+    >
+      <PressableScale
+        onPress={onCancel}
+        disabled={!recording}
+        accessibilityRole="button"
+        accessibilityLabel="Discard recording"
+        accessibilityState={{ disabled: !recording }}
+        scale={0.9}
+        style={{
+          width: 32,
+          height: 32,
+          borderRadius: 16,
+          alignItems: "center",
+          justifyContent: "center",
+          backgroundColor: colors.secondary,
+          opacity: recording ? 1 : 0.45,
+        }}
+      >
+        <Icon ios="xmark" android="close" size={13} color={colors.textSecondary} weight="semibold" />
+      </PressableScale>
+
+      <View
+        accessibilityLiveRegion="polite"
+        style={{
+          flex: 1,
+          minWidth: 0,
+          height: 32,
+          flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 6,
+        }}
+      >
+        {recording ? (
+          <>
+            <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.danger }} />
+            <VoiceMeter level={level} color={colors.text} />
+          </>
+        ) : (
+          <ActivityIndicator size="small" color={colors.textSecondary} />
+        )}
+      </View>
+
+      <PressableScale
+        onPress={onConfirm}
+        disabled={!recording}
+        accessibilityRole="button"
+        accessibilityLabel="Finish recording"
+        accessibilityState={{ disabled: !recording }}
+        scale={0.9}
+        style={{
+          width: 32,
+          height: 32,
+          borderRadius: 16,
+          alignItems: "center",
+          justifyContent: "center",
+          backgroundColor: colors.text,
+          opacity: recording ? 1 : 0.45,
+        }}
+      >
+        <Icon ios="checkmark" android="check" size={14} color={colors.bg} weight="semibold" />
+      </PressableScale>
+    </View>
+  );
+}
+
+/**
  * The files waiting to go with the next message.
  *
  * Thumbnails, not filenames: someone who just picked three screenshots knows
@@ -1957,6 +2131,16 @@ export function UsageSheet({
           </Pressable>
         </View>
 
+        <UsageDetails providers={providers} />
+      </View>
+    </Sheet>
+  );
+}
+
+/** Shared reset details for the selector page and the composer usage sheet. */
+export function UsageDetails({ providers }: { providers: ProviderUsage[] }) {
+  const { colors, type, space, radius } = useTheme();
+  return (
         <View style={{ padding: space.lg, gap: space.lg }}>
           {providers.length === 0 ? (
             <Text style={{ ...type.footnote, color: colors.textMuted }}>
@@ -1964,7 +2148,7 @@ export function UsageSheet({
             </Text>
           ) : null}
           {providers.map((provider) => {
-            const windows = provider.windows ?? [];
+            const windows = orderWindows(provider.windows ?? []);
             return (
               <View
                 key={provider.id}
@@ -1998,14 +2182,14 @@ export function UsageSheet({
 
                 {windows.length ? (
                   <View style={{ flexDirection: "row", alignItems: "center", gap: space.lg }}>
-                    <UsageRings windows={windows} size={52} />
+                    <UsageRings windows={windows} size={44} strokeWidth={4.5} />
                     <View style={{ flex: 1, gap: 6 }}>
-                      {windows.slice(0, RING_COLORS.length).map((w, index) => {
+                      {windows.map((w, index) => {
                         const resets = resetsIn(w.resetsAt);
                         return (
                           // Index, not label: two windows can share a label
                           // ("session"), and a duplicate key drops a legend row.
-                          <View key={index} style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
+                          <View key={index} style={{ flexDirection: "row", alignItems: "flex-start", gap: space.sm }}>
                             <View
                               style={{
                                 width: 8,
@@ -2014,21 +2198,15 @@ export function UsageSheet({
                                 backgroundColor: RING_COLORS[index % RING_COLORS.length],
                               }}
                             />
-                            <Text style={{ ...type.caption, color: colors.textSecondary, flex: 1 }} numberOfLines={1}>
-                              {w.label}
-                            </Text>
-                            <Text
-                              style={{
-                                ...type.caption,
-                                fontVariant: ["tabular-nums"],
-                                color: colors.text,
-                              }}
-                            >
+                            <View style={{ flex: 1, gap: 3 }}>
+                              <Text style={{ ...type.caption, color: colors.textSecondary }}>{w.label}</Text>
+                              <Text style={{ ...type.caption, color: colors.textMuted }}>
+                                {resets ? `Next reset ${resets} · ${new Date(w.resetsAt!).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}` : "Reset time unavailable"}
+                              </Text>
+                            </View>
+                            <Text style={{ ...type.caption, fontVariant: ["tabular-nums"], color: colors.text }}>
                               {w.pct === null || w.pct === undefined ? "—" : `${Math.round(w.pct)}%`}
                             </Text>
-                            {resets ? (
-                              <Text style={{ ...type.caption, color: colors.textMuted }}>{resets}</Text>
-                            ) : null}
                           </View>
                         );
                       })}
@@ -2047,24 +2225,23 @@ export function UsageSheet({
             );
           })}
         </View>
-      </View>
-    </Sheet>
   );
 }
 
 export function UsageRings({
   windows,
   size = 24,
+  strokeWidth = 3,
 }: {
   windows: UsageWindow[];
   size?: number;
+  strokeWidth?: number;
 }) {
   const { colors } = useTheme();
   const shown = windows.slice(0, RING_COLORS.length);
-  // 3 at this diameter: the arcs have to stay distinguishable from each other
-  // at 22pt, and a 3.5 stroke on a 22pt circle leaves the inner ring almost no
-  // room to exist.
-  const thickness = 3;
+  // Leave a visible centre and a 1pt gap even with four compact rings.
+  const count = Math.max(1, shown.length);
+  const thickness = Math.min(strokeWidth, (size - 4 - 2 * (count - 1)) / (2 * count));
   const gap = thickness + 1;
 
   return (
@@ -2172,6 +2349,14 @@ function Arc({
           backgroundColor: holeColor,
         }}
       />
+      {angle > 0 ? [0, angle].map((degrees, index) => {
+        const radians = degrees * Math.PI / 180;
+        const radius = (diameter - thickness) / 2;
+        return <View key={index} style={{ position: "absolute", width: thickness, height: thickness,
+          borderRadius: thickness / 2, backgroundColor: color,
+          left: half + radius * Math.sin(radians) - thickness / 2,
+          top: half - radius * Math.cos(radians) - thickness / 2 }} />;
+      }) : null}
     </View>
   );
 }

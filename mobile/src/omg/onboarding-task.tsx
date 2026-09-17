@@ -54,11 +54,30 @@ export function TaskScreen({
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.bg, paddingTop: insets.top }}>
-      {/* The lane in the corner: four versions of one title that differ only
-          below the fold would otherwise read as the screen failing to change. */}
-      <StepHeader onBack={onBack} trailing={lane.label} />
+      {/*
+       * NO LANE LABEL. Benny dropped it from the design and confirmed it.
+       *
+       * It was there because the four lane variants of this screen differ only
+       * below the fold, so going back and picking another lane could read as
+       * the screen failing to change. That risk is real but small: the tool
+       * badges and all three task titles change with the lane, and they are
+       * the first things below the heading.
+       */}
+      <StepHeader onBack={onBack} />
       <View style={{ flex: 1, paddingHorizontal: space.lg + 4, gap: space.lg }}>
-        <StepHeading title={"Choose your\nfirst task."} body="Pick a task or start with your own idea." />
+        {/*
+         * NO HARD LINE BREAK, unlike step 01's headline.
+         *
+         * 01 keeps its `\n` because two short sentences carry a rhythm there
+         * that reflow would lose. This is one sentence, and the design draws
+         * it wrapping naturally, so a break forced here would fight the
+         * device: the same string lands differently on a 6.1" and a 6.9"
+         * screen, and on the narrow one a forced break strands a word.
+         */}
+        <StepHeading
+          title="Start your first task."
+          body="Pick a task or start with your own idea."
+        />
 
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
           {lane.tools.map((tool) => (
