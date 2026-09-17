@@ -10,5 +10,5 @@ export function agentSupportsFastMode(agent: string): boolean {
 
 export function supportsFastMode(agent: string, model?: string | null): boolean {
   return agentSupportsFastMode(agent) &&
-    (agent === "claude" || agent === "aisdk" || codexModelSupportsFast(model));
+    (agent === "claude" || agent === "aisdk" || agent === "devin" || codexModelSupportsFast(model));
 }

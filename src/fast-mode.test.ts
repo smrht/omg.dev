@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { agentSupportsFastMode, resolveSessionFastMode } from "./fast-mode.ts";
+import { supportsFastMode } from "../packages/protocol/src/fast-mode-support.ts";
 
 describe("session Fast mode", () => {
   test("supports Codex and Claude without coupling to thinking effort", () => {
     expect(agentSupportsFastMode("codex-aisdk")).toBe(true);
     expect(agentSupportsFastMode("aisdk")).toBe(true);
     expect(agentSupportsFastMode("devin")).toBe(true);
+    expect(supportsFastMode("devin", "swe-2-high")).toBe(true);
     expect(agentSupportsFastMode("opencode")).toBe(false);
 
     expect(resolveSessionFastMode({
