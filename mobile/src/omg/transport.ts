@@ -20,11 +20,14 @@ import {
 
 import { SESSION_AUTH_PATH, SESSION_ORIGIN } from "./config";
 import { getAuthToken } from "./auth";
+import { getDemoTransport } from "./demo-data";
+import { isDemoMode } from "./demo";
 import {
   isSharedBindingId,
   mintTargetForBinding,
   SHARED_REVOKED_DETAIL,
 } from "./computer-shared-binding";
+import { signedArtifactUrl } from "./signed-asset-url";
 
 export class ComputerGrantError extends Error {
   /**
@@ -172,6 +175,11 @@ const transports = new Map<string, { transport: OmgTransport; owner: GrantOwner 
  * subtree its own copy of the grant cache, which is the thing being shared.
  */
 export function getHostedTransport(bindingId: string): OmgTransport {
+  // Demo mode short-circuits the whole grant/mint machinery: the seeded
+  // transport answers every path from fixtures, so the real client and
+  // readiness probe run unchanged on top of it. See demo-data.ts.
+  if (isDemoMode()) return getDemoTransport();
+
   const existing = transports.get(bindingId);
   if (existing) return existing.transport;
 
@@ -200,6 +208,7 @@ export function createDirectTransport(baseUrl: string): OmgTransport {
 
   return {
     fetch: doFetch,
+    assetUrl: (path: string) => `${origin}${path}`,
     async request<T>(path: string, init: RequestInit = {}): Promise<T> {
       const response = await doFetch(path, init);
       const text = await response.text().catch(() => "");
@@ -234,6 +243,35 @@ export function createDirectTransport(baseUrl: string): OmgTransport {
 }
 
 /** Drop a machine's cached transport, e.g. after sign-out or unpairing. */
+/**
+ * A signed URL a native media loader can fetch right now.
+ *
+ * `OmgTransport.fetch` is the right way to move bytes through JavaScript, but
+ * a video is the one payload that should never pass through JavaScript at
+ * all: a 20 MB recording read into an ArrayBuffer and written back out is
+ * seconds of main-thread work on a phone, and it happens twice. The
+ * filesystem module and media player issue their own requests, so they cannot
+ * use the transport's Authorization header. The session proxy accepts this
+ * short-lived grant only on read-only artifact routes and removes it before it
+ * reaches the Computer.
+ *
+ * Null for a binding this module does not own a grant for (a direct
+ * transport), so the caller can fall back to the fetch path.
+ */
+export async function signedRequestFor(
+  bindingId: string,
+  path: string,
+  options: { forceRefresh?: boolean } = {},
+): Promise<{ url: string; headers: Record<string, string> } | null> {
+  const entry = transports.get(bindingId);
+  if (!entry) return null;
+  const grant = await entry.owner.get({ forceRefresh: options.forceRefresh ?? false });
+  return {
+    url: signedArtifactUrl(SESSION_ORIGIN, path, grant.token),
+    headers: {},
+  };
+}
+
 export function forgetTransport(bindingId: string): void {
   transports.get(bindingId)?.owner.reset();
   transports.delete(bindingId);

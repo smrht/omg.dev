@@ -5,6 +5,12 @@ A UI change is not verified until you have SEEN it. `tsc --noEmit` and
 that happened on 2026-08-14, and a broken nav bar was committed and pushed on
 the strength of those two green checks. Neither one can see a screen.
 
+**If you touch an iOS feature, prove it with `bun run test:e2e --plan <name>
+--record` and add a step for what you changed.** Maestro drives the real
+simulator, Jev judges each step from the accessibility tree, and the run ends
+with the side-by-side step video. It is the only check here that can see a
+screen. See "Prove it with Maestro and Jev" below.
+
 The Mac is a Tailscale peer, so it is reachable from any dev box on the tailnet
 with no port forwarding and no VPN setup:
 
@@ -119,7 +125,167 @@ xcrun simctl spawn "$PRO" log show --last 3m --style compact \
   --predicate 'processImagePath CONTAINS "omg"' | grep -iE 'fail|error'
 ```
 
-## Tapping: there is no `simctl tap`. Calibrate off the accessibility tree.
+## Prove it with Maestro and Jev. Do not synthesise clicks.
+
+Any session that touches an iOS feature runs this. It is the layer that `tsc`,
+`test:native` and `expo export` structurally cannot cover, and it is the layer
+that shipped a grey screen and a broken nav bar.
+
+```bash
+cd mobile
+bun run test:e2e --plan onboarding --record          # THE proof: Jev-judged plan + step video
+bun run test:e2e --build --plan onboarding --record   # build the app on the Mac first, then prove it
+bun run test:e2e --install URL --plan onboarding --record   # same, on an EAS simulator-release artifact
+bun run test:e2e --inspect                           # print the current screen's elements
+bun run test:e2e --flow smoke --record               # a static Maestro flow, maestro record --local
+```
+
+The runner is `scripts/maestro.ts`. It resolves the UDID **by device name**,
+takes an exclusive lock on the shared Mac, and releases it in a `finally`.
+
+**Every feature change is proven by a `--plan` run with a step for the change,
+and the video goes with the ship.** Benny's rule, 2026-09-17, made the default
+on 2026-09-18. A hand-driven tap session is not proof. For onboarding that
+means `--plan onboarding --record` on a release build that contains the
+change. Use `--build`: Xcode on the Mac, about 45 seconds once the native
+project is warm, against about ten minutes plus a queue for
+`eas build --profile simulator-release --platform ios`. Add the step, or the
+`expect` strings, in the same commit as the change.
+
+### `--build`: the app comes from the Mac, not from EAS
+
+`scripts/e2e-build.ts` rsyncs `mobile/` and `packages/protocol/src` to
+`~/.omg-e2e-src` on the Mac, runs `bun install`, and builds with
+`xcodebuild -sdk iphonesimulator -configuration Release`. The result is the
+same product as the `simulator-release` profile: unsigned, bundle embedded, no
+dev client to pop over the app. `maestro.ts --build` installs it and runs the
+plan.
+
+- It builds BEFORE it takes the device lock. A build touches no simulator.
+- The native project (`ios/`) and DerivedData stay between runs. That is the
+  whole speed: the first build is minutes, later ones are the bundle phase.
+  `expo prebuild` runs only when `ios/` is absent, because it rewrites the
+  project and throws DerivedData away.
+- Do NOT use `expo run:ios --device <udid>`. It reads a simulator UDID as a
+  physical device and stops on "No code signing certificates are available".
+- The Mac needs node >= 20.19.4 for Expo. `~/.bun/bin/node` is bun's shim and
+  shadows the real one, so the script puts the highest `~/.nvm` version in
+  front of `PATH` itself.
+- EAS stays the path for TestFlight and for a machine that cannot reach the
+  Mac.
+
+### Plans, not flows: how the Jev runner works
+
+A plan (`e2e/<name>.plan.json`) is a list of steps, each with a `goal` and a
+`done` description in plain words, plus optional `expect` / `forbid` strings.
+`scripts/e2e-jev.ts` runs it:
+
+1. One `maestro mcp` process for the whole run (`scripts/maestro-mcp.ts`), so
+   there is no JVM restart per tap.
+2. For every look: `inspect_screen` (the accessibility tree, text only), one
+   Jev call (`scripts/jev.ts`, about half a second) with three questions:
+   `done`, `blocked`, `tap`.
+3. `done` high and every `expect` string present and every `forbid` string
+   absent: the step passes, immediately. No fixed waits anywhere.
+4. `blocked` high (error, rate-limit challenge, dev menu): the run fails NOW,
+   by name, instead of sitting out a 120 second timeout.
+5. Otherwise it taps what Jev picked and looks again.
+
+Exact facts stay in code. A feature proof is the `expect` list: the strings the
+screen must show. Jev only decides readiness and navigation, the part a fixed
+selector cannot survive a copy change on. Never put the proof in the `done`
+prose alone.
+
+`--record` captures the device with `simctl` and composes the Maestro-style
+video with ffmpeg on this box: device on the left, the step list ticking on
+the right at the moment the runner decided. It lands at `e2e/<name>.mp4`,
+which is gitignored. Attach it with `omg_display_video`.
+
+Jev needs `TYPESAFE_API_KEY` or `~/.config/typesafe/env`. It takes text only,
+no screenshots; that is why the tree is the state. Static YAML flows in
+`e2e/*.yaml` still run with `--flow` and are fine for a fixed smoke, but new
+proofs are plans.
+
+### Why this replaces the CGEvent section below
+
+Maestro talks to the device by UDID through its own on-device driver, and
+matches elements from the accessibility tree. That deletes every trap the old
+approach documented, because none of the machinery is involved any more:
+
+| Old trap | Why it is gone |
+| --- | --- |
+| bare `booted` picks another agent's device | the runner pins the UDID by name |
+| stale `AXRaise`, tap lands on a non-key window | no window focus, no coordinates |
+| `keystroke` silently no-ops over SSH | `inputText` goes through the driver |
+
+A selector that does not match is a loud failure with a screenshot, instead of
+a tap into empty space that looks like a pass.
+
+### Writing selectors
+
+Read the screen with `--inspect` and copy the strings verbatim. Never author a
+selector from a screenshot: an element showing a heart icon looks like a
+"Favorite" button in an image and has no such text in the hierarchy.
+
+- `text:` is **full-string regex, IGNORE_CASE**. A partial string does NOT
+  match. Anchor with `.*` for a prefix.
+- iOS `accessibilityText` maps to `text:`. `accessibilityText:` and `a11y:`
+  are not selector keys and Maestro rejects them.
+- Prefer `id:` where a stable `resource-id` exists. Most of this app has none
+  yet. Add `testID` props as you touch screens, and prefer them over labels.
+
+### The development build blocks `launchApp`
+
+Do not start a flow with `launchApp`. The simulator carries a dev client, so a
+restart with no Metro attached lands on "Searching for development servers..."
+and every later assertion fails for a reason unrelated to your change. The
+flows in `e2e/` instead reset with an `onFlowStart` hook that dismisses an open
+modal.
+
+Two consequences, both real:
+
+- **The Expo dev menu is an e2e hazard, and closing it is not enough.** It is a
+  sheet over your app. While it is open, taps on the app underneath do nothing
+  and assertions fail with a screenshot that looks almost right. On 2026-09-17
+  it reopened during every single suite run on a contended device, so a
+  dismiss step in `onFlowStart` did not make the suite green. Treat a run
+  against a dev client as advisory, and read the screenshots in
+  `~/.maestro/tests/<run>/<flow>/screenshots/` before believing a red result.
+- **This cannot go in CI as is.** `mobile-ota.yml` and `mobile-release.yml` run
+  on `ubuntu-latest` and Maestro needs a Mac. A standalone build
+  (`eas build --profile simulator-release --platform ios`) with the bundle embedded fixes
+  both this and `launchApp`. Until then `test:e2e` is a local, pre-release gate.
+
+### The Mac needs Java, and it is not a system install
+
+Maestro is a Kotlin/JVM application and needs Java 17+. That Mac has no system
+JDK and no Homebrew. The runtime is a self-contained Temurin 21 in
+`~/.local/jdk`, installed on 2026-09-17, and `scripts/maestro.ts` points
+`JAVA_HOME` at it. If Maestro starts reporting "Unable to locate a Java
+Runtime", that directory is gone; reinstall it rather than adding a system JDK:
+
+```bash
+curl -fsSL -o /tmp/jdk21.tar.gz \
+  "https://api.adoptium.net/v3/binary/latest/21/ga/mac/aarch64/jdk/hotspot/normal/eclipse"
+mkdir -p ~/.local/jdk && tar xzf /tmp/jdk21.tar.gz -C ~/.local/jdk --strip-components=1
+```
+
+### Recording
+
+`--plan ... --record` composes the step video here from a `simctl` capture and
+the runner's log. `--flow ... --record` uses `maestro record --local`, which
+renders the mp4 on the Mac. Plain `maestro record` uploads your screen capture
+to mobile.dev to render it there. Always keep `--local`.
+
+## Fallback only: synthesising clicks with CGEvent
+
+**Prefer Maestro, above.** This section is kept because it still describes the
+only way to drive Simulator chrome that is outside the app (the dev menu, a
+system alert Maestro cannot see), and because the traps in it are real and were
+expensive to find. Do not use it for in-app interaction.
+
+
+### Tapping: there is no `simctl tap`. Calibrate off the accessibility tree.
 
 `simctl` cannot synthesise touches and `idb` is not installed on this Mac.
 Drive the Simulator window with CGEvent instead, and get the mapping from the

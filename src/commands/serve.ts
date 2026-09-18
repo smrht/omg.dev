@@ -30,10 +30,14 @@ import { claudeOauthToken as sharedClaudeOauthToken } from "../claude-creds.ts";
 import {
   applyReleaseUpdate,
   applySourceUpdate,
+  autoUpdateEnabled,
   changelogDelta,
   releaseUpdateStatus,
   scheduleRestart,
+  SelfUpdateInProgressError,
   sourceUpdateStatus,
+  startAutoUpdateLoop,
+  withSelfUpdate,
 } from "../self-update.ts";
 import { compressedAssetResponse, maybeCompressResponse } from "../http-compress.ts";
 import { serveOmgMcpRequest, serveComputerMcpRequest } from "../mcp-http.ts";
@@ -51,6 +55,7 @@ import {
   roleOwner,
   publicView,
   updateConnector,
+  setConnectorOAuth,
   probeConnector,
   resetConnector,
   loadCatalog,
@@ -560,7 +565,7 @@ import {
   listOriginDeliveries,
   type OriginDeliveryMedia,
 } from "../origin-deliveries.ts";
-import { deleteImagePreview, getOrCreateImagePreview } from "../artifact-previews.ts";
+import { deleteImagePreview, getOrCreateImagePreview, getOrCreateVideoPoster } from "../artifact-previews.ts";
 import { resolveUploadRequest, uploadsDir } from "../uploads.ts";
 import { addShipPost, listShipPosts, resolveShipProject } from "../shipped.ts";
 import { verifySelfRepoLanding } from "../session-landing.ts";
@@ -579,7 +584,6 @@ const REPOS_ROOT = reposRoot();
 const SELF_REPO = PATHS.root;
 const EVLOG_DIR = join(PATHS.data, "evlogs");
 const SERVER_INSTANCE_ID = randomBytes(8).toString("hex");
-let selfUpdateRunning = false;
 
 // Everything that can start, stop, or rebind one bot's backing session shares a
 // single critical section per bot.
@@ -4466,7 +4470,21 @@ export async function cmdServe() {
           requireApproval: body.requireApproval,
         });
         if (!result.ok) return err(400, result.error);
-        return json({ connector: publicView(result.connector) });
+        // The catalog only claims how a server authenticates, and half of its
+        // MCP entries claim nothing. Ask the server itself: a 401 on the first
+        // connect means this connection needs a sign-in, so record that and
+        // let the client open the flow at once instead of silently saving a
+        // connection whose tools never load.
+        let connector = result.connector;
+        if (!connector.oauth) {
+          const probe = await probeConnector(connector);
+          if (!probe.ok && probe.needsAuth) {
+            const flagged = setConnectorOAuth(connector.id, true);
+            if (flagged) connector = flagged;
+            await resetConnector(connector.id);
+          }
+        }
+        return json({ connector: publicView(connector) });
       }
       if (path === "/api/connectors/catalog" && req.method === "GET") {
         try {
@@ -4501,7 +4519,16 @@ export async function cmdServe() {
           const connector = getConnector(m[1]!);
           if (!connector) return err(404, "connector not found");
           const probe = await probeConnector(connector);
-          if (!probe.ok) return json({ ok: false, error: probe.error, tools: [] });
+          if (!probe.ok) {
+            // A connection that answers 401 needs a sign-in, whatever the
+            // catalog said when it was added. Record it so the row offers
+            // Connect instead of only an error.
+            if (probe.needsAuth && !connector.oauth) {
+              setConnectorOAuth(connector.id, true);
+              await resetConnector(connector.id);
+            }
+            return json({ ok: false, error: probe.error, needsAuth: probe.needsAuth === true, tools: [] });
+          }
           const { listConnectorTools } = await import("@omg-dev/connectors");
           const tools = await listConnectorTools(connector);
           return json({ ok: true, tools: tools.map((t) => ({ name: t.name, description: t.description })) });
@@ -5203,6 +5230,23 @@ a{color:#60a5fa}
       ) {
         const handled = await cloudAccount.handleRequest(req, url);
         if (path === "/api/cloud/logout") cloudMachineProxy.reset();
+        if (handled) return handled;
+      }
+      if (
+        path === "/api/cloud/whoami" ||
+        path === "/api/cloud/apps" ||
+        path === "/api/cloud/apps/deploy" ||
+        path === "/api/cloud/apps/status" ||
+        path === "/api/cloud/apps/visibility" ||
+        path === "/api/cloud/env" ||
+        path === "/api/cloud/env/pull" ||
+        path === "/api/cloud/env/rm" ||
+        path === "/api/cloud/env/import"
+      ) {
+        const { handleCloudAppsRequest } = await import("../cloud-apps.ts");
+        const handled = await handleCloudAppsRequest(req, url, {
+          getAccessToken: () => cloudAccount.getAccessToken(),
+        });
         if (handled) return handled;
       }
       if (path === "/api/server/wake-tick" && req.method === "POST") {
@@ -8132,8 +8176,6 @@ a{color:#60a5fa}
           if (install.channel !== "source" && install.channel !== "release") {
             return err(400, "UI updates are only available for Git and release installs.");
           }
-          if (selfUpdateRunning) return err(409, "An omg.dev update is already running.");
-          selfUpdateRunning = true;
           try {
             // Fork-gate (27-08-2026): op deze box hangt een lokale patchlaag
             // aan elke release. De UI-knop deed vroeger een kale bundleswap,
@@ -8159,18 +8201,19 @@ a{color:#60a5fa}
                 bootId: SERVER_INSTANCE_ID,
               });
             }
-            const result = install.channel === "source"
-              ? await applySourceUpdate(PATHS.root)
-              : await applyReleaseUpdate(PATHS.root, install);
+            const result = await withSelfUpdate(async () => (
+              install.channel === "source"
+                ? await applySourceUpdate(PATHS.root)
+                : await applyReleaseUpdate(PATHS.root, install)
+            ));
             const update = result.status;
             if (update.state === "blocked") return err(409, update.message);
             if (update.state === "available") return err(500, "The update did not reach origin/main.");
             if (result.updated) scheduleRestart();
             return json({ install, update, restarting: result.updated, bootId: SERVER_INSTANCE_ID });
           } catch (e) {
+            if (e instanceof SelfUpdateInProgressError) return err(409, e.message);
             return err(500, e instanceof Error ? e.message : String(e));
-          } finally {
-            selfUpdateRunning = false;
           }
         }
         return err(405, "method not allowed");
@@ -9423,6 +9466,20 @@ a{color:#60a5fa}
               // a broken image. The immutable original remains a safe fallback.
               console.warn("artifact preview generation failed", artifact.id, error);
             }
+          } else if (wantsPreview && artifact.media === "video") {
+            // A poster frame. There is no safe fallback here: the original is
+            // a video, and a client that asked for a picture would download
+            // the whole file and then fail to decode it as one. Say no instead.
+            try {
+              filePath = await getOrCreateVideoPoster(
+                artifact,
+                previewParam === "thumb" ? "thumb" : "preview",
+              );
+              contentType = "image/webp";
+            } catch (error) {
+              console.warn("video poster generation failed", artifact.id, error);
+              return err(404, "no preview for this video");
+            }
           }
           const file = Bun.file(filePath);
           if (!(await file.exists())) return err(404, "artifact file not found");
@@ -9561,7 +9618,7 @@ a{color:#60a5fa}
             for (const mediaPath of (body.mediaPaths ?? []).slice(0, Math.max(0, 3 - artifacts.length))) {
               const extension = extname(mediaPath).toLowerCase();
               const artifact = [".mp4", ".m4v", ".webm", ".mov", ".ogv"].includes(extension)
-                ? createVideoArtifact({ sessionId: m[1], path: mediaPath })
+                ? await createVideoArtifact({ sessionId: m[1], path: mediaPath })
                 : await createImageArtifact({ sessionId: m[1], path: mediaPath });
               artifacts.push(artifact);
             }
@@ -9671,7 +9728,7 @@ a{color:#60a5fa}
           try {
             const transcriptPath = await resolveTranscript(m[1]);
             const indexPath = transcriptPath ?? sessionIndexKey(m[1]);
-            const artifact = createVideoArtifact({
+            const artifact = await createVideoArtifact({
               sessionId: m[1],
               path: body.path,
               caption: body.caption,
@@ -11481,5 +11538,16 @@ a{color:#60a5fa}
 
   console.log(`lfg web → http://${server.hostname}:${server.port}`);
   console.log(`  agents dir: ${AGENTS_DIR}`);
+
+  // Release installs apply a newer GitHub release on their own. Hosted
+  // Computers and source checkouts stay on the manual Update button.
+  startAutoUpdateLoop({
+    root: PATHS.root,
+    install: () => installInfo(),
+    hosted: () => hasHostedOmgAiProxy(),
+    enabled: () => autoUpdateEnabled(),
+    skippedUpdateVersion: () => getGlobalSettingsSync().skippedUpdateVersion,
+    log: (line) => console.log(line),
+  });
 
 }

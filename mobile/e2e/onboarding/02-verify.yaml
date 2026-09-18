@@ -1,0 +1,50 @@
+# Onboarding, second half: enter the code the runner read from Gmail, then walk
+# the signed-in steps and assert each screen's chrome. Ends on the home list.
+appId: dev.omg.computer
+---
+- inputText: ${CODE}
+# Data notice (first sign-in only).
+- extendedWaitUntil:
+    visible: "Agree and continue"
+    timeout: 60000
+- tapOn: "Agree and continue"
+# 04 · Working. The Computer provisions and the first task launches here; a
+# cold provision is seconds, a slow one is a minute.
+- extendedWaitUntil:
+    visible: "Notify me"
+    timeout: 120000
+- assertVisible: "Get notified when your result is ready."
+- assertVisible: "1 working"
+- assertVisible: "Your result is ready"
+- tapOn: "Not now"
+# 05 · Continue. The card is the live session with its header.
+- extendedWaitUntil:
+    visible: "Let me in"
+    timeout: 30000
+- assertVisible: "Keep track of your agent."
+# The transcript card is one accessibility element; its header text is not
+# addressable on its own.
+- assertVisible: "Open this session"
+- tapOn: "Let me in"
+# 06 · Plan.
+- extendedWaitUntil:
+    visible: "Continue for now"
+    timeout: 30000
+- assertVisible: "Keep work moving."
+- assertVisible: "Agents at once"
+- assertVisible: "More included"
+- assertNotVisible: "Annually"
+# Personal is preselected, so the CTA reads its name.
+- assertVisible: "Continue with Personal"
+- tapOn: "Continue for now"
+# Connect step, then home.
+- extendedWaitUntil:
+    visible: "Skip"
+    timeout: 30000
+- tapOn: "Skip"
+# Lands in the first session itself, header first: the task they wrote is
+# the title, and the model it ran on is under it.
+- extendedWaitUntil:
+    visible: "Explain this error.*"
+    timeout: 60000
+- takeScreenshot: onboarding-session

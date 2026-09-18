@@ -11,15 +11,17 @@
  */
 
 import { useRouter } from "expo-router";
+import { reloadAppAsync } from "expo";
 import Constants from "expo-constants";
 import {
   Alert,
   Linking,
+  Pressable,
   ScrollView,
   Switch,
   View,
 } from "react-native";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Text } from "../src/omg/text";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -28,6 +30,7 @@ import { useOmg } from "../src/omg/provider";
 import { useTheme } from "../src/omg/theme";
 import { cloudComputerLabel, bindingLabel } from "../src/omg/format";
 import { CLOUD_BINDING_ID } from "../src/omg/config";
+import { useDemoMode } from "../src/omg/demo";
 import { sharedBindingLabel } from "../src/omg/computer-shared-binding";
 import {
   getStoredPushToken,
@@ -109,7 +112,22 @@ export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const { colors, type, space } = useTheme();
   const { user, client, signOut, bindings, sharedComputers, bindingId, cloud } = useOmg();
+  const demo = useDemoMode();
   const router = useRouter();
+
+  // The Demo mode toggle fills the app with fake data, which is exactly wrong
+  // for a real user and exactly right for an App Store screenshot. So it is
+  // hidden behind the version footer: dev builds show it outright, and a
+  // release build reveals it after seven taps — the same gesture Android uses
+  // for its build number, chosen because nobody reaches it by accident. Once
+  // demo mode is already on (env or a prior unlock), the section stays shown.
+  const [devUnlocked, setDevUnlocked] = useState(__DEV__ || demo.value);
+  const versionTaps = useRef(0);
+  const revealDeveloper = useCallback(() => {
+    if (devUnlocked) return;
+    versionTaps.current += 1;
+    if (versionTaps.current >= 7) setDevUnlocked(true);
+  }, [devUnlocked]);
 
   const current = bindings.find((b) => b.id === bindingId);
   const currentShared = sharedComputers.find((c) => c.id === bindingId);
@@ -403,6 +421,29 @@ export default function SettingsScreen() {
         </Row>
       </Card>
 
+      {devUnlocked ? (
+        <>
+          <SectionLabel>Developer</SectionLabel>
+          <Card>
+            <Row>
+              <View style={{ flex: 1 }}>
+                <Text style={{ ...type.callout, color: colors.text }}>Demo mode</Text>
+                <Text style={{ ...type.footnote, color: colors.textMuted, marginTop: 2 }}>
+                  Fills every screen with seeded content for screenshots. Reloads the app.
+                </Text>
+              </View>
+              <Switch
+                value={demo.value}
+                disabled={demo.locked}
+                onValueChange={(next) => {
+                  void demo.set(next).then(() => reloadAppAsync());
+                }}
+              />
+            </Row>
+          </Card>
+        </>
+      ) : null}
+
       <View style={{ marginTop: space.xl }}>
         <Card>
           <Row onPress={confirmSignOut}>
@@ -437,16 +478,19 @@ export default function SettingsScreen() {
         ))}
       </Card>
 
-      <Text
-        style={{
-          ...type.caption,
-          color: colors.textMuted,
-          textAlign: "center",
-          paddingTop: space.xl,
-        }}
-      >
-        omg {Constants.expoConfig?.version ?? "1.0.0"}
-      </Text>
+      <Pressable onPress={revealDeveloper}>
+        <Text
+          style={{
+            ...type.caption,
+            color: colors.textMuted,
+            textAlign: "center",
+            paddingTop: space.xl,
+          }}
+        >
+          omg {Constants.expoConfig?.version ?? "1.0.0"}
+          {devUnlocked ? " · developer" : ""}
+        </Text>
+      </Pressable>
     </ScrollView>
   );
 }

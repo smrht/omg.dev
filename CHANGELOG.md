@@ -2,6 +2,24 @@
 
 Recent product updates and deployment notes.
 
+## September 18, 2026 - Local installs update themselves (v0.6.74)
+
+- A computer installed with `omg computer setup` now applies a newer GitHub release on start, and checks again every 6 hours. The Update button still works. Skip still skips that version.
+- Hosted Computers stay on the template version. A source checkout (a git pull install) stays manual. Set `LFG_AUTO_UPDATE=0` to turn the checker off.
+
+## September 18, 2026 - Deploy a project from the client (v0.6.73)
+
+- Web and iOS can publish a project folder to `*.omgs.app`. Open the project or folder sheet and use Deploy. The same URL stays on the row after a republish.
+- `omg deploy`, `omg apps`, `omg whoami`, `omg visibility`, and `omg env` now run on this runtime. Agents get matching MCP tools. The old `@omg-dev/cli` 0.4.42 download is gone.
+- A Cloud Computer does not store a user token. Cloud calls go through the guest proxy so Infra can attach the owner's credential. `omg login` on that Computer is a no-op.
+- The iOS usage ring now lists each Claude profile with its own windows instead of one merged card.
+
+## September 18, 2026 - Hosted videos start without a full download (v0.6.72)
+
+- Transcript videos on the web and iOS now use short-lived signed artifact URLs. The browser and native player can request byte ranges and start playback before the complete recording downloads.
+- Signed media URLs are limited to read-only artifact routes. The hosted proxy removes the grant before it forwards the request to the Computer.
+- Poster frames and other hosted images can use the same direct URL path. Older hosts keep the existing authenticated blob fallback.
+
 ## September 17, 2026 - The omg agent runs on hosted Computers again (v0.6.71)
 
 - On a hosted Computer the omg agent was reported as connected, became the default for a session that names no agent, and then failed every turn with `ProviderModelNotFoundError: Model not found: omg/...`. The Computer template no longer pre-bakes the omg provider into OpenCode's config, and the runtime trusted that it did. The runtime now writes the provider itself, pointed at the Computer's guest LLM proxy. **Hosted Computers need this release.** Local installs are unchanged.
