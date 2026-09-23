@@ -6,6 +6,7 @@ assert not candidate.exists() and not snap.exists()
 shutil.copytree(pristine,candidate,symlinks=True)
 paths=subprocess.check_output(['git','-C',str(r),'diff','v0.6.117','--name-only'],text=True).splitlines()
 for rel in paths:
+ if rel.startswith('ops/'):continue
  if not rel.startswith(('src/','web/src/','packages/','test/')):raise Exception('unexpected source path '+rel)
  target=candidate/rel; target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(r/rel,target)
 for rel in ['packages/protocol/dist','packages/client/dist']:
@@ -22,7 +23,7 @@ for p in (r/'web/dist').rglob('*'):
  if 'assets' in rel.parts and dest.exists():assert sha(p)==sha(dest),str(rel)
  dest.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(p,dest)
 files={}
-review=set(paths)
+review={p for p in paths if not p.startswith('ops/')}
 for d in ['web/dist','packages/protocol/dist','packages/client/dist']:
  review.update(str(p.relative_to(candidate)) for p in (candidate/d).rglob('*') if p.is_file())
 snap.mkdir(parents=True)

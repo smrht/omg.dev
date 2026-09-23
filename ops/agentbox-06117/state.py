@@ -24,4 +24,9 @@ else:
   assert not changed,cat+' changed: '+', '.join(changed)
  assert set(old['sessions'])<=set(now['sessions']),'session identities disappeared'
  subprocess.run(['python3',str(h/'.local/lib/omg-private/current/preserve.py'),str(h/'omg')],check=True)
+ catalog=api('/api/coding-agents')
+ op=next(a for a in catalog['agents'] if a['key']=='opencode')
+ assert op['visible'] and op['status']['configured'] and op['status']['accountConnected']
+ models=next(m for m in catalog['models'] if m['key']=='opencode')
+ assert 'zai-coding-plan/glm-5.3-flash' in models['models']
  print('SETUP_PRESERVED',len(old['settings']),len(old['routines']),len(old['sessions']),len(old['pids']))
