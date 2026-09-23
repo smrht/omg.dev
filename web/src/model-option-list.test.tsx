@@ -64,6 +64,72 @@ describe("ModelOptionList", () => {
   });
 });
 
+// Stars are opt-in: callers that pass favorites get a toggle per row, callers
+// that do not keep the exact list they had before.
+describe("ModelOptionList favorites", () => {
+  let ui: Mounted;
+  beforeEach(() => {
+    ui = mount();
+  });
+  afterEach(() => ui.cleanup());
+
+  test("without favorite props there is no star to tap", () => {
+    ui.render(<ModelOptionList value="gpt-5.6" models={["gpt-5.6", "gpt-5.6-mini"]} onChoose={() => {}} />);
+    expect(ui.query("button[aria-pressed]")).toBeNull();
+    expect(ui.queryAll("button").length).toBe(2);
+  });
+
+  test("a star toggles the favorite for its own row and never chooses the model", () => {
+    let chosen = "";
+    const toggled: string[] = [];
+    ui.render(
+      <ModelOptionList
+        value={OMG_MODELS[0]!}
+        models={OMG_MODELS}
+        onChoose={(m) => { chosen = m; }}
+        favorites={["omg/z-ai/glm-5.2"]}
+        onToggleFavorite={(m) => { toggled.push(m); }}
+      />,
+    );
+    const rows = ui.queryAll("button");
+    // Every row still chooses; the stars are extra buttons.
+    expect(rows.length).toBe(OMG_MODELS.length + OMG_MODELS.length);
+    const starred = ui.query("button[aria-label='Remove GLM 5.2 from favorites']") as HTMLButtonElement;
+    const plain = ui.query("button[aria-label='Favorite GLM 5.3 Flash']") as HTMLButtonElement;
+    expect(starred.getAttribute("aria-pressed")).toBe("true");
+    expect(plain.getAttribute("aria-pressed")).toBe("false");
+    ui.flush(() => starred.click());
+    ui.flush(() => plain.click());
+    expect(toggled).toEqual(["omg/z-ai/glm-5.2", "omg/z-ai/glm-5.3-flash"]);
+    expect(chosen).toBe("");
+  });
+
+  test("the filter still narrows starred rows the same way", () => {
+    ui.render(
+      <ModelOptionList
+        value={OMG_MODELS[0]!}
+        models={OMG_MODELS}
+        onChoose={() => {}}
+        favorites={["omg/z-ai/glm-5.2"]}
+        onToggleFavorite={() => {}}
+      />,
+    );
+    const input = ui.query("input") as HTMLInputElement;
+    const type = (value: string) =>
+      ui.flush(() => {
+        const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")!.set!;
+        setter.call(input, value);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    type("glm 5.2");
+    const chooseRows = ui.queryAll("button").filter((b) => !b.hasAttribute("aria-pressed"));
+    const starRows = ui.queryAll("button[aria-pressed]");
+    expect(chooseRows.length).toBe(starRows.length);
+    expect(chooseRows.length).toBeGreaterThan(0);
+    expect(ui.text()).toContain("GLM 5.2");
+  });
+});
+
 // The composer pill: a hosted omg model wears the lab's mark with a small omg
 // mark in the corner; any other agent keeps its own mark alone.
 describe("AgentModelPicker pill", () => {

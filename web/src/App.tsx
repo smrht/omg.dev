@@ -10,11 +10,13 @@ import { HostDrawerSlot, SideNavButton, SideNavDrawer } from "./components/side-
 import { FindingsPill, FindingsSheet } from "./components/findings-pill";
 import { sideNavRows } from "./lib/side-nav-items";
 import {
-  AgentSetupSheet,
-  type SetupAgentTile,
-  type SetupChoice,
-  type SetupSheetPage,
-} from "./components/agent-setup-sheet";
+  CompactModelPickerSheet,
+  type PickerAgentTile,
+  type PickerChoice,
+} from "./components/compact-model-picker-sheet";
+import { MODEL_FAVORITES_VISIBLE } from "./lib/model-favorites";
+import { useModelFavorites } from "./lib/use-model-favorites";
+import { pickerModelDisplay, pickerThinkingLabel } from "./lib/model-picker-display";
 import { activeMachine } from "./lib/machines";
 import { useHeaderProfile } from "./lib/header-profile";
 import { RuntimeAvailabilityContext, useRuntimeAvailability, shouldReloadRuntime } from "./lib/runtime-availability";
@@ -448,6 +450,7 @@ import {
   SlidersHorizontal,
   Settings,
   Sparkles,
+  Star,
   Volume2,
   Vibrate,
   Sun,
@@ -662,7 +665,7 @@ import {
   UpdateProvider,
   UpdateSettingsRow,
 } from "./components/update-drawer";
-import { UsageCampfireHost, useUsageRingLongPress } from "./components/UsageCampfire";
+import { UsageCampfireHost, useUsageRingLongPress, openUsageCampfire } from "./components/UsageCampfire";
 import { BankedResetCredits } from "./components/BankedResetCredits";
 import {
   consumeBankedReset,
@@ -22887,10 +22890,9 @@ function NewSessionDialog({
   // expands the section so opening the dialog stays instant; reset on close.
   const [resumeOpen, setResumeOpen] = useState(false);
   const [resumable, setResumable] = useState<ResumableSession[] | null>(null);
-  // Mobile agent sheet (the iOS AgentSetupSheet layout). `setupPage` is where
-  // it opens: the root controls, or straight to the Claude profiles.
+  // Mobile compact model picker (the approved sheet over the inline
+  // composer). Always opens on its root page.
   const [agentPopoverOpen, setAgentPopoverOpen] = useState(false);
-  const [setupPage, setSetupPage] = useState<SetupSheetPage>("root");
   const setupModelInputRef = useRef<HTMLInputElement>(null);
   // The inline composer morphs like iOS HomeComposer: one row at rest, then the
   // field on its own line with the controls under it while focused or filled.
@@ -22969,7 +22971,6 @@ function NewSessionDialog({
       window.removeEventListener("pointercancel", endDrag, true);
       // A clean press with no drag is a tap → open the agent sheet.
       if (d && !d.dragged && e.type === "pointerup") {
-        setSetupPage("root");
         setAgentPopoverOpen(true);
       }
     };
@@ -23307,6 +23308,7 @@ function NewSessionDialog({
 
   const models = catalog.models[agent] ?? AGENT_MODELS[agent];
   const thinkingLevels = useAgentThinkingLevels(agent, model);
+  const { favorites: favoriteModels, toggle: toggleFavorite } = useModelFavorites(agent, models, model);
   // Hidden by the box (or the viewer's role) means off. A saved "on" in
   // localStorage must not launch fast mode through a pill nobody can see.
   const fastModeAvailable = view.showComposerFastMode && composerSupportsFastMode({ agent, model });
@@ -23777,6 +23779,8 @@ function NewSessionDialog({
           onModelChange={setModel}
           showModels={view.showComposerModels}
           showAgents={view.showComposerAgents}
+          favorites={view.showComposerModels ? favoriteModels : undefined}
+          onToggleFavorite={view.showComposerModels ? toggleFavorite : undefined}
         />
       }
 
@@ -23859,9 +23863,9 @@ function NewSessionDialog({
     </button>
   );
 
-  // Inline composer: the agent icon opens the agent sheet, the web copy of the
-  // iOS AgentSetupSheet. A vertical swipe on the icon still steps through the
-  // agents without opening anything.
+  // Inline composer: the agent icon opens the compact model picker. A
+  // vertical swipe on the icon still steps through the agents without
+  // opening anything.
   const agentPopover = (
     <button
       ref={agentIconBtnRef}
@@ -23882,11 +23886,10 @@ function NewSessionDialog({
       // click. Only keyboard activation (detail 0) reaches this handler.
       onClick={(event) => {
         if (event.detail !== 0) return;
-        setSetupPage("root");
         setAgentPopoverOpen(true);
       }}
       style={{ touchAction: "none" }}
-      className="relative flex size-8 shrink-0 items-center justify-center rounded-full text-foreground transition active:scale-[0.96]"
+      className="relative flex size-11 shrink-0 items-center justify-center rounded-full text-foreground transition active:scale-[0.96]"
     >
       <span className="pointer-events-none relative flex size-5 items-center justify-center overflow-hidden">
         <img
@@ -23911,15 +23914,16 @@ function NewSessionDialog({
     </button>
   );
 
-  // One tile per agent, as on iOS. The per-account Claude entries fold into the
-  // Claude tile; the sheet's profile page chooses between them.
+  // One row per agent in the picker's dropdown. The per-account Claude
+  // entries fold into the Claude row; the sheet's profile page chooses
+  // between them.
   const claudeLaunchOptions = visibleAgentOptions.filter((option) => option.key === "aisdk");
-  const setupTiles: SetupAgentTile[] = view.showComposerAgents
+  const setupTiles: PickerAgentTile[] = view.showComposerAgents
     ? agentButtons
         .filter((option, index, all) => all.findIndex((other) => other.key === option.key) === index)
         .map((option) => ({
           id: option.key,
-          label: AGENT_CATALOG.find((entry) => entry.key === option.key)?.label ?? option.label,
+          label: option.key === "opencode" ? "OpenCode" : (AGENT_CATALOG.find((entry) => entry.key === option.key)?.label ?? option.label).replace(/^./, (letter) => letter.toUpperCase()),
           iconSrc: agentIconSrc(option.key),
           selected: !option.locked && option.key === agent,
           locked: option.locked,
@@ -23929,7 +23933,7 @@ function NewSessionDialog({
               : undefined,
         }))
     : [];
-  const setupProfiles: SetupChoice[] =
+  const setupProfiles: PickerChoice[] =
     claudeLaunchOptions.length > 1
       ? claudeLaunchOptions.map((option) => ({
           id: option.accountId ?? "",
@@ -23943,16 +23947,36 @@ function NewSessionDialog({
     combineAccounts: agent === "aisdk" && !claudeAccountId,
     enabled: open,
   });
+  const agentHeaderLabel = (() => {
+    const label = AGENT_CATALOG.find((entry) => entry.key === agent)?.label ?? selectedAgentOption.label;
+    return agent === "opencode" ? "OpenCode" : label.charAt(0).toUpperCase() + label.slice(1);
+  })();
+  const favoriteRows = (view.showComposerModels ? favoriteModels : []).slice(0, MODEL_FAVORITES_VISIBLE).map((id) => {
+    const display = pickerModelDisplay(id);
+    return {
+      id,
+      label: display.label,
+      sublabel: display.provider ?? agentHeaderLabel,
+      selected: id === model,
+    };
+  });
+  const usageSummary = (() => {
+    if (usageLoading) return "Gebruik laden…";
+    if (!usage) return "Gebruiksgegevens niet beschikbaar";
+    const closest = usage.windows?.length ? activityRingOrder(usage.windows)[0] : null;
+    return closest?.pct != null
+      ? `${closest.label}: ${Math.round(closest.pct)}% gebruikt`
+      : "Limiet niet beschikbaar";
+  })();
   const agentSheet =
     variant === "inline" ? (
-      <AgentSetupSheet
+      <CompactModelPickerSheet
         open={agentPopoverOpen}
         onOpenChange={setAgentPopoverOpen}
-        initialPage={setupPage}
-        title={(() => {
-          const label = AGENT_CATALOG.find((entry) => entry.key === agent)?.label ?? selectedAgentOption.label;
-          return label.charAt(0).toUpperCase() + label.slice(1);
-        })()}
+        anchorRef={inlineBarRef}
+        agentLabel={agentHeaderLabel}
+        agentIconSrc={agentIconSrc(agent)}
+        agentBadge={selectedAgentOption.badge}
         agents={setupTiles}
         onSelectAgent={(id) => {
           const key = id as AgentKind;
@@ -23967,8 +23991,17 @@ function NewSessionDialog({
           onAgentLocked();
         }}
         profiles={setupProfiles}
-        onSelectProfile={(id) => setClaudeAccountId(id)}
-        modelLabel={view.showComposerModels ? omgModelLabel(model) || model || null : null}
+        onSelectProfile={(id) => {
+          if (agent !== "aisdk") {
+            desiredAgentRef.current = "aisdk";
+            setAgent("aisdk");
+            setModel(preferredModelFor("aisdk"));
+          }
+          setClaudeAccountId(id);
+        }}
+        favorites={favoriteRows}
+        onChooseModel={setModel}
+        onToggleFavorite={toggleFavorite}
         renderModels={
           view.showComposerModels
             ? (done) => (
@@ -23982,6 +24015,8 @@ function NewSessionDialog({
                   onEscape={done}
                   inputRef={setupModelInputRef}
                   large
+                  favorites={favoriteModels}
+                  onToggleFavorite={toggleFavorite}
                 />
               )
             : undefined
@@ -24004,22 +24039,23 @@ function NewSessionDialog({
               }
             : null
         }
-        usageRing={
-          usage ? (
-            <UsageRings
-              windows={
-                usage.windows?.length
-                  ? activityRingOrder(usage.windows)
-                  : [{ label: "usage", pct: null, resetsAt: null }]
-              }
-            />
-          ) : usageLoading ? (
-            <UsageRingsLoading />
-          ) : null
+        usage={
+          usage
+            ? { summary: usageSummary, details: <><UsageDetailsBody provider={usage} /><button type="button" className="mt-2 min-h-11 text-sm text-primary" onClick={() => { setAgentPopoverOpen(false); openUsageCampfire(); }}>Gebruik van alle agents</button></> }
+            : { summary: usageSummary }
         }
-        usageDetails={usage ? <UsageDetailsBody provider={usage} /> : null}
       />
     ) : null;
+
+  // The inline summary line: agent · model · thinking, mirroring what the
+  // picker below it will change.
+  const pickerSummary = [
+    agentHeaderLabel,
+    view.showComposerModels ? pickerModelDisplay(model).label || "Model" : null,
+    agentSupportsThinking(agent) ? pickerThinkingLabel(thinkingLevelLabel(thinkingLevel)) : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   const micButton = (
     <MicButton
@@ -24135,8 +24171,8 @@ function NewSessionDialog({
             ? cn(
                 "flex overflow-visible transition-[border-radius,padding] duration-200 ease-out motion-reduce:transition-none",
                 inlineExpanded
-                  ? "flex-col items-stretch gap-3 rounded-[30px] px-3.5 pb-3 pt-3.5"
-                  : cn("flex-row gap-2 rounded-[26px] px-2 py-[7px]", promptMultiline ? "items-end" : "items-center"),
+                  ? "flex-col items-stretch gap-1 rounded-[26px] px-3.5 pb-1 pt-2"
+                  : cn("flex-row flex-wrap gap-x-2 rounded-[26px] px-2 pb-1 pt-[7px]", promptMultiline ? "items-end" : "items-center"),
               )
             : "relative rounded-2xl px-2 py-1",
         )}
@@ -24178,7 +24214,7 @@ function NewSessionDialog({
         ) : null}
         {/* The field keeps its child index in both shapes, so React updates it
             in place and focus survives the morph. `null` holds a slot. */}
-        {variant === "inline" && !inlineExpanded ? agentPopover : null}
+        {variant === "inline" && !inlineExpanded ? attachButton : null}
         <ComposerTextarea
           value={prompt}
           onValueChange={setPrompt}
@@ -24192,11 +24228,11 @@ function NewSessionDialog({
               e.currentTarget.form?.requestSubmit();
             }
           }}
-          placeholder={attachments.length ? "Add a note for the files…" : "What should we work on?"}
+          placeholder={attachments.length ? "Add a note for the files…" : variant === "inline" ? "Waar werken we aan?" : "What should we work on?"}
           className={cn(
             "border-0 bg-transparent text-base leading-relaxed shadow-none focus-visible:border-0 focus-visible:ring-0",
             variant === "inline"
-              ? cn("min-h-9 px-1 py-1.5", !inlineExpanded && "flex-1")
+              ? cn("min-h-9 min-w-0 px-1 py-1.5", !inlineExpanded && "flex-1")
               : "min-h-40 max-h-[42dvh] px-1 py-1 pr-10",
           )}
         />
@@ -24211,8 +24247,7 @@ function NewSessionDialog({
           >
             {/* Fixed slots, so the mic never remounts mid-dictation when the
                 first words expand the composer. */}
-            {inlineExpanded ? agentPopover : null}
-            {attachButton}
+            {inlineExpanded ? attachButton : null}
             {/* The project rail under the mobile header chooses the folder,
                 as on iOS, so the composer carries no folder button. */}
             {inlineExpanded ? resumeButton : null}
@@ -24223,6 +24258,18 @@ function NewSessionDialog({
         ) : (
           micButton
         )}
+        {variant === "inline" ? (
+          <div className="flex w-full min-w-0 items-center gap-0.5">
+            {agentPopover}
+            <button type="button" onClick={() => setAgentPopoverOpen(value => !value)}
+              aria-label={`Selection: ${pickerSummary}. Open model picker`}
+              aria-haspopup="dialog" aria-expanded={agentPopoverOpen}
+              className="flex min-h-11 min-w-0 flex-1 items-center gap-1 rounded-xl pr-2 text-left text-xs text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring">
+              <span className="min-w-0 truncate">{pickerSummary}</span>
+              <ChevronUp className={cn("size-3.5 shrink-0", agentPopoverOpen && "rotate-180")} />
+            </button>
+          </div>
+        ) : null}
       </div>
       {variant === "inline" && error ? (
         <p className="mt-1.5 truncate px-3 text-xs text-destructive">{error}</p>
@@ -24278,12 +24325,6 @@ function NewSessionDialog({
         </>
       ) : null}
 
-      {variant === "inline" ? (
-        <div className="mt-2 flex items-center gap-2">
-          <ComposerUsageIndicator agent={agent} accountId={claudeAccountId} enabled={open} />
-        </div>
-      ) : null}
-      {agentSheet}
       {resumeOpen ? (
         <Suspense fallback={null}>
           <ResumeSessionSheet
@@ -24370,6 +24411,10 @@ function NewSessionDialog({
         <div ref={inlineShellRef} className="mx-auto max-w-lg will-change-transform">
           {formBody}
         </div>
+        {/* The compact picker anchors above this bar, so it lives here and
+            not inside the swipe-transformed shell: a transformed ancestor
+            would re-anchor the sheet's fixed backdrop mid-gesture. */}
+        {agentSheet}
       </div>
     );
   }
@@ -25659,6 +25704,8 @@ export function ModelOptionList({
   inputRef,
   large = false,
   fill = false,
+  favorites,
+  onToggleFavorite,
 }: {
   value: string;
   models: string[];
@@ -25674,6 +25721,10 @@ export function ModelOptionList({
    * kept asking for 18rem and the popover ran off the bottom of the screen.
    */
   fill?: boolean;
+  /** Optional per-agent favorites. Passed only by callers that own a favorite
+   *  list, so existing callers render exactly as before. */
+  favorites?: readonly string[];
+  onToggleFavorite?: (model: string) => void;
 }) {
   const [query, setQuery] = useState("");
   const filtered = useMemo(() => {
@@ -25681,7 +25732,7 @@ export function ModelOptionList({
     if (!q) return models;
     // Hosted omg ids match on the router id AND the short name, so "flash"
     // and "deepseek v4" both find omg/deepseek/deepseek-v4-flash-0731.
-    return models.filter((item) => omgModelSearchText(item).includes(q));
+    return models.filter((item) => `${omgModelSearchText(item)} ${pickerModelDisplay(item).label.toLowerCase()}`.includes(q));
   }, [models, query]);
   return (
     <div
@@ -25720,14 +25771,16 @@ export function ModelOptionList({
             // name; the full router id stays in the tooltip. Other agents'
             // ids are already short and stay as they are.
             const hosted = parseOmgModel(item);
-            return (
+            const label = onToggleFavorite ? pickerModelDisplay(item).label : hosted ? hosted.label : omgModelLabel(item);
+            const starred = favorites?.includes(item) ?? false;
+            const chooseRow = (
               <button
-                key={item}
                 type="button"
                 onClick={() => onChoose(item)}
                 title={hosted ? `${hosted.providerLabel} · ${item}` : omgModelLabel(item) !== item ? item : undefined}
                 className={cn(
-                  "flex w-full min-w-0 items-center gap-3 rounded-xl px-3 text-left text-sm outline-none transition-colors",
+                  "flex min-w-0 flex-1 items-center gap-3 rounded-xl px-3 text-left text-sm outline-none transition-colors",
+                  onToggleFavorite ? "w-auto" : "w-full",
                   large ? "h-12" : "h-10",
                   selected
                     ? "bg-primary/12 text-foreground ring-1 ring-inset ring-primary/20"
@@ -25741,8 +25794,30 @@ export function ModelOptionList({
                     className={cn("size-4 shrink-0", selected ? "text-foreground" : "text-muted-foreground")}
                   />
                 ) : null}
-                <span className="min-w-0 flex-1 truncate">{hosted ? hosted.label : omgModelLabel(item)}</span>
+                <span className="min-w-0 flex-1 truncate">{label}</span>
               </button>
+            );
+            // A star button cannot sit inside the choose button (nested
+            // buttons are invalid), so a favoritable row is a wrapper with
+            // the choose button and the star side by side.
+            if (!onToggleFavorite) return <div key={item}>{chooseRow}</div>;
+            return (
+              <div key={item} className="flex items-center gap-1">
+                {chooseRow}
+                <button
+                  type="button"
+                  aria-pressed={starred}
+                  aria-label={starred ? `Remove ${label} from favorites` : `Favorite ${label}`}
+                  title={starred ? `Remove ${label} from favorites` : `Favorite ${label}`}
+                  onClick={() => onToggleFavorite(item)}
+                  className={cn(
+                    "flex size-11 shrink-0 items-center justify-center rounded-full outline-none transition-colors focus-visible:bg-muted",
+                    large ? "" : "hover:bg-muted",
+                  )}
+                >
+                  <Star className={cn("size-4", starred ? "fill-primary text-primary" : "text-muted-foreground")} />
+                </button>
+              </div>
             );
           })
         ) : (
@@ -25774,6 +25849,8 @@ export function AgentModelPicker<K extends AgentKind>({
   onModelChange,
   showModels = true,
   showAgents = true,
+  favorites,
+  onToggleFavorite,
 }: {
   options: readonly {
     key: K;
@@ -25797,6 +25874,9 @@ export function AgentModelPicker<K extends AgentKind>({
   showModels?: boolean;
   /** Off: no agent strip; the pill is a model picker with the agent's icon. */
   showAgents?: boolean;
+  /** Optional per-agent favorites, shown as stars in the model list. */
+  favorites?: readonly string[];
+  onToggleFavorite?: (model: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -25891,6 +25971,8 @@ export function AgentModelPicker<K extends AgentKind>({
                 onEscape={() => setOpen(false)}
                 inputRef={inputRef}
                 fill
+                favorites={favorites}
+                onToggleFavorite={onToggleFavorite}
               />
             ) : null}
           </Popover.Popup>
