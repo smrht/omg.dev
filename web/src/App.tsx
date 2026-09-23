@@ -1,4 +1,5 @@
 import { OverviewToolbar, useOverviewPreferences, buildOverviewGroups, flattenOverview } from "./components/session-overview";
+import { DesktopWorkspace, type WorkspaceSummary } from "./components/desktop-workspace";
 import { SessionUsageControls } from "./components/session-usage-controls";
 import { OMG_MODELS } from "../../src/omg-models";
 import { omgModelLabel, omgModelSearchText, parseOmgModel } from "../../packages/protocol/src/omg-model-display";
@@ -395,6 +396,7 @@ import type {
 import {
   Activity,
   Archive,
+  ArrowLeft,
   ArrowLeftRight,
   ArrowDown,
   ArrowUp,
@@ -3062,6 +3064,16 @@ function shortProject(project: string): string {
   if (legacy) return legacy;
   return project;
 }
+
+// Blocked-session reasons for the workspace summary pane. Same strings the
+// rail row's preview shows (RailItem), kept in one place for both callers.
+const WORKSPACE_BLOCKED_REASONS: Record<string, string> = {
+  model_unavailable: "Model niet beschikbaar",
+  out_of_credits: "Gebruikslimiet bereikt",
+  provider_auth: "Opnieuw inloggen nodig",
+  provider_error: "Providerfout · open om te hervatten",
+  restart_recovered: "Onderbroken · open om te hervatten",
+};
 
 function cycleProjectFilter(options: string[], current: string, dir: 1 | -1): string {
   if (options.length === 0) return current;
@@ -9600,6 +9612,27 @@ export function App() {
                   }}
                 />
               )}
+              // The workspace surface's composer: the same shell-owned inputs
+              // and draft flow as the drawer and the stage, in the workspace's
+              // compact broad presentation.
+              workspaceComposer={(handlers) => (
+                <NewSessionDialog
+                  variant="workspace"
+                  open
+                  users={users}
+                  repos={repos}
+                  scopedProject={projectFilter}
+                  onReposChanged={loadCore}
+                  codingAgents={codingAgents}
+                  defaultUser={composerDefaultOwner(identity, userFilter)}
+                  onClose={handlers.onClose}
+                  onCreated={async (result) => {
+                    await refreshSessions({ seed: result?.session ?? null });
+                    await handlers.onCreated(result);
+                  }}
+                />
+              )}
+              onOpenComputer={() => setTab("computer")}
               hosted={embedded}
               // The hosted first run's optional half. Steps complete from
               // EVIDENCE (a session exists, an auto agent exists), so these
@@ -11825,6 +11858,7 @@ function LiveView({
   onOpenBots,
   onOpenSessions,
   onOpenAuto,
+  onOpenComputer,
   railSurface = "sessions",
   bots = [],
   selectedBotId = null,
@@ -11839,6 +11873,7 @@ function LiveView({
   coach = null,
   focus,
   stageComposer,
+  workspaceComposer,
   stageOverride = null,
   hostSettingsInMenu = false,
 }: {
@@ -11862,6 +11897,7 @@ function LiveView({
   onOpenBots: () => void;
   onOpenSessions?: () => void;
   onOpenAuto: () => void;
+  onOpenComputer?: () => void;
   /** Which list the rail is showing. Bots ride the same rail as sessions. */
   railSurface?: "sessions" | "chat" | "auto" | "board";
   bots?: PersistentBot[];
@@ -11907,6 +11943,8 @@ function LiveView({
   focus?: { sid: string; n: number } | null;
   /** Desktop only. See RailStage. */
   stageComposer: StageComposerRender;
+  /** Desktop only: the workspace-surface composer (see RailStage). */
+  workspaceComposer?: StageComposerRender;
   /** Desktop only. See RailStage. */
   stageOverride?: ReactNode;
   /** Desktop only. See RailStage. */
@@ -12240,6 +12278,7 @@ function LiveView({
         onOpenBots={onOpenBots}
         onOpenSessions={onOpenSessions}
         onOpenAuto={onOpenAuto}
+        onOpenComputer={onOpenComputer}
         railSurface={railSurface}
         bots={bots}
         selectedBotId={selectedBotId}
@@ -12254,6 +12293,7 @@ function LiveView({
         coach={coach}
         focus={focus}
         stageComposer={stageComposer}
+        workspaceComposer={workspaceComposer}
         stageOverride={stageOverride}
         hostSettingsInMenu={hostSettingsInMenu}
         topPinned={topPinned}
@@ -12453,6 +12493,7 @@ function RailStage({
   onOpenBots,
   onOpenSessions = () => {},
   onOpenAuto,
+  onOpenComputer,
   railSurface = "sessions",
   bots = [],
   selectedBotId = null,
@@ -12469,6 +12510,7 @@ function RailStage({
   topPinned,
   onToggleTopPin,
   stageComposer,
+  workspaceComposer,
   stageOverride = null,
   hostSettingsInMenu = false,
 }: {
@@ -12485,6 +12527,8 @@ function RailStage({
   onOpenBots: () => void;
   onOpenSessions?: () => void;
   onOpenAuto: () => void;
+  /** Direct Computer page navigation for the workspace's global nav. */
+  onOpenComputer?: () => void;
   railSurface?: "sessions" | "chat" | "auto" | "board";
   bots?: PersistentBot[];
   selectedBotId?: string | null;
@@ -12524,6 +12568,12 @@ function RailStage({
   /** The empty stage's content: the in-pane new-session composer. */
   stageComposer: StageComposerRender;
   /**
+   * The redesigned sessions workspace's composer (NewSessionDialog, workspace
+   * variant). Same shell-built inputs as stageComposer; RailStage decides when
+   * it shows. Optional so tests and hosts can mount RailStage without it.
+   */
+  workspaceComposer?: StageComposerRender;
+  /**
    * Replaces the stage columns entirely while `railSurface === "auto"`: the
    * Schedules list lives in the pane, the session rail stays on the left.
    */
@@ -12537,7 +12587,7 @@ function RailStage({
   // A host that supplies its own machine list gets the switcher too.
   const hostMachines = useEmbeddedHostOptions().machines;
   const appDialog = useAppDialog();
-  const { conversations: botConversationsForRail, selectedConversationId: selectedBotConversationForRail, markRead: markBotRowRead } = useContext(BotUnreadContext);
+  const { conversations: botConversationsForRail, selectedConversationId: selectedBotConversationForRail, markRead: markBotRowRead, any: botsUnreadAny } = useContext(BotUnreadContext);
   const MAX_COLUMNS = 4;
   const layoutScope = projectFilter || "__all";
   const layoutKey = encodeURIComponent(layoutScope);
@@ -12596,6 +12646,24 @@ function RailStage({
   // steal the stage back after the user has opened another row.
   const handledFocusRef = useRef<string | null>(null);
 
+  // ── Redesigned sessions workspace (smrht/sites-beheer#1024) ──────────────
+  // The workspace is the sessions surface's default shape. `stageMode` swaps
+  // it for the full rail+columns stage; the workspace stays MOUNTED (hidden)
+  // while the stage is up so the composer draft, the filters and the list
+  // scroll survive the round-trip. Other surfaces (bots/schedules/board) never
+  // show the workspace but keep it mounted for the same reason.
+  const [stageMode, setStageMode] = useState(false);
+  // The row selected for the workspace's summary pane. Deliberately NOT the
+  // stage `preview`: selecting a row here only reads roster data that is
+  // already loaded. It never mounts a transcript, never joins columnIds /
+  // visibleTranscriptSid, and never marks the session read — "Open gesprek"
+  // does all of that through the real stage.
+  const [selectedWorkspaceSid, setSelectedWorkspaceSid] = useState<string | null>(null);
+  // Mirror of the workspace list's scroll offset, restored when the workspace
+  // becomes visible again (some engines drop it under display:none).
+  const workspaceListScrollRef = useRef(0);
+  const workspaceUp = !!workspaceComposer && railSurface === "sessions" && !stageMode;
+
   const bySid = useMemo(() => {
     const m = new Map<string, Session>();
     for (const s of sessions) if (s.sessionId) m.set(s.sessionId, s);
@@ -12609,9 +12677,12 @@ function RailStage({
     if (!sid) return;
     setFocusGlow((prev) => ({ sid, n: (prev?.n ?? 0) + 1 }));
     requestAnimationFrame(() => {
+      // querySelectorAll, not querySelector: the stage wrapper and the
+      // workspace can both carry a `[data-stage-sid]` across the mode switch,
+      // and the hidden one's scrollIntoView is a harmless no-op.
       document
-        .querySelector(`[data-stage-sid="${sid}"]`)
-        ?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
+        .querySelectorAll(`[data-stage-sid="${sid}"]`)
+        .forEach((el) => el.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" }));
     });
   }, []);
 
@@ -12622,11 +12693,20 @@ function RailStage({
     if (!pending) return;
     const { sid, token } = pending;
     handledFocusRef.current = token;
+    // A deep link / external focus is a request to SEE the session: leave the
+    // workspace for the full stage, with the summary kept in sync for the
+    // return trip.
+    setStageMode(true);
+    setSelectedWorkspaceSid(sid);
     setPreview(sid);
     setCursor(sid);
     pulseStage(sid);
     requestAnimationFrame(() => {
-      document.querySelector(`[data-rail-sid="${sid}"]`)?.scrollIntoView({ block: "center" });
+      // All matches: with the workspace mounted hidden behind the stage, the
+      // same row exists twice and only the visible copy scrolls.
+      document
+        .querySelectorAll(`[data-rail-sid="${sid}"]`)
+        .forEach((el) => el.scrollIntoView({ block: "center" }));
     });
   }, [focus, bySid, pulseStage]);
 
@@ -12640,6 +12720,11 @@ function RailStage({
   }, [bySid]);
   useEffect(() => {
     setPreview((p) => (p && !bySid.has(p) ? null : p));
+  }, [bySid]);
+  // Same retirement for the workspace summary's selection: a session that
+  // ended cannot stay summarized, and the pane falls back to its placeholder.
+  useEffect(() => {
+    setSelectedWorkspaceSid((sid) => (sid && !bySid.has(sid) ? null : sid));
   }, [bySid]);
 
   // Reload layout state when switching projects; each project gets its own local
@@ -12835,6 +12920,15 @@ function RailStage({
   // shortcut, the fresh session after Start) retires the in-pane composer, so
   // it can never linger behind a transcript.
   const startNew = () => {
+    // With the workspace up, the composer is already on screen: "c" puts the
+    // caret in it instead of sliding the drawer over the page.
+    if (workspaceUp) {
+      const field = document.querySelector<HTMLElement>("[data-workspace-composer] textarea");
+      if (field && field.offsetParent !== null) {
+        field.focus();
+        return;
+      }
+    }
     if (railSurface === "sessions" && validPinned.length === 0) {
       setPreview(null);
       return;
@@ -12846,25 +12940,26 @@ function RailStage({
   // mobile card collapse toggle. Keep the app-level lazy stream manager in sync
   // so direct-opened / previewed / pinned sessions actually start their SSE.
   useEffect(() => {
-    if (!columnIds.length) return;
+    if (workspaceUp || !columnIds.length) return;
     try {
       for (const sid of columnIds) localStorage.setItem(`lfg-collapsed:${sid}`, "0");
     } catch {
       /* private mode / quota */
     }
     window.dispatchEvent(new Event("lfg-collapse-change"));
-  }, [columnIds]);
+  }, [columnIds, workspaceUp]);
 
   // The same columns, as "on screen right now". Separate from the line above on
   // purpose: that one writes a durable preference and never takes it back, which
   // is right for a stream manager and wrong for read state. This pair drops the
   // session again the moment its column closes.
   useEffect(() => {
+    if (workspaceUp) return;
     for (const sid of columnIds) addVisibleTranscriptSid(sid);
     return () => {
       for (const sid of columnIds) removeVisibleTranscriptSid(sid);
     };
-  }, [columnIds]);
+  }, [columnIds, workspaceUp]);
 
   // No default preview. The stage used to fill itself with the first working
   // session on load, picked from the raw `sessions` list — which still holds
@@ -12879,6 +12974,7 @@ function RailStage({
       // would be an open session nobody can see.
       if (railSurface === "auto") onOpenSessions();
       // Board mode shows one session beside the board, pinned or not.
+      setStageMode(true);
       if (railSurface !== "board" && validPinned.includes(sid)) return; // already a persistent column
       setPreview(sid);
     },
@@ -12900,6 +12996,7 @@ function RailStage({
         toast.error(`${MAX_COLUMNS} columns max — unpin one first`);
         return;
       }
+      setStageMode(true);
       setPinned([...validPinned, sid]);
       setPreview((p) => (p === sid ? null : p));
     },
@@ -13000,7 +13097,9 @@ function RailStage({
 
   const overviewPrefs = useOverviewPreferences();
   const { questions: overviewQuestions } = useAsk();
-  const { unread: overviewUnread } = useContext(SessionUnreadContext);
+  const { unread: overviewUnread, any: overviewUnreadAny } = useContext(SessionUnreadContext);
+  // The workspace's global nav hides entries the same way SurfaceToggle does.
+  const { showBots: navShowBots, showSchedules: navShowSchedules } = useContext(ViewPrefsContext);
   const overviewGroups = buildOverviewGroups({
     nodes: [...topPinnedNodes, ...projectRailGroups.flatMap(g => g.nodes)],
     pins: topPinnedSet, view: overviewPrefs.view, query: overviewPrefs.query,
@@ -13051,9 +13150,11 @@ function RailStage({
   // Scroll the cursored row into view as it moves.
   useEffect(() => {
     if (!cursor) return;
+    // All matches: the workspace list and the (possibly hidden) rail can both
+    // render this row; scrollIntoView is a no-op on the hidden copy.
     document
-      .querySelector(`[data-rail-sid="${cursor}"]`)
-      ?.scrollIntoView({ block: "nearest" });
+      .querySelectorAll(`[data-rail-sid="${cursor}"]`)
+      .forEach((el) => el.scrollIntoView({ block: "nearest" }));
   }, [cursor]);
 
   // Pin the contiguous range anchor→sid as the stage set (capped at 4). This is
@@ -13075,6 +13176,7 @@ function RailStage({
         // Keep the panes nearest the just-clicked end.
         range = b >= a ? range.slice(range.length - MAX_COLUMNS) : range.slice(0, MAX_COLUMNS);
       }
+      setStageMode(true);
       setPinned(range);
       setPreview(null);
       setCursor(sid);
@@ -13087,6 +13189,22 @@ function RailStage({
   // so re-clicking an already-open column still points at which window it is.
   const activate = useCallback(
     (sid: string, shift: boolean) => {
+      if (workspaceUp) {
+        // In the workspace a plain click READS: it selects the row for the
+        // summary pane from data the roster already holds. Only an explicit
+        // "Open gesprek" (or a shift-tile, which lands on the stage by
+        // definition) mounts a transcript.
+        if (shift && anchorRef.current) {
+          selectTo(sid);
+          setStageMode(true);
+          pulseStage(sid);
+          return;
+        }
+        anchorRef.current = sid;
+        setCursor(sid);
+        setSelectedWorkspaceSid(sid);
+        return;
+      }
       if (shift && anchorRef.current) {
         selectTo(sid);
         pulseStage(sid);
@@ -13097,7 +13215,22 @@ function RailStage({
       openSession(sid);
       pulseStage(sid);
     },
-    [selectTo, openSession, pulseStage],
+    [workspaceUp, selectTo, openSession, pulseStage],
+  );
+
+  // "Open gesprek": leave the workspace for the full stage with this session
+  // as the (already existing) open-session flow — pinned-aware, so a pinned
+  // session uses its column rather than gaining a preview twin.
+  const openStageFromWorkspace = useCallback(
+    (sid: string) => {
+      if (!sid) return;
+      setSelectedWorkspaceSid(sid);
+      setCursor(sid);
+      setStageMode(true);
+      openSession(sid);
+      pulseStage(sid);
+    },
+    [openSession, pulseStage],
   );
 
   // Quick-interrupt a session by id. Interrupting an idle session is a harmless
@@ -13177,6 +13310,8 @@ function RailStage({
     interruptSid,
     onNew: startNew,
     onOpenSettings,
+    workspaceUp,
+    openStage: openStageFromWorkspace,
   });
   kb.current = {
     openTerminal,
@@ -13199,6 +13334,8 @@ function RailStage({
     interruptSid,
     onNew: startNew,
     onOpenSettings,
+    workspaceUp,
+    openStage: openStageFromWorkspace,
   };
   useEffect(() => {
     // A host can keep two app surfaces alive in one document. Without an owner,
@@ -13261,8 +13398,15 @@ function RailStage({
       // Enter "focuses into" the cursored session: make sure it's open in the
       // stage, then move keyboard focus into its message composer.
       const focusInto = (sid: string) => {
-        if (!s.columnIds.includes(sid)) s.activate(sid, false);
-        else s.pulseStage(sid);
+        if (s.workspaceUp) {
+          // Enter in the workspace is "open gesprek": leave for the stage,
+          // then put the caret in the session's composer once it mounts.
+          s.openStage(sid);
+        } else if (!s.columnIds.includes(sid)) {
+          s.activate(sid, false);
+        } else {
+          s.pulseStage(sid);
+        }
         // Let the column mount/render before grabbing its input.
         window.setTimeout(() => {
           const el = document.querySelector(
@@ -13325,7 +13469,8 @@ function RailStage({
         case "o":
           if (cur) {
             e.preventDefault();
-            s.activate(cur, e.shiftKey);
+            if (s.workspaceUp && !e.shiftKey) s.openStage(cur);
+            else s.activate(cur, e.shiftKey);
           }
           return;
         case "Enter":
@@ -13410,11 +13555,16 @@ function RailStage({
           userFilter={userFilter}
           busy={!!busyBySid[sid]}
           latest={latestLine(messagesBySid[sid] ?? EMPTY_MESSAGES)}
-          active={columnIds.includes(sid)}
+          // In the workspace the "active" row is the one the summary pane is
+          // reading; on the stage it is the set of open columns.
+          active={workspaceUp ? selectedWorkspaceSid === sid : columnIds.includes(sid)}
           cursored={cursor === sid}
           pinned={validPinned.includes(sid)}
           topPinned={topPinnedSet.has(sid)}
-          collapsed={railCollapsed}
+          // The workspace list is always the expanded shape; collapse is a
+          // rail (stage mode) concept.
+          collapsed={workspaceUp ? false : railCollapsed}
+          workspace={workspaceUp}
           onActivate={(shift) => activate(sid, shift)}
           onTogglePin={() => togglePin(sid)}
           onArchive={
@@ -13428,6 +13578,34 @@ function RailStage({
       </RailSessionContextMenu>
     );
   };
+
+  // The summary pane's data, from what the roster already loaded. No requests:
+  // title, project, model, real status and the latest line the rail itself
+  // shows. Blocked reasons mirror the row's preview mapping.
+  const workspaceSummary = useMemo<WorkspaceSummary | null>(() => {
+    if (!selectedWorkspaceSid || !orderedSids.includes(selectedWorkspaceSid)) return null;
+    const session = bySid.get(selectedWorkspaceSid);
+    if (!session) return null;
+    const sid = selectedWorkspaceSid;
+    const busy = !!busyBySid[sid];
+    const project = session.project ? shortProject(session.project) : null;
+    const model = session.model ? pickerModelDisplay(session.model).label : session.agentLabel || null;
+    const when = session.lastActivityAt ?? session.startedAt ?? null;
+    const meta = [project, model, when ? relTime(when) : null]
+      .filter((part): part is string => !!part)
+      .join(" · ");
+    const status = session.status === "blocked"
+      ? (WORKSPACE_BLOCKED_REASONS[session.statusReason || "provider_error"] ?? "Geblokkeerd · open om te hervatten")
+      : busy
+        ? "Bezig"
+        : undefined;
+    const body =
+      latestLine(messagesBySid[sid] ?? EMPTY_MESSAGES) ||
+      session.last?.text ||
+      session.lastUserText ||
+      "";
+    return { title: titleForSession(session), meta, status, body: plainPreviewText(body), mark: <span className="workspace-summary-mark"><AgentMark session={session} busy={busy} /></span> };
+  }, [selectedWorkspaceSid, orderedSids, bySid, busyBySid, messagesBySid]);
   // Nest children in the DOM (same model as the mobile session tree) so
   // depth-2+ grandchildren indent further and tree elbows hit mid-row.
   // Collapsed rail stays a flat icon strip — no indent/connectors.
@@ -13678,8 +13856,117 @@ function RailStage({
     </RailGroup>
   );
 
+  // ── Redesigned sessions workspace ─────────────────────────────────────────
+  // Mounted whenever RailStage is, and hidden unless it is the active shape:
+  // keeping it mounted while the stage (or another rail surface) is up is what
+  // preserves the composer draft, the filters and the list scroll across the
+  // round-trip. "Open gesprek" leaves; "← Gesprekken" comes back to exactly
+  // this tree.
+  const workspaceNode = workspaceComposer ? (
+    <div className="h-full min-h-0 min-w-0 flex-1" hidden={!workspaceUp}>
+      <DesktopWorkspace
+        brand={
+          <RuntimeStatusBrand>
+            <ProductBrand compact hosted={hosted} />
+          </RuntimeStatusBrand>
+        }
+        surface={railSurface}
+        onOpenSessions={onOpenSessions}
+        onOpenBots={onOpenBots}
+        onOpenAuto={onOpenAuto}
+        onOpenComputer={onOpenComputer}
+        onOpenSettings={onOpenSettings}
+        showBots={navShowBots}
+        showSchedules={navShowSchedules}
+        botsUnread={botsUnreadAny}
+        chatsUnread={overviewUnreadAny}
+        projectFilter={projectFilter}
+        projectOptions={projectOptions}
+        onProjectChange={onProjectChange}
+        projectLabel={(value) => projectFilterLabel(value, shortProject)}
+        headerControls={
+          <>
+            {autoRailPill}
+            {onOpenAsk ? (
+              <>
+                {hosted ? null : <UpdateNavButton />}
+                <AskNavButton active={false} onOpen={onOpenAsk} />
+              </>
+            ) : null}
+            {onUserChange ? (
+              <UserFilterMenu value={userFilter} users={users} onChange={onUserChange} />
+            ) : null}
+            {pagesMenu}
+          </>
+        }
+        navFooter={
+          <>
+            {!hosted || hostMachines ? <MachineSwitcher variant="rail" collapsed /> : null}
+            {hosted && workspaceUp ? (
+              <div
+                data-lfg-host-slot="rail-footer"
+                data-lfg-rail-collapsed="true"
+                data-lfg-host-settings={hostSettingsInMenu ? "menu" : undefined}
+                className="shrink-0"
+              />
+            ) : null}
+          </>
+        }
+        coach={coach}
+        composer={workspaceComposer({
+          // Persistent page content: there is nothing to close back to.
+          onClose: () => {},
+          onCreated: async (result) => {
+            // Creating from the workspace opens the stage on the new session,
+            // exactly like the empty-stage composer does.
+            const sid = result?.sessionId ?? result?.session?.sessionId;
+            setStageMode(true);
+            if (sid) {
+              setSelectedWorkspaceSid(sid);
+              setPreview(sid);
+              pulseStage(sid);
+            }
+          },
+        })}
+        conversationsToolbar={
+          <OverviewToolbar
+            prefs={overviewPrefs}
+            count={overviewGroups.reduce((n, g) => n + g.count, 0)}
+            project={projectFilter !== "__all" ? shortProject(projectFilter) : undefined}
+            onClearProject={() => onProjectChange?.("__all")}
+          />
+        }
+        density={overviewPrefs.density}
+        selectedSid={selectedWorkspaceSid}
+        summary={workspaceSummary}
+        onOpenStage={openStageFromWorkspace}
+        listScrollMemory={workspaceListScrollRef}
+        active={workspaceUp}
+      >
+        {!overviewGroups.length ? (
+          <p role="status" className="px-3 py-6 text-sm text-muted-foreground">
+            Geen gesprekken gevonden. Pas je zoekopdracht of filters aan.
+          </p>
+        ) : null}
+        <SessionGroups
+          groups={overviewGroups}
+          pinnedNodes={[]}
+          pinnedCount={0}
+          collapsed={false}
+          projectFilter={projectFilter}
+          onProjectChange={onProjectChange}
+          renderItem={renderRailItem}
+        />
+      </DesktopWorkspace>
+    </div>
+  ) : null;
+
   return (
     <div ref={workspaceRef} className="flex h-full min-h-0">
+      {workspaceNode}
+      {/* The full stage: the original rail + columns surface. Hidden while the
+          sessions workspace is up; the other surfaces always show it. */}
+      {!workspaceUp && <div className="flex h-full min-h-0 min-w-0 flex-1">
       <aside
         className="flex h-full min-h-0 shrink-0 flex-col overflow-hidden border-r border-border transition-[width] duration-200 ease-ios"
         // 320, not 280. The rows carry the roster's 16px title now, and at 280
@@ -13700,6 +13987,17 @@ function RailStage({
               <PanelLeftOpen className="size-4" />
             </button>
             <RuntimeStatusDot />
+            {railSurface === "sessions" ? (
+              <button
+                type="button"
+                onClick={() => setStageMode(false)}
+                aria-label="Terug naar gesprekken"
+                title="Terug naar gesprekken"
+                className="flex size-8 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted"
+              >
+                <ArrowLeft className="size-4" />
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={startNew}
@@ -13798,6 +14096,20 @@ function RailStage({
               the collapse control, where it read as app furniture rather than
               as the first row of this list. Chat only — the Bots surface has
               its own New bot. */}
+          {/* The way back to the redesigned workspace. The stage is a mode you
+              left the workspace FOR, so the rail names the destination the
+              same way the workspace header names this one. */}
+          {!railCollapsed && railSurface === "sessions" ? (
+            <button
+              type="button"
+              onClick={() => setStageMode(false)}
+              aria-label="Terug naar gesprekken"
+              className="mb-1 flex h-10 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <ArrowLeft className="size-4 shrink-0" />
+              <span className="min-w-0 flex-1 truncate">Gesprekken</span>
+            </button>
+          ) : null}
           {!railCollapsed ? (
             <button
               type="button"
@@ -13935,6 +14247,7 @@ function RailStage({
           </div>
         )}
       </div>
+      </div>}
 
       {showHelp ? <ShortcutsHelp onClose={() => setShowHelp(false)} /> : null}
 
@@ -14378,6 +14691,7 @@ const RailRow = memo(function RailRow({
   title,
   titleBadge,
   preview,
+  metadata,
   indicator,
   trailingStatic,
   trailingHover,
@@ -14399,6 +14713,7 @@ const RailRow = memo(function RailRow({
   title: ReactNode;
   titleBadge?: ReactNode;
   preview: ReactNode;
+  metadata?: ReactNode;
   /** Extra state shown only in the expanded row, between the text column and the trailing slot (e.g. an unread dot). */
   indicator?: ReactNode;
   /** Draws the title at full weight, so unread does not rest on the dot alone. */
@@ -14582,6 +14897,7 @@ const RailRow = memo(function RailRow({
                 {preview}
               </span>
             </span>
+            {metadata}
             {/* When it last moved, then what state it is in — the iOS row's
                 order (mobile/src/components.tsx). The web had the mark first,
                 so the two put the same two facts on the trailing edge in
@@ -14637,6 +14953,7 @@ const RailItem = memo(function RailItem({
   pinned,
   topPinned,
   collapsed,
+  workspace = false,
   onActivate,
   onTogglePin,
   onArchive,
@@ -14651,6 +14968,7 @@ const RailItem = memo(function RailItem({
   pinned: boolean;
   topPinned: boolean;
   collapsed: boolean;
+  workspace?: boolean;
   onActivate: (shiftKey: boolean) => void;
   onTogglePin: () => void;
   /** Swipe left to archive. Absent on surfaces where that is not offered. */
@@ -14812,6 +15130,10 @@ const RailItem = memo(function RailItem({
         ) : null
       }
       preview={<span className={questions.length || session.status === "blocked" ? "text-amber-700 dark:text-amber-400" : undefined}>{overviewPreview}</span>}
+      metadata={workspace ? <span className="workspace-row-metadata">
+        <span className="workspace-row-model" title={session.model || session.agentLabel || undefined}>{session.model ? pickerModelDisplay(session.model).label : session.agentLabel || sessionIconAlt(session.agent, session.model)}</span>
+        <span className={cn("workspace-row-state", (questions.length > 0 || session.status === "blocked") && "text-amber-600 dark:text-amber-400")}>{questions.length ? "Vraag aan jou" : session.status === "blocked" ? "Wacht op jou" : busy ? "Bezig" : unread ? "Nieuw antwoord" : topPinned ? "Vastgepind" : ""}</span>
+      </span> : null}
       indicator={
         unread ? (
           unreadDot
@@ -22723,6 +23045,9 @@ function NewSessionDialog({
   //  - "stage": desktop workspace with nothing open — the composer IS the
   //    stage content instead of a sheet over an empty pane. Same controls as
   //    the drawer, no overlay.
+  //  - "workspace": the redesigned desktop sessions surface — the same
+  //    composer core, compact and broad, under the "Waar werken we aan?"
+  //    heading. Persistent page content, so it has no Escape-close.
   variant = "drawer",
   expanded = false,
   onExpandedChange,
@@ -22748,7 +23073,7 @@ function NewSessionDialog({
   // Inline only: horizontal swipes cycle the live-view project filter.
   onProjectSwipe?: (dir: 1 | -1) => boolean;
   onReposChanged: () => Promise<void>;
-  variant?: "drawer" | "inline" | "stage";
+  variant?: "drawer" | "inline" | "stage" | "workspace";
   // Inline only: compact↔full controls toggle (lifted to the parent so other
   // affordances can drive it).
   expanded?: boolean;
@@ -23857,9 +24182,10 @@ function NewSessionDialog({
       }}
       title="Open Stash and recent sessions"
       aria-label="Open Stash and recent sessions"
-      className="flex size-8 shrink-0 items-center justify-center rounded-full border border-border bg-background text-muted-foreground shadow-sm transition hover:text-foreground"
+      className={cn("flex h-8 shrink-0 items-center justify-center gap-2 rounded-full border border-border bg-background text-muted-foreground transition hover:text-foreground", variant === "workspace" ? "px-3 text-xs" : "w-8 shadow-sm")}
     >
       <Archive className="size-4" />
+      {variant === "workspace" ? <span>Concepten</span> : null}
     </button>
   );
 
@@ -24060,7 +24386,7 @@ function NewSessionDialog({
   const micButton = (
     <MicButton
       minimal
-      className={cn("size-9 shrink-0", variant !== "inline" && "absolute bottom-1 right-1")}
+      className={cn("size-9 shrink-0", variant !== "inline" && variant !== "workspace" && "absolute bottom-1 right-1")}
       silenceMs={2500}
       baseText={prompt}
       onText={(text, base) => {
@@ -24139,11 +24465,11 @@ function NewSessionDialog({
         variant === "inline" ? "px-4" : "px-2",
         variant === "inline"
           ? "overflow-visible pb-[max(var(--lfg-device-safe-bottom),0.5rem)] pt-1.5"
-          : variant === "stage"
-            ? // The stage has the whole pane; nothing to cap or scroll. And
-              // it must not clip: the / and @ suggest menus hang above the
-              // field (`bottom-full`), and an overflow-auto form swallowed
-              // them whole.
+          : variant === "stage" || variant === "workspace"
+            ? // The stage and the workspace own their whole pane; nothing to
+              // cap or scroll. And they must not clip: the / and @ suggest
+              // menus hang above the field (`bottom-full`), and an
+              // overflow-auto form swallowed them whole.
               "overflow-visible pb-2 pt-1"
             : "max-h-[70dvh] overflow-y-auto pb-[max(var(--lfg-safe-bottom),0.5rem)] pt-1",
         draggingFiles && "bg-primary/8",
@@ -24228,12 +24554,16 @@ function NewSessionDialog({
               e.currentTarget.form?.requestSubmit();
             }
           }}
-          placeholder={attachments.length ? "Add a note for the files…" : variant === "inline" ? "Waar werken we aan?" : "What should we work on?"}
+          placeholder={attachments.length ? "Add a note for the files…" : variant === "inline" || variant === "workspace" ? "Waar werken we aan?" : "What should we work on?"}
           className={cn(
             "border-0 bg-transparent text-base leading-relaxed shadow-none focus-visible:border-0 focus-visible:ring-0",
             variant === "inline"
               ? cn("min-h-9 min-w-0 px-1 py-1.5", !inlineExpanded && "flex-1")
-              : "min-h-40 max-h-[42dvh] px-1 py-1 pr-10",
+              : variant === "workspace"
+                ? // Compact, not the stage's essay-sized field: the workspace
+                  // composer shares the screen with the conversations list.
+                  "min-h-12 max-h-52 px-1 py-1.5 pr-10"
+                : "min-h-40 max-h-[42dvh] px-1 py-1 pr-10",
           )}
         />
         {variant === "inline" ? (
@@ -24255,9 +24585,20 @@ function NewSessionDialog({
             {micButton}
             {inlineExpanded ? startButton : null}
           </div>
-        ) : (
+        ) : variant === "workspace" ? null : (
           micButton
         )}
+        {variant === "workspace" ? <div className="workspace-composer-actions">
+          <div className="flex shrink-0 items-center gap-2">{attachButton}{micButton}{resumeButton}</div>
+          <div className="workspace-model-controls">{controlsInner}</div>
+          <div className="workspace-usage">
+            {usageLoading ? <UsageRingsLoadingIndicator /> : usage ? <UsageRingsButton provider={usage} /> : null}
+            <button type="button" onClick={openUsageCampfire} className="text-left text-xs leading-relaxed text-muted-foreground hover:text-foreground">
+              <span className="block font-medium text-foreground">Gebruik</span>{usageSummary}
+            </button>
+          </div>
+          <div data-workspace-start className="ml-auto shrink-0">{startButton}</div>
+        </div> : null}
         {variant === "inline" ? (
           <div className="flex w-full min-w-0 items-center gap-0.5">
             {agentPopover}
@@ -24271,7 +24612,7 @@ function NewSessionDialog({
           </div>
         ) : null}
       </div>
-      {variant === "inline" && error ? (
+      {(variant === "inline" || variant === "workspace") && error ? (
         <p className="mt-1.5 truncate px-3 text-xs text-destructive">{error}</p>
       ) : null}
 
@@ -24297,7 +24638,7 @@ function NewSessionDialog({
       {/* The drawer and the stage keep an always-open controls row and an
           action row. The inline composer carries the controls in the agent
           sheet and its actions inside the field, as on iOS. */}
-      {variant !== "inline" ? (
+      {variant !== "inline" && variant !== "workspace" ? (
         <>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">{controlsInner}</div>
           <div className={cn("flex items-center gap-2", compact ? "mt-2" : "mt-3")}>
@@ -24436,6 +24777,22 @@ function NewSessionDialog({
           onClose={closeResume}
         />
       </Suspense>
+    );
+  }
+
+  // Desktop workspace: the same composer core as the stage, compact and
+  // broad, with the surface's own heading. It is persistent page content, not
+  // a sheet over an empty pane, so there is no close control and Escape does
+  // not dismiss it — the surface IS the composer's home.
+  if (variant === "workspace") {
+    return (
+      <div data-workspace-composer data-testid="new-session-workspace" className="w-full">
+        <section aria-label="New session" className="w-full">
+          <h2 className="pb-1 text-[26px] font-semibold tracking-tight">Waar werken we aan?</h2>
+          <p className="mb-3 text-sm text-muted-foreground">Beschrijf je opdracht, plak een bestand of stel een vraag.</p>
+          {formBody}
+        </section>
+      </div>
     );
   }
 

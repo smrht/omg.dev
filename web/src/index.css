@@ -2919,3 +2919,85 @@ html.lfg-film .xterm {
 @media (prefers-reduced-motion: reduce) {
   .session-overview *, .session-overview *::before, .session-overview *::after { transition-duration: 0s !important; animation-duration: 0s !important; }
 }
+
+/* ── Desktop workspace (redesigned sessions surface) ───────────────────
+   The workspace reuses the OverviewToolbar and the shared rail rows. The
+   toolbar's 44px touch targets are right on a phone and heavy under a
+   desktop pointer, so compact them here, scoped to this surface only.
+   Theme vars throughout: #141414 dark / existing light palette. */
+[data-desktop-workspace] .overview-toolbar input[type="search"] {
+  height: 2.25rem;
+  font-size: 0.875rem;
+}
+[data-desktop-workspace] .overview-toolbar input[type="search"] + button {
+  width: 2.25rem;
+  height: 2.25rem;
+}
+[data-desktop-workspace] .overview-toolbar div:has(> input[type="search"]) > svg {
+  top: 0.625rem;
+}
+[data-desktop-workspace] .overview-toolbar button,
+[data-desktop-workspace] .overview-toolbar label {
+  min-height: 2rem;
+}
+
+/* Subtle blue selection: the workspace's selected row is marked by a quiet
+   primary tint (and the existing blue cursor ring), not by the open-column
+   glass edge alone. */
+[data-desktop-workspace] .session-overview [data-overview-row].lfg-gborder {
+  background: color-mix(in srgb, var(--primary) 7%, var(--card));
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--primary) 30%, transparent),
+    0 8px 24px -18px rgb(0 0 0 / 0.4);
+}
+
+
+/* The flex item itself must shrink before descendants can ellipsize long
+   live previews; otherwise intrinsic text width pushes navigation offscreen. */
+[data-desktop-workspace] { width: 100%; min-width: 0; }
+[data-desktop-workspace] > div { min-width: 0; }
+[data-desktop-workspace] header { border-bottom: 0; height: 64px; padding-inline: 28px; }
+[data-desktop-workspace] header h1 { font-size: 21px; }
+[data-desktop-workspace] nav { padding-top: 20px; gap: 9px; }
+[data-desktop-workspace] nav button span { font-size: 11px; }
+[data-desktop-workspace] [data-testid="workspace-composer"] { padding: 0 8px 16px; }
+[data-workspace-composer] form { padding: 0; }
+[data-workspace-composer] .lfg-gfield { border-radius: 12px; padding: 10px 14px 12px; }
+[data-workspace-composer] textarea { min-height: 54px; padding: 6px 0; font-size: 15px; }
+.workspace-composer-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-top: 8px; }
+.workspace-model-controls { min-width: 0; margin-left: auto; }
+.workspace-model-controls > div { gap: 8px; }
+.workspace-usage { display: flex; align-items: center; gap: 6px; padding-left: 12px; border-left: 1px solid var(--border); }
+[data-workspace-start] button { border-radius: 9px; min-height: 38px; padding-inline: 18px; }
+[data-workspace-start] button:not(:disabled) { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
+[data-desktop-workspace] .overview-toolbar { display: grid; grid-template-columns: minmax(160px,1fr) minmax(220px,400px) auto; gap: 0 24px; padding: 0 24px; }
+[data-desktop-workspace] .overview-toolbar > div:first-child { display: contents; }
+[data-desktop-workspace] .overview-toolbar h2 { grid-column: 1; grid-row: 1; align-self: center; font-size: 21px; }
+[data-desktop-workspace] .overview-toolbar > div:first-child > div { grid-column: 3; grid-row: 1; }
+[data-desktop-workspace] .overview-toolbar > div:nth-child(2) { grid-column: 2; grid-row: 1; align-self: center; }
+[data-desktop-workspace] .overview-toolbar > div[role="group"] { grid-column: 1 / -1; grid-row: 2; margin-top: 12px; gap: 20px; }
+[data-desktop-workspace] .overview-toolbar > div[role="group"] button { flex: none; min-width: 110px; min-height: 38px; }
+[data-desktop-workspace] .overview-toolbar > button { grid-column: 1 / -1; min-height: 28px; }
+[data-desktop-workspace] [data-testid="workspace-conversations"] { padding: 8px 12px 0 4px; }
+[data-desktop-workspace] [data-overview-row] { border-radius: 8px; }
+[data-desktop-workspace] [data-overview-row].lfg-gborder { box-shadow: inset 0 0 0 1px color-mix(in srgb,var(--primary) 30%,transparent); }
+[data-desktop-workspace] aside[aria-label="Geselecteerd gesprek"] { padding-top: 8px; }
+.workspace-summary-mark { display: flex; width: 42px; height: 42px; flex-shrink: 0; align-items: center; justify-content: center; }
+.workspace-summary-mark > * { max-width: 42px; max-height: 42px; }
+@media (max-width: 1279px) {
+  .workspace-model-controls { margin-left: 0; flex: 1; }
+  .workspace-usage { padding-left: 0; border: 0; }
+  [data-desktop-workspace] .overview-toolbar { grid-template-columns: minmax(130px,1fr) minmax(180px,280px) auto; gap: 0 12px; }
+  [data-desktop-workspace] aside[aria-label="Geselecteerd gesprek"] h3 { font-size: 17px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-desktop-workspace] *, [data-workspace-composer] * { transition-duration: 0s !important; animation-duration: 0s !important; }
+}
+.workspace-row-metadata { display: flex; align-items: center; gap: 20px; flex-shrink: 0; width: 290px; font-size: 12px; color: var(--muted-foreground); }
+.workspace-row-model { width: 168px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-row-state { width: 102px; white-space: nowrap; }
+@media (max-width: 1399px) {
+  .workspace-row-metadata { width: 94px; }
+  .workspace-row-model { display: none; }
+  .workspace-row-state { width: 94px; font-size: 11px; }
+}
