@@ -18,4 +18,7 @@ Accepted differences: account avatar remains with its existing user menu in the 
 
 Desktop functional evidence: local-check.log, model-check.log, code-check.log, build.log. Actual open/return, filters/query/scroll, draft, keyboard o, two panels, Flash/favorites and both themes passed. 89 focused tests / 235 assertions; both TypeScript checks and production build passed. No chat was submitted.
 
-final result: pending mobile and public deployment verification
+Public desktop: live-check.log confirms the real session round-trip, keyboard/multipane and Settings/Computer navigation; comparison-live.png visually reviewed. Deployed entry asset index-7woW23vy.js verified after using the normal Reload action. Mobile public 390px rerun passed; the first run was intercepted by the standard persistent update toast, not a failed picker action. Local 390/360 both passed. Public 360px verification passed as well (mobile-live-narrow.log).
+
+final result: passed
+No unresolved P0–P2 design or connected-route regressions in the tested viewports.

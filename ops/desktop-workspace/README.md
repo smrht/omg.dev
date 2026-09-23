@@ -17,7 +17,7 @@ Root/web typechecks and 89 focused tests (235 assertions) passed, including shar
 
 Published frontend-only layer: `06117-1024-desktop-20260923`, based on `06117-1023-picker-20260923`. Baseline and operational scripts: `/home/agent/.local/state/omg-update-backups/desktop-1024-publish/`. Activation changed 236 web files; guard verifies 6697 entries. Settings/configuration hashes, 69 routines, 20 baseline active session IDs and 3 Computer process identities were retained. OMG PID/start time unchanged; no restart.
 
-Public browser acceptance is recorded after publication below. Evidence is local and ignored because it includes conversation metadata.
+Public Firefox acceptance passed at desktop 1619/1280/1024 and mobile 390×844/360×640. Desktop also verified Settings and Computer navigation. Evidence: live-check.log, mobile-live-retry.log, mobile-live-narrow.log and preservation-final.log. The first public mobile run was intercepted by the normal update toast; after the normal Reload action, the full test passed. Source hashes match the installed manifest (3/3). Evidence remains local and ignored because it includes conversation metadata.
 
 ## Repeatable deployment and rollback
 
@@ -27,4 +27,3 @@ Public browser acceptance is recorded after publication below. Evidence is local
 4. Run activate.py with the expected old release; it locks publication, verifies hashes, writes assets before HTML and switches the pointer. It does not restart OMG or touch session data.
 5. Run verify-publication.py against the fresh baseline, followed by public Firefox desktop/mobile QA.
 6. If necessary run the reviewed rollback.py on Agentbox. It accepts only this exact release and restores the previous web layer while retaining current data and old/new assets for open tabs. A later release requires a new reviewed rollback.
-
