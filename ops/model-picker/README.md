@@ -16,8 +16,14 @@ The mobile composer opens a compact picker with an agent dropdown, up to three f
 
 Screenshots and browser logs stay under ignored `evidence/` because they contain real conversation metadata. Tests restore browser preferences and do not submit chats or redeem reset credits. Local preview uses a temporary390×844 iframe to avoid Firefox's500px minimum outer window, without changing app CSS. Node runs Vite because this installed Bun/Vite combination failed websocket proxying.
 
-## Publication
+## Publication — live verified 2026-09-23
 
-Code-ready. Publication pending Tailscale SSH identity revalidation. No live changes yet.
+Active layer: `06117-1023-picker-20260923`, OMG0.6.117. Previous layer `06117-1022-overview-20260923` retained for rollback.238files published;6465manifest entries verified, applied0.327existing compressed assets retained after content equality checks. Existing assets remain available for open tabs.
 
-Prepared layer: `06117-1023-picker-20260923`, based on `06117-1022-overview-20260923`. The existing immutable snapshot process retains all current customizations and old assets for open tabs. `activate.py` is frontend-only and hash-guarded, publishes assets before HTML and does not restart the service. `rollback.py` restores the previous layer without reverting user data. Baseline: `/home/agent/.local/state/omg-update-backups/model-picker-1023/` (26 settings,69 routines,21 session IDs,3 Computer PID/start-time identities and OMG service identity).
+Public URL: https://agentbox2.tailda028c.ts.net . Live browser verification repeated390×844,360×640 and desktop1440: `evidence/live-mobile-check.log`, `live-narrow-check.log`, `live-desktop-check.log`; all passed. Light/dark live screenshots inspected. No chat submitted or reset redeemed.
+
+Fresh publication baseline: `/home/agent/.local/state/omg-update-backups/model-picker-1023-publish/`; earlier baseline remains in sibling `model-picker-1023/`. Between preparation and publication the last-agent/model preferences, an account-file hash and active session roster changed independently; these were recorded before any publication writes and the current state was preserved.
+
+`verify-publication.py` passed:26settings,69routines,3Computerprocess identities/config hashes unchanged; all29baseline chats retained (28stilllive,1archived through existing app lifecycle with138transcript messages retained). This accounts for concurrent archiving rather than assuming an active-session roster is immutable. OMG MainPID249428/start time19:21:50CEST unchanged; no restart. See `evidence/preservation-final.log`.
+
+`activate.py` publishes frontend assets before HTML with hash guards; `rollback.py` restores the previous software layer without reverting user data. Reviewed deploy/rollback/verification helpers are retained beside the publication baseline. Temporary staging and local viewport server removed after QA; private evidence and baselines retained.

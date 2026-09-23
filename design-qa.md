@@ -31,3 +31,7 @@ First normalized source/render comparison: no actionable P0/P1/P2 findings. Acce
 Root/web typechecks, 34 focused tests (119 assertions), production build passed. Browser checked 390px mobile in light/dark, favorite add/remove/reload/per-agent isolation, all-model search, actual Flash selection, low/high/max keyboard selection, usage and all-agent usage, composer draft preservation, attachment/mic/start availability; no chat submitted. Desktop1440 existing picker/search/star/Flash selection passed. Additional360×640 mobile verification passed:328px card width,133px top,346px height, no overflow; see evidence/narrow-check.log. Profile selection rendered in component tests; multiple live profiles were unavailable. Native iPhone/Safari and unrelated full upstream suite are not claimed tested.
 
 Implementation checklist: source comparison complete; interactive controls verified; existing assets used; production build passed; deployment preservation and live readback recorded separately in ops/model-picker/README.md.
+
+## Live follow-through
+
+Published layer06117-1023-picker-20260923. Same actual picker route passed on live390×844,360×640 and desktop1440. `ops/model-picker/evidence/live-picker-light.png` and `live-picker-dark.png` were opened and inspected after publication; controls and layout match the accepted local implementation. Live iframe screenshots include browser scrollbar rendering; nativeiPhone/Safari remains untested. Preservation oracle passed; service was not restarted.
