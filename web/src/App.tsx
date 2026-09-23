@@ -9232,13 +9232,19 @@ export function App() {
                   className="flex items-center gap-1.5"
                 />
 
+                <PagesMenu
+                  tab={tab}
+                  hiddenPages={hiddenPages}
+                  onOpenTab={setTab}
+                  extraTabs={extNavTabs}
+                  showSettings={!embedded}
+                  onOpenHostSettings={embedded && hostSettingsInMenu ? onOpenHostSettings : undefined}
+                />
               </div>
             </NavIsland>
           ) : (
-            /* No card. The island existed to group the roster filter with the
-               overflow menu; the menu moved into the side navigation, so the
-               card was left drawing a pill around one avatar. */
-            <NavIsland className="shrink-0">
+            /* Keep the private quick toggles beside the profile filter. */
+            <NavIsland className="flex shrink-0 items-center gap-1">
               {/* Not on Scheduled. The roster filter scopes sessions, and
                   Schedules reads the unscoped list — it groups by OWNER
                   (Unassigned, then each bot) instead. Carrying the control
@@ -9252,6 +9258,14 @@ export function App() {
                   onChange={changeUserFilter}
                 />
               )}
+                <PagesMenu
+                  tab={tab}
+                  hiddenPages={hiddenPages}
+                  onOpenTab={setTab}
+                  extraTabs={extNavTabs}
+                  showSettings={!embedded}
+                  onOpenHostSettings={embedded && hostSettingsInMenu ? onOpenHostSettings : undefined}
+                />
             </NavIsland>
           )}
         </header>
