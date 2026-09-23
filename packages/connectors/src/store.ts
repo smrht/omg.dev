@@ -14,6 +14,9 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { connectorDataDir } from "./context.ts";
+import { emitConnectorsChanged } from "./changes.ts";
+import { isOAuthAppProvider } from "./oauth-apps.ts";
+import { NATIVE_CONNECTORS, isNativeProvider } from "./native.ts";
 
 /** Connections everyone in the team may use. */
 export const ORG_OWNER = "*org*";
@@ -30,7 +33,7 @@ export function roleOfOwner(owner: string): string | null {
   return owner.startsWith(ROLE_OWNER_PREFIX) ? owner.slice(ROLE_OWNER_PREFIX.length) || null : null;
 }
 
-export type ConnectorKind = "mcp";
+export type ConnectorKind = "mcp" | "native";
 
 export interface Connector {
   id: string;
@@ -40,8 +43,12 @@ export interface Connector {
   name: string;
   slug: string;
   kind: ConnectorKind;
-  /** Remote MCP endpoint. */
+  /** Remote MCP endpoint. For a native connector, the OAuth resource it signs in against. */
   endpoint: string;
+  /** For `kind: "native"`: which built-in connector runs the tools (./native.ts). */
+  native?: string;
+  /** The signed-in account (e.g. the mailbox address), when the connector knows it. */
+  account?: string;
   /** Header credentials injected host-side. Secret; never sent to an agent. */
   headers: Record<string, string>;
   /** Catalog slug this came from, when added from integrations.sh. */
@@ -50,6 +57,12 @@ export interface Connector {
   icon?: string;
   /** This server authenticates with OAuth (connect flow, not a static header). */
   oauth?: boolean;
+  /**
+   * A provider whose pre-registered OAuth client this connector signs in with
+   * (see OAUTH_APPS in ./oauth-apps.ts), for servers without dynamic client
+   * registration. Unset means dynamic registration.
+   */
+  oauthApp?: string;
   /** Calls to this connector's tools pause for owner approval in chat. */
   requireApproval: boolean;
   createdAt: number;
@@ -86,6 +99,7 @@ function write(file: FileShape): void {
   const tmp = `${filePath()}.tmp`;
   writeFileSync(tmp, JSON.stringify(file, null, 2));
   renameSync(tmp, filePath());
+  emitConnectorsChanged();
 }
 
 function isConnector(v: unknown): v is Connector {
@@ -96,7 +110,7 @@ function isConnector(v: unknown): v is Connector {
     typeof c.owner === "string" &&
     typeof c.name === "string" &&
     typeof c.endpoint === "string" &&
-    c.kind === "mcp"
+    (c.kind === "mcp" || c.kind === "native")
   );
 }
 
@@ -148,6 +162,18 @@ export function connectorsForOwner(owner: string): Connector[] {
   return connectorsForMember(owner, null);
 }
 
+/**
+ * For the owner's UI: their own connections, the team's, and every role's.
+ * Roles and the team are the owner's to manage, so a connection added for a
+ * role must stay visible after the scope picker moves on. Other members'
+ * personal connections stay private to them.
+ */
+export function listConnectorsForAdmin(owner: string): Connector[] {
+  return read().connectors.filter(
+    (c) => c.owner === owner || c.owner === ORG_OWNER || c.owner.startsWith(ROLE_OWNER_PREFIX),
+  );
+}
+
 /** For the UI: every connection in the member's buckets, no shadowing. */
 export function listConnectors(owner?: string, roleId?: string | null): Connector[] {
   const all = read().connectors;
@@ -168,6 +194,8 @@ export type ConnectorInput = {
   catalogSlug?: string;
   icon?: string;
   oauth?: boolean;
+  oauthApp?: string;
+  native?: string;
   requireApproval?: boolean;
 };
 
@@ -187,11 +215,22 @@ export function createConnector(input: ConnectorInput): ConnectorResult {
   if (!name) return { ok: false, error: "name is required" };
   if (!validEndpoint(input.endpoint)) return { ok: false, error: "endpoint must be an http(s) URL" };
   if (!input.owner) return { ok: false, error: "owner is required" };
+  if (input.oauthApp !== undefined && !isOAuthAppProvider(input.oauthApp)) {
+    return { ok: false, error: `unknown OAuth app "${input.oauthApp}"` };
+  }
+  if (input.native !== undefined && !isNativeProvider(input.native)) {
+    return { ok: false, error: `unknown native connector "${input.native}"` };
+  }
+  // A native connector always signs in with its provider's app.
+  const oauthApp = input.native ? NATIVE_CONNECTORS[input.native]!.oauthApp : input.oauthApp;
   const file = read();
   if (file.connectors.length >= MAX) return { ok: false, error: `at most ${MAX} connectors` };
   const now = Date.now();
   const base = slugify(name) || "connector";
-  const taken = new Set(file.connectors.filter((c) => c.owner === input.owner).map((c) => c.slug));
+  // Unique across the box, not per bucket. A member reads team, role and
+  // own buckets together, and tool names are `<slug>__<tool>`, so a personal
+  // "gmail" and a role "gmail" would collide and one account would vanish.
+  const taken = new Set(file.connectors.map((c) => c.slug));
   let slug = base;
   for (let n = 2; taken.has(slug); n += 1) slug = `${base}-${n}`;
   const connector: Connector = {
@@ -199,12 +238,14 @@ export function createConnector(input: ConnectorInput): ConnectorResult {
     owner: input.owner,
     name,
     slug,
-    kind: "mcp",
+    kind: input.native ? "native" : "mcp",
+    ...(input.native ? { native: input.native } : {}),
     endpoint: input.endpoint.trim(),
     headers: sanitizeHeaders(input.headers),
     catalogSlug: input.catalogSlug,
     icon: typeof input.icon === "string" ? input.icon : undefined,
-    oauth: input.oauth === true,
+    oauth: input.oauth === true || !!oauthApp,
+    ...(oauthApp ? { oauthApp } : {}),
     requireApproval: input.requireApproval === true,
     createdAt: now,
     updatedAt: now,
@@ -257,6 +298,24 @@ export function setConnectorOAuth(id: string, oauth: boolean): Connector | null 
   const c = file.connectors.find((x) => x.id === id);
   if (!c || c.oauth === oauth) return null;
   c.oauth = oauth;
+  c.updatedAt = Date.now();
+  write(file);
+  return c;
+}
+
+/**
+ * Record the account a connection signed in as, and show it in the name so
+ * two Gmail connections are told apart in the list and in the tool
+ * descriptions agents read. Returns the stored connection, or null.
+ */
+export function setConnectorAccount(id: string, account: string): Connector | null {
+  const file = read();
+  const c = file.connectors.find((x) => x.id === id);
+  const value = account.trim().slice(0, 200);
+  if (!c || !value) return null;
+  const base = c.account && c.name.endsWith(` (${c.account})`) ? c.name.slice(0, -` (${c.account})`.length) : c.name;
+  c.account = value;
+  c.name = `${base} (${value})`.slice(0, 120);
   c.updatedAt = Date.now();
   write(file);
   return c;

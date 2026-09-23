@@ -71,6 +71,7 @@ import {
   View,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
+  type HostInstance,
 } from "react-native";
 import Reanimated, {
   FadeIn,
@@ -136,6 +137,7 @@ import { agentLabel as agentDisplayName } from "../../src/omg/agent-icons";
 import { usePromptDraft, stashScope } from "../../src/omg/prompt-stash";
 import { useOmg } from "../../src/omg/provider";
 import { BrowserLoginCard } from "../../src/omg/browser-login-card";
+import { ProjectPreviewCard } from "../../src/omg/project-preview-card";
 import { SessionActivityTitle, useSessionActivity } from "../../src/omg/session-activity";
 import { useTheme } from "../../src/omg/theme";
 import { useToast } from "../../src/omg/toast";
@@ -580,7 +582,7 @@ function SessionScreenContent({
   }, [resuming, toast]);
 
   const listRef = useAnimatedRef<FlatList<TranscriptItem>>();
-  const composerSource = useRef<View>(null);
+  const composerSource = useRef<HostInstance>(null);
   const preparingSend = useRef(false);
   const reducedMotion = useReducedMotion();
   const [sendTurn, setSendTurn] = useState<{ key: string; reserve: number; origin: SendOrigin | null } | null>(null);
@@ -1991,7 +1993,7 @@ function SessionScreenContent({
         ListHeaderComponent={
           loadingMore ? (
             <ActivityIndicator color={colors.textMuted} style={{ paddingVertical: space.md }} />
-          ) : null
+          ) : undefined
         }
         keyboardDismissMode="interactive"
         // A drag is the only thing that means "I am reading somewhere else".
@@ -2052,6 +2054,36 @@ function SessionScreenContent({
           <View>
             <View onLayout={(event) => setFooterHeight(event.nativeEvent.layout.height)}>
               {thinking ? bot ? <BotWorkingIndicator bot={bot} /> : <ThinkingPill /> : null}
+              {/* THINGS THE AGENT IS WAITING ON, AT THE END OF THE STREAM.
+                  A website login request and an ask-user question are events
+                  in the conversation, so they belong where the conversation
+                  ends, not in a tray bolted to the composer. Floated above
+                  the field they covered the last thing the agent said and
+                  read as chrome; here they arrive as the newest thing, scroll
+                  with the rest, and the composer stays a composer. The
+                  transcript reserves this footer's measured height, so a card
+                  appearing does not hide the message above it. */}
+              <View style={{ gap: space.sm, paddingTop: space.md }}>
+                <BrowserLoginCard sessionId={id ?? null} />
+                {asks.map((q) => (
+                  <QuestionCard
+                    key={q.id}
+                    question={q.question}
+                    options={(q.options ?? []).map((label, index) => ({ index, label }))}
+                    onAnswer={(label) => {
+                      void Haptics.selectionAsync();
+                      void answerAsk(q, label, true);
+                    }}
+                  />
+                ))}
+                {prompt ? (
+                  <QuestionCard
+                    question={prompt.question}
+                    options={prompt.options ?? []}
+                    onAnswer={answerPrompt}
+                  />
+                ) : null}
+              </View>
             </View>
             <View style={{ height: replySpace }} />
           </View>
@@ -2279,28 +2311,7 @@ function SessionScreenContent({
           composerLift,
         ]}
       >
-        {/* Questions for the person, inside the floating composer — see
-            QuestionCard. Ask-user rows first, then a native prompt. */}
-        <BrowserLoginCard sessionId={id ?? null} />
-        {asks.map((q) => (
-          <QuestionCard
-            key={q.id}
-            question={q.question}
-            options={(q.options ?? []).map((label, index) => ({ index, label }))}
-            onAnswer={(label) => {
-              void Haptics.selectionAsync();
-              void answerAsk(q, label, true);
-            }}
-          />
-        ))}
-        {prompt ? (
-          <QuestionCard
-            question={prompt.question}
-            options={prompt.options ?? []}
-            onAnswer={answerPrompt}
-          />
-        ) : null}
-
+        <ProjectPreviewCard sessionId={id ?? null} />
         <AttachmentStrip items={attachments.items} onRemove={attachments.remove} />
         {/* "/" lists the box's skills above the field, as on the web. */}
         <SkillSuggest value={draft} onChangeText={setDraft} />
@@ -2617,12 +2628,19 @@ function SessionScreenContent({
  */
 /**
  * The agent asked something — answering has to be one tap, and that tap has
- * to actually answer. It lives INSIDE the floating composer: laid out in the
- * normal flow it landed under the absolutely positioned bar, where the field
- * covered the question and most of its answers. Here it sits above the field,
- * lifts with the keyboard, and is part of the height the transcript reserves
- * at its end. Used for a native prompt from the transcript socket and for an
- * ask-user question from /api/ask alike.
+ * to actually answer.
+ *
+ * IT IS THE LAST THING IN THE TRANSCRIPT, not a tray on the composer. It used
+ * to live inside the floating composer, because laid out in the normal flow it
+ * landed UNDER the absolutely positioned bar and the field covered the
+ * question and most of its answers. Floating it fixed that and bought a worse
+ * problem: a question is a turn in the conversation, and parked on the
+ * composer it covered the message that explains why the agent is asking, then
+ * stayed there while you scrolled. It now renders in the list's footer, which
+ * is inside the scroller and above the space the transcript already reserves
+ * at its end, so it arrives where the newest turn arrives and scrolls with it.
+ * Used for a native prompt from the transcript socket and for an ask-user
+ * question from /api/ask alike.
  */
 function QuestionCard({
   question,
@@ -2639,9 +2657,12 @@ function QuestionCard({
       style={{
         padding: space.md,
         backgroundColor: colors.card,
-        // Same 32 as the expanded composer under it.
-        // radius.lg is 12, which read as a box against that field.
-        borderRadius: 32,
+        // Same 16 as the website login row above it. It used to be 32, to
+        // match the expanded composer it was parked on; now that both cards
+        // stand in the transcript, the thing it has to agree with is the
+        // other card, and two different corner radii on two stacked cards
+        // read as two unrelated surfaces.
+        borderRadius: 16,
         borderCurve: "continuous",
         borderWidth: StyleSheet.hairlineWidth,
         // borderStrong: this is a card the transcript can hand you at any

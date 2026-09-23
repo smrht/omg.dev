@@ -24,6 +24,19 @@ test("offers Astra to Codex sessions", () => {
   expect(CODEX_AISDK_MODELS).toContain("gpt-6-astra");
 });
 
+// The `opus` alias already resolves to Opus 5.5, so this is about naming a
+// version on purpose: the full id is the only entry that stays on 5.5 when the
+// alias moves to the next Opus, and the only one that shows the version in the
+// picker. Both Claude backends take the same model strings.
+test("Claude and the Agent SDK retain the version-labelled family alias", async () => {
+  const { omgModelLabel } = await import("../packages/protocol/src/omg-model-display.ts");
+  for (const agent of ["claude", "aisdk"] as const) {
+    expect(modelsForAgent(agent)).toContain("opus");
+    expect(modelsForAgent(agent).filter((id) => id.includes("opus"))).toHaveLength(1);
+  }
+  expect(omgModelLabel("opus")).toBe("Opus 5.5");
+});
+
 const DISCOVERED = [
   "openai/gpt-5.3-codex-spark",
   "openai/gpt-5.4",

@@ -86,6 +86,7 @@ interface WebViewLike {
 }
 
 let view: WebViewLike | null = null;
+let opening: Promise<WebViewLike> | null = null;
 let viewTargetId: string | null = null;
 /**
  * The `startedAt` of the desktop this view was attached to. A view outlives the
@@ -168,13 +169,64 @@ export async function agentView(): Promise<WebViewLike> {
   // tool call the agent has to interpret.
   if (view && !(await viewResponds(view))) closeAgentView();
   if (view) return view;
+  // One opener at a time. openAgentView awaits a navigate, so two tools
+  // arriving together would otherwise each build a view and leave a second
+  // orphaned tab on the person's screen.
+  if (!opening) {
+    opening = openAgentView()
+      .then(async (v) => {
+        view = v;
+        viewStartedAt = status.startedAt;
+        await captureViewTarget(v);
+        return v;
+      })
+      .finally(() => {
+        opening = null;
+      });
+  }
+  return await opening;
+}
 
-  const Ctor = webViewCtor();
+/** What openAgentView needs from this box. Injectable so it can be tested
+ *  without a desktop, an X display, or a Chrome to attach to. */
+export interface AgentViewDeps {
+  ctor(): (new (opts: unknown) => WebViewLike) | null;
+  status(): { running: boolean; width: number; height: number };
+  cdpUrl(): Promise<string | null>;
+}
+
+function liveViewDeps(): AgentViewDeps {
+  return { ctor: webViewCtor, status: desktopStatus, cdpUrl: cdpWebSocketUrl };
+}
+
+/**
+ * Build the shared view and give it a PAGE SESSION before anyone uses it.
+ *
+ * Attaching alone is not enough. Bun.WebView has no CDP session until the
+ * first navigate() (see captureViewTarget below), and without one its calls
+ * land on the BROWSER-level target, where the Page and Runtime domains do not
+ * exist. The symptom is a tool failing with `'Page.captureScreenshot' wasn't
+ * found` or `'Runtime.evaluate' wasn't found` -- a message that reads like a
+ * broken Chrome and is really a missing navigate.
+ *
+ * It only ever bit the tools that do not navigate first: computer_screenshot
+ * and computer_read. It bit them in a specific and repeatable state -- `view`
+ * is per-process, so every service restart armed the bug again for whichever
+ * session looked at the screen before it drove it.
+ *
+ * about:blank is the cheapest page that creates the session. The tab is the
+ * agent's own, so this opens nothing of the person's and navigates none of
+ * their tabs.
+ */
+export async function openAgentView(deps: AgentViewDeps = liveViewDeps()): Promise<WebViewLike> {
+  const Ctor = deps.ctor();
   if (!Ctor) {
     throw new Error("this Bun build has no Bun.WebView (needs Bun 1.3.12 or later)");
   }
+  const status = deps.status();
+  if (!status.running) throw new Error("the computer is not running; start it first");
 
-  const url = await cdpWebSocketUrl();
+  const url = await deps.cdpUrl();
   if (!url) throw new Error("cannot reach the desktop browser's DevTools endpoint");
 
   const v = new Ctor({
@@ -182,8 +234,10 @@ export async function agentView(): Promise<WebViewLike> {
     width: status.width,
     height: status.height - 40,
   });
-  view = v;
-  viewStartedAt = status.startedAt;
+  // The load-bearing line. Nothing caches this view until the navigate that
+  // gives it a page session resolves, so a caller can never receive a view
+  // whose Page and Runtime domains do not exist yet.
+  await v.navigate("about:blank");
   return v;
 }
 

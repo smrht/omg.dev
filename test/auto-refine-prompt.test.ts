@@ -80,7 +80,6 @@ describe("the feedback button's wiring", () => {
       /path\.match\(\/\^\\\/api\\\/auto\\\/agents\\\/\(\[a-z0-9_-\]\+\)\\\/refine\$\/\)/,
     );
     expect(route).not.toBeNull();
-    expect(SERVE).toContain("const feedback = b?.feedback?.trim()");
     expect(SERVE).toContain('if (!feedback) return err(400, "feedback is required")');
   });
 

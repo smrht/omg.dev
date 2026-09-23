@@ -17,7 +17,12 @@ import { join, resolve, basename } from "node:path";
 import { homedir } from "node:os";
 import { PATHS } from "./config.ts";
 import { reposRoot } from "./projects.ts";
-import { installProjectBuilderSkill, writeProjectAgentInstructions } from "./project-starter.ts";
+import {
+  installProjectBuilderSkill,
+  installProjectTemplate,
+  type ProjectTemplate,
+  writeProjectAgentInstructions,
+} from "./project-starter.ts";
 
 export type CustomRepo = { name: string; cwd: string };
 
@@ -184,8 +189,30 @@ async function gitInit(cwd: string): Promise<void> {
   await runGit(cwd, ["init", "-b", "main"], "git init");
 }
 
+async function gitValue(cwd: string, args: string[]): Promise<string> {
+  const proc = Bun.spawn({
+    cmd: ["git", "-C", cwd, ...args],
+    stdout: "pipe",
+    stderr: "ignore",
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+  });
+  const out = await new Response(proc.stdout).text();
+  await proc.exited;
+  return out.trim();
+}
+
+// An agent commits in the project it creates. A Computer made before its image
+// set a system git identity has none, and that first commit fails with
+// "empty ident name". Give the project a local default only in that case, so a
+// user's own global or system identity always wins.
+async function ensureProjectGitIdentity(cwd: string): Promise<void> {
+  if (await gitValue(cwd, ["config", "user.email"])) return;
+  await runGit(cwd, ["config", "user.name", "omg.dev agent"], "set git user.name");
+  await runGit(cwd, ["config", "user.email", "agent@omg.dev"], "set git user.email");
+}
+
 async function commitStarterProject(cwd: string): Promise<void> {
-  await runGit(cwd, ["add", "--", "README.md", "AGENTS.md", "CLAUDE.md", ".agents"], "stage starter project");
+  await runGit(cwd, ["add", "--", "."], "stage starter project");
   await runGit(
     cwd,
     [
@@ -197,10 +224,7 @@ async function commitStarterProject(cwd: string): Promise<void> {
       "-m",
       "Initial commit",
       "--",
-      "README.md",
-      "AGENTS.md",
-      "CLAUDE.md",
-      ".agents",
+      ".",
     ],
     "initial git commit",
   );
@@ -226,6 +250,7 @@ export async function prepareProjectFolder(rawPath: string): Promise<string> {
 export async function createProjectFolder(
   rawParent: string | undefined,
   rawName: string,
+  template: ProjectTemplate = "blank",
 ): Promise<CustomRepo> {
   const name = rawName.trim();
   if (!name || !/^[\w .-]+$/.test(name) || name === "." || name === "..") {
@@ -243,10 +268,11 @@ export async function createProjectFolder(
   }
   await mkdir(cwd);
   try {
-    await Bun.write(join(cwd, "README.md"), `# ${name}\n`);
+    await installProjectTemplate(cwd, template, name);
     await installProjectBuilderSkill(cwd);
     await writeProjectAgentInstructions(cwd);
     await gitInit(cwd);
+    await ensureProjectGitIdentity(cwd);
     await commitStarterProject(cwd);
     return await addCustomRepo(cwd, name);
   } catch (error) {

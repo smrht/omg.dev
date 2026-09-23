@@ -317,18 +317,53 @@ export async function setCodingAgentVisibility(
 }
 
 /**
+ * Agents that stay OFF until the owner switches them on, even when the CLI is
+ * installed and ready.
+ *
+ * OpenCode is here because omg.dev now ships its own managed coding agent.
+ * OpenCode was the one agent that needed no credential, so it was every
+ * box's floor: it was ready on any install that had the CLI, it was the only
+ * kind the hosted access gate exempted, and the composer's
+ * pick-the-first-available rule therefore landed on it and its deepseek
+ * default. The omg agent covers that role now. OpenCode stays a full,
+ * supported backend for anyone who wants it — it is one toggle away in
+ * Settings, and turning it on sticks.
+ */
+const OPT_IN_AGENT_KINDS = new Set<CodingAgentKind>(["opencode"]);
+
+/**
  * Composer toggle for one coding agent.
  *
  * An agent is ON only when it can actually run. No saved choice follows
  * readiness: ready defaults ON, unready defaults OFF. An explicit hide stays
  * off after the agent becomes ready. An old implicit-on value (`true`, or
  * missing) does not keep an unready agent on.
+ *
+ * An opt-in kind inverts only the default: it needs an explicit `true`, so a
+ * missing value reads OFF instead of ON. Readiness still gates it, and an
+ * explicit choice in either direction still wins.
  */
 export function codingAgentVisible(
+  kind: CodingAgentKind,
   saved: boolean | undefined,
   configured: boolean,
 ): boolean {
-  return saved === false ? false : configured;
+  if (!configured) return false;
+  return OPT_IN_AGENT_KINDS.has(kind) ? saved === true : saved !== false;
+}
+
+/**
+ * Record that someone asked for this agent by name.
+ *
+ * Installing an agent from onboarding or Settings IS the opt-in. Without this
+ * the two gestures disagree: a person picks OpenCode, watches it install, and
+ * then cannot find it in the composer because an opt-in kind needs an explicit
+ * yes and the install never wrote one. Only opt-in kinds are touched, so a
+ * normal install still leaves an explicit hide alone.
+ */
+export async function markCodingAgentRequested(kind: CodingAgentKind): Promise<void> {
+  if (!OPT_IN_AGENT_KINDS.has(kind)) return;
+  await setCodingAgentVisibility(kind, true);
 }
 
 function which(name: string, extra: string[] = []): string | null {
@@ -1608,7 +1643,7 @@ export async function listCodingAgents(): Promise<CodingAgentInfo[]> {
       return {
         key,
         label: CODING_AGENT_LABELS[key],
-        visible: codingAgentVisible(cfg.agents[key]?.visible, status.configured),
+        visible: codingAgentVisible(key, cfg.agents[key]?.visible, status.configured),
         status,
       };
     }),
@@ -2056,29 +2091,76 @@ export async function runCodingAgentUpdate(
   kind: CodingAgentKind,
   hooks: CodingAgentUpdateHooks = {},
 ): Promise<void> {
-  if (setupRuns.has(kind)) throw new Error(`${kind} setup is already running`);
-  if (!codingAgentHasInstaller(kind)) throw new Error(`${kind} does not have an automatic setup path`);
-  const command = installCommandFor(kind);
-  if (!command) throw new Error(`${kind} does not have an automatic setup path`);
+  return runCodingAgentUpdates([kind], hooks);
+}
 
-  setupProgress.set(kind, { percent: 10, label: "Updating…" });
+/**
+ * The agents "Update all" reinstalls: the CLI is on disk and this box knows
+ * how to install it again. A missing CLI is an Install, not an Update, so it
+ * stays out; the user did not ask for new agents.
+ */
+export function updatableCodingAgentKinds(agents: CodingAgentInfo[]): CodingAgentKind[] {
+  return agents
+    .filter((agent) => agent.status.canAutoSetup && codingAgentHasInstaller(agent.key))
+    .filter((agent) => {
+      const binary = agent.status.checks.filter((check) => /CLI$|runtime$/i.test(check.label));
+      return binary.length > 0 && binary.every((check) => check.ok);
+    })
+    .map((agent) => agent.key);
+}
+
+/**
+ * Reinstall the CLI for each kind, then re-probe the model catalog once.
+ *
+ * Kinds that share a CLI (claude and aisdk, codex and codex-aisdk) run their
+ * installer once. Installers run one after another because they share the
+ * global package store. One failing installer does not stop the rest; the
+ * catalog is still refreshed and the failures are thrown together at the end.
+ */
+export async function runCodingAgentUpdates(
+  kinds: CodingAgentKind[],
+  hooks: CodingAgentUpdateHooks = {},
+): Promise<void> {
+  const uniqueKinds = [...new Set(kinds)];
+  if (!uniqueKinds.length) throw new Error("no coding agent to update");
+  const runningKind = uniqueKinds.find((kind) => setupRuns.has(kind));
+  if (runningKind) throw new Error(`${runningKind} setup is already running`);
+
+  const groups = new Map<string, CodingAgentKind[]>();
+  for (const kind of uniqueKinds) {
+    if (!codingAgentHasInstaller(kind)) throw new Error(`${kind} does not have an automatic setup path`);
+    const command = installCommandFor(kind);
+    if (!command) throw new Error(`${kind} does not have an automatic setup path`);
+    groups.set(command, [...(groups.get(command) ?? []), kind]);
+  }
+
+  for (const kind of uniqueKinds) setupProgress.set(kind, { percent: 10, label: "Updating…" });
   setupLog = {
     running: true,
-    kinds: [kind],
+    kinds: [...uniqueKinds],
     lines: [],
     error: null,
     finishedAt: null,
   };
-  appendSetupLog(`Updating ${CODING_AGENT_LABELS[kind]}…`);
-  appendSetupLog(command);
 
   const run = (async () => {
-    setupProgress.set(kind, { percent: 40, label: "Installing latest CLI…" });
     const runInstaller = hooks.runInstaller ?? ((cmd) => runInstallerCommand(cmd, appendSetupLog));
-    await runInstaller(command);
-    const keys = modelDiscoveryKeysForAgent(kind);
+    const failures: string[] = [];
+    for (const [command, group] of groups) {
+      appendSetupLog(`Updating ${[...new Set(group.map((kind) => CODING_AGENT_LABELS[kind]))].join(", ")}…`);
+      appendSetupLog(command);
+      for (const kind of group) setupProgress.set(kind, { percent: 40, label: "Installing latest CLI…" });
+      try {
+        await runInstaller(command);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        failures.push(`${CODING_AGENT_LABELS[group[0]!]}: ${message}`);
+        appendSetupLog(`Error: ${message}`);
+      }
+    }
+    const keys = [...new Set(uniqueKinds.flatMap((kind) => modelDiscoveryKeysForAgent(kind)))];
     if (keys.length) {
-      setupProgress.set(kind, { percent: 80, label: "Refreshing models…" });
+      for (const kind of uniqueKinds) setupProgress.set(kind, { percent: 80, label: "Refreshing models…" });
       const refresh =
         hooks.refreshCatalog ??
         (async (probe) => {
@@ -2090,10 +2172,11 @@ export async function runCodingAgentUpdate(
         });
       await refresh(keys);
     }
-    setupProgress.set(kind, { percent: 100, label: "Done" });
+    if (failures.length) throw new Error(failures.join("\n"));
+    for (const kind of uniqueKinds) setupProgress.set(kind, { percent: 100, label: "Done" });
     appendSetupLog("Done.");
   })();
-  setupRuns.set(kind, run);
+  for (const kind of uniqueKinds) setupRuns.set(kind, run);
   try {
     await run;
   } catch (e) {
@@ -2103,8 +2186,10 @@ export async function runCodingAgentUpdate(
   } finally {
     setupLog.running = false;
     setupLog.finishedAt = Date.now();
-    if (setupRuns.get(kind) === run) setupRuns.delete(kind);
-    setupProgress.delete(kind);
+    for (const kind of uniqueKinds) {
+      if (setupRuns.get(kind) === run) setupRuns.delete(kind);
+      setupProgress.delete(kind);
+    }
   }
 }
 

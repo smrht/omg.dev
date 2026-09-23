@@ -19,6 +19,11 @@ export type PublicConnector = {
   catalogSlug?: string;
   icon?: string;
   oauth?: boolean;
+  oauthApp?: string;
+  /** Set for a connector omg runs itself, e.g. "gmail". */
+  native?: string;
+  /** The signed-in account, e.g. the mailbox address. */
+  account?: string;
   oauthConnected?: boolean;
   requireApproval: boolean;
   createdAt: number;
@@ -38,6 +43,20 @@ export type CatalogEntry = {
   needsOAuth: boolean;
   /** The catalog's `auth.kind`, or null when the entry says nothing. */
   authKind?: string | null;
+  /** Signs in with this provider's pre-registered client on the box. */
+  oauthApp?: string;
+  /** A connector omg runs itself. */
+  native?: string;
+  /** omg's curated entries, shown above the searchable catalog. */
+  recommended?: boolean;
+};
+
+export type OAuthAppStatus = {
+  id: string;
+  name: string;
+  consoleUrl: string;
+  configured: boolean;
+  clientIdHint: string | null;
 };
 
 /**
@@ -152,6 +171,8 @@ type ConnectorDraft = {
   catalogSlug?: string;
   icon?: string;
   oauth?: boolean;
+  oauthApp?: string;
+  native?: string;
   /** The server may still ask for a sign-in; reserve the popup on the click. */
   maybeOauth?: boolean;
 };
@@ -187,10 +208,10 @@ function decodeScope(value: string): Scope {
 
 /** The level a stored connector lives at, from its owner bucket. */
 export function connectorLevel(owner: string, roles: RoleOption[]): { label: string; shared: boolean } {
-  if (owner === "*org*") return { label: "Team", shared: true };
+  if (owner === "*org*") return { label: "Whole team", shared: true };
   if (owner.startsWith("role:")) {
     const id = owner.slice(5);
-    return { label: `Role: ${roles.find((r) => r.id === id)?.name ?? id}`, shared: true };
+    return { label: roles.find((r) => r.id === id)?.name ?? id, shared: true };
   }
   return { label: "Only you", shared: false };
 }
@@ -260,59 +281,108 @@ export function ConnectorsNativePanel() {
     if (authError) setError(authError);
   };
 
+  const groups = connectorGroups(connectors ?? [], roles);
+
   return (
     <section className="space-y-4" aria-label="Connectors">
       <p className="px-1 text-xs leading-relaxed text-muted-foreground">
-        Connectors are MCP servers you add. Each one is for you ({user}), for every member of one role,
-        or for the whole team. Your agents see all three. Credentials stay on the box; agents never see them.
+        Apps your agents can use. Credentials stay on this box; agents never see them.
       </p>
 
-      <label className="flex items-center gap-3 rounded-2xl border border-border bg-card/40 px-4 py-2.5 text-xs">
-        <span className="shrink-0 font-medium">Add new connectors for</span>
-        <select
-          aria-label="Connector scope"
-          value={encodeScope(scope)}
-          onChange={(e) => setScope(decodeScope(e.target.value))}
-          className="h-7 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-xs"
-        >
-          <option value="me">Only me ({user})</option>
-          {roles.map((r) => (
-            <option key={r.id} value={`role:${r.id}`}>
-              Role: {r.name}
-            </option>
-          ))}
-          <option value="org">Whole team</option>
-        </select>
-      </label>
-
-      <div className="overflow-hidden rounded-2xl border border-border bg-card/40 divide-y divide-border">
+      <div className="space-y-2" aria-label="Connected">
+        <div className="px-1 text-sm font-medium">Connected</div>
         {connectors === null ? (
-          <div className="px-4 py-3 text-xs text-muted-foreground">Loading connectors.</div>
-        ) : connectors.length === 0 ? (
-          <div className="px-4 py-3 text-xs text-muted-foreground">
-            No connectors yet. Add one from the catalog or by URL below.
+          <div className="rounded-2xl border border-border bg-card/40 px-4 py-3 text-xs text-muted-foreground">Loading connectors.</div>
+        ) : groups.length === 0 ? (
+          <div className="rounded-2xl border border-border bg-card/40 px-4 py-3 text-xs text-muted-foreground">
+            Nothing connected yet. Pick who can use it below, then connect an app.
           </div>
         ) : (
-          connectors.map((c) => <ConnectorRow key={c.id} connector={c} roles={roles} onChanged={load} onError={setError} signIn={signIn} />)
+          groups.map((g) => (
+            <div key={g.owner} className="overflow-hidden rounded-2xl border border-border bg-card/40" data-group={g.owner}>
+              <div className="flex items-baseline gap-2 border-b border-border px-4 py-2">
+                <span className="text-xs font-medium">{g.label}</span>
+                <span className="text-[11px] text-muted-foreground">{g.hint}</span>
+              </div>
+              <div className="divide-y divide-border">
+                {g.rows.map((c) => (
+                  <ConnectorRow key={c.id} connector={c} onChanged={load} onError={setError} signIn={signIn} />
+                ))}
+              </div>
+            </div>
+          ))
         )}
       </div>
       {error ? <p className="px-1 text-xs text-destructive">{error}</p> : null}
 
-      <CatalogBrowser user={user} scope={scope} addConnector={addConnector} />
-      <AddByUrl user={user} scope={scope} addConnector={addConnector} />
+      <div className="space-y-2" aria-label="Add a connector">
+        <div className="px-1 text-sm font-medium">Add</div>
+        <label className="flex items-center gap-3 rounded-2xl border border-border bg-card/40 px-4 py-2.5 text-xs">
+          <span className="shrink-0 font-medium">Who can use it</span>
+          <select
+            aria-label="Connector scope"
+            value={encodeScope(scope)}
+            onChange={(e) => setScope(decodeScope(e.target.value))}
+            className="h-7 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-xs"
+          >
+            <option value="me">Only me ({user})</option>
+            {roles.map((r) => (
+              <option key={r.id} value={`role:${r.id}`}>
+                Everyone in {r.name}
+              </option>
+            ))}
+            <option value="org">Whole team</option>
+          </select>
+        </label>
+
+        {connectors !== null ? (
+          <RecommendedConnectors
+            user={user}
+            scope={scope}
+            scopeLabel={scope.kind === "role" ? `everyone in ${roles.find((r) => r.id === scope.roleId)?.name ?? scope.roleId}` : scope.kind === "org" ? "the whole team" : "you only"}
+            connectors={connectors}
+            addConnector={addConnector}
+          />
+        ) : null}
+
+        <CatalogBrowser user={user} scope={scope} addConnector={addConnector} />
+        <AddByUrl user={user} scope={scope} addConnector={addConnector} />
+      </div>
     </section>
   );
 }
 
+type ConnectorGroup = { owner: string; label: string; hint: string; rows: PublicConnector[] };
+
+/**
+ * Connections grouped by who can use them: you, each role, then the team.
+ * A role's group says its agents can use the tools, because adding a
+ * connection for a role is the permission (src/policy/connector-grants.ts).
+ */
+export function connectorGroups(connectors: PublicConnector[], roles: RoleOption[]): ConnectorGroup[] {
+  const byOwner = new Map<string, PublicConnector[]>();
+  for (const c of connectors) byOwner.set(c.owner, [...(byOwner.get(c.owner) ?? []), c]);
+  const rank = (owner: string) => (owner === "*org*" ? 2 : owner.startsWith("role:") ? 1 : 0);
+  return [...byOwner.entries()]
+    .sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b))
+    .map(([owner, rows]) => {
+      const level = connectorLevel(owner, roles);
+      const hint = owner === "*org*"
+        ? "Every member's agents"
+        : owner.startsWith("role:")
+          ? "Agents of every member in this role"
+          : "Only your agents";
+      return { owner, label: level.label, hint, rows };
+    });
+}
+
 function ConnectorRow({
   connector,
-  roles,
   onChanged,
   onError,
   signIn,
 }: {
   connector: PublicConnector;
-  roles: RoleOption[];
   onChanged: () => Promise<void>;
   onError: (m: string | null) => void;
   signIn: (id: string) => Promise<void>;
@@ -395,18 +465,12 @@ function ConnectorRow({
         </button>
         <Logo src={connector.icon} alt="" />
         <span className="min-w-0 flex-1">
-          <span className="flex items-center gap-2 text-sm font-medium">
-            <span className="truncate">{connector.name}</span>
-            {(() => {
-              const level = connectorLevel(connector.owner, roles);
-              return level.shared ? (
-                <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground" data-level={connector.owner}>
-                  {level.label}
-                </span>
-              ) : null;
-            })()}
-          </span>
-          <code className="block truncate text-xs text-muted-foreground">{connector.endpoint}</code>
+          <span className="block truncate text-sm font-medium">{connector.native && connector.account ? nativeTitle(connector) : connector.name}</span>
+          {connector.native ? (
+            <span className="block truncate text-xs text-muted-foreground">{connector.account ?? "Not signed in yet. Click Connect."}</span>
+          ) : (
+            <code className="block truncate text-xs text-muted-foreground">{connector.endpoint}</code>
+          )}
         </span>
         {connector.oauth ? (
           connector.oauthConnected ? (
@@ -462,6 +526,12 @@ function ConnectorRow({
       ) : null}
     </div>
   );
+}
+
+/** "Gmail" for a native row whose name already carries the account below it. */
+function nativeTitle(c: PublicConnector): string {
+  const suffix = ` (${c.account})`;
+  return c.name.endsWith(suffix) ? c.name.slice(0, -suffix.length) : c.name;
 }
 
 function AddByUrl({ user, scope, addConnector }: { user: string; scope: Scope; addConnector: AddConnector }) {
@@ -655,5 +725,173 @@ function CatalogBrowser({ user, scope, addConnector }: { user: string; scope: Sc
         )}
       </ul>
     </div>
+  );
+}
+
+/**
+ * omg's curated connectors (Google's official MCP servers), one Connect click
+ * each. They sign in with a pre-registered OAuth client, so until the box has
+ * one the section shows the one-time setup form in place of the buttons.
+ */
+export function RecommendedConnectors({
+  user,
+  scope,
+  scopeLabel,
+  connectors,
+  addConnector,
+}: {
+  user: string;
+  scope: Scope;
+  /** Who a new connection is for, in words, e.g. "everyone in Growth". */
+  scopeLabel?: string;
+  connectors: PublicConnector[];
+  addConnector: AddConnector;
+}) {
+  const [entries, setEntries] = useState<CatalogEntry[]>([]);
+  const [apps, setApps] = useState<OAuthAppStatus[] | null>(null);
+  const [redirectUri, setRedirectUri] = useState("");
+  const [adding, setAdding] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadApps = useCallback(async () => {
+    try {
+      const res = await api<{ apps: OAuthAppStatus[]; redirectUri: string }>("/api/connectors/oauth-apps");
+      setApps(res.apps);
+      setRedirectUri(res.redirectUri);
+    } catch {
+      setApps([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void api<{ recommended?: CatalogEntry[] }>("/api/connectors/catalog?limit=1")
+      .then((res) => setEntries(res.recommended ?? []))
+      .catch(() => setEntries([]));
+    void loadApps();
+  }, [loadApps]);
+
+  // A native connector can be added once per account, so it stays offered
+  // ("Add another account"). Anything else already added is hidden. Both
+  // read the scope being added to: Gmail for you does not make Gmail for a
+  // role "another account".
+  const bucket = scope.kind === "org" ? "*org*" : scope.kind === "role" ? `role:${scope.roleId}` : null;
+  const inScope = connectors.filter((c) => (bucket ? c.owner === bucket : c.owner !== "*org*" && !c.owner.startsWith("role:")));
+  const added = new Set(inScope.map((c) => c.catalogSlug).filter(Boolean));
+  const available = entries.filter((e) => e.native || !added.has(e.slug));
+  if (available.length === 0) return null;
+
+  const neededApps = [...new Set(available.map((e) => e.oauthApp).filter((a): a is string => !!a))];
+  const missing = (apps ?? []).filter((a) => neededApps.includes(a.id) && !a.configured);
+
+  const connect = async (entry: CatalogEntry) => {
+    if (!entry.connectUrl) return;
+    setAdding(entry.slug);
+    setError(null);
+    try {
+      await addConnector({
+        ...scopeBody(scope, user),
+        name: entry.name,
+        endpoint: entry.connectUrl,
+        catalogSlug: entry.slug,
+        icon: entry.icon ?? undefined,
+        oauth: true,
+        oauthApp: entry.oauthApp,
+        native: entry.native,
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "could not connect");
+    } finally {
+      setAdding(null);
+    }
+  };
+
+  return (
+    <div className="space-y-2 rounded-2xl border border-border bg-card/40 px-4 py-3" aria-label="Recommended connectors">
+      <div className="flex items-baseline gap-2">
+        <span className="text-sm font-medium">Recommended</span>
+        {scopeLabel ? <span className="text-[11px] text-muted-foreground" data-scope-label>For {scopeLabel}</span> : null}
+      </div>
+      {missing.map((app) => (
+        <OAuthAppSetup key={app.id} app={app} redirectUri={redirectUri} onSaved={loadApps} />
+      ))}
+      <ul className="space-y-1">
+        {available.map((e) => {
+          const blocked = apps === null || missing.some((a) => a.id === e.oauthApp);
+          return (
+            <li key={e.slug} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs" data-recommended={e.slug}>
+              <Logo src={e.icon} alt="" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate font-medium">{e.name}</span>
+                <span className="block truncate text-[11px] text-muted-foreground">{e.description}</span>
+              </span>
+              <Button type="button" size="sm" disabled={blocked || adding === e.slug} onClick={() => void connect(e)}>
+                {adding === e.slug ? "Connecting…" : added.has(e.slug) ? "Add another account" : "Connect"}
+              </Button>
+            </li>
+          );
+        })}
+      </ul>
+      {error ? <p className="px-1 text-xs text-destructive">{error}</p> : null}
+    </div>
+  );
+}
+
+/** One-time form: paste the provider's OAuth client, registered with this box's callback. */
+function OAuthAppSetup({ app, redirectUri, onSaved }: { app: OAuthAppStatus; redirectUri: string; onSaved: () => Promise<void> }) {
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/api/connectors/oauth-apps/${app.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ clientId: clientId.trim(), clientSecret: clientSecret.trim() }),
+      });
+      await onSaved();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "could not save");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form
+      className="space-y-2 rounded-xl border border-dashed border-border px-3 py-2.5 text-xs"
+      data-oauth-app-setup={app.id}
+      onSubmit={(e) => {
+        e.preventDefault();
+        void save();
+      }}
+    >
+      <p className="font-medium">Set up {app.name} sign-in once</p>
+      <p className="text-muted-foreground">
+        {app.name} needs an OAuth client for this box. Create a Web application client in the{" "}
+        <a href={app.consoleUrl} target="_blank" rel="noreferrer" className="underline">
+          {app.name} console
+        </a>
+        , add this redirect URI, then paste the client here.
+      </p>
+      <code className="block select-all break-all rounded-md bg-muted px-2 py-1" data-redirect-uri>
+        {redirectUri}
+      </code>
+      <Input value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="Client ID" aria-label={`${app.name} client ID`} className="h-8 font-mono text-xs" />
+      <Input
+        value={clientSecret}
+        onChange={(e) => setClientSecret(e.target.value)}
+        placeholder="Client secret"
+        type="password"
+        aria-label={`${app.name} client secret`}
+        className="h-8 font-mono text-xs"
+      />
+      <Button type="submit" size="sm" disabled={busy || !clientId.trim()}>
+        Save
+      </Button>
+      {error ? <p className="text-destructive">{error}</p> : null}
+    </form>
   );
 }

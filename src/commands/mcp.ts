@@ -1100,7 +1100,7 @@ export function buildOmgMcpServer(): McpServer {
     {
       title: "Deploy A Folder To omg Infra",
       description:
-        "Publish a project folder to omg Infra and return the live URL. Defaults to this session's cwd. omg_ship is a feed post and does not deploy.",
+        "Publish a project folder to omg Infra and return the live URL. Defaults to this session's cwd. Waits at most 45 seconds. If the result has pending: true, the build is still running: call omg_deploy_status with the returned slug until it is ready or failed. Do not deploy again. omg_ship is a feed post and does not deploy.",
       inputSchema: {
         cwd: z.string().optional().describe("Absolute folder to publish. Defaults to the calling session cwd."),
         name: z.string().optional().describe("App name on first deploy. Later deploys reuse .omg/project.json."),
@@ -1122,10 +1122,23 @@ export function buildOmgMcpServer(): McpServer {
         await api("/api/cloud/apps/deploy", {
           method: "POST",
           headers: { "Content-Type": "application/json", "X-OMG-Session-ID": sid },
-          body: JSON.stringify({ cwd: folder, name, wait: wait !== false, generateIcon }),
+          body: JSON.stringify({ cwd: folder, name, wait: wait !== false, agentWait: true, generateIcon }),
         }),
       );
     },
+  );
+
+  server.registerTool(
+    "omg_deploy_status",
+    {
+      title: "Wait For A Hosted Deploy",
+      description:
+        "Wait up to 45 seconds for a hosted app build started by omg_deploy and return its status. Call again while the result has pending: true. A failed build returns the build error.",
+      inputSchema: {
+        slug: z.string().min(1).describe("App slug returned by omg_deploy."),
+      },
+    },
+    async ({ slug }) => result(await api(`/api/cloud/apps/status?slug=${encodeURIComponent(slug)}&wait=1`)),
   );
 
   server.registerTool(
@@ -1148,6 +1161,31 @@ export function buildOmgMcpServer(): McpServer {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ slug, visibility }),
+        }),
+      );
+    },
+  );
+
+  server.registerTool(
+    "omg_expose_port",
+    {
+      title: "Show A Live Sandbox Preview",
+      description:
+        "Expose a development port through the omg.dev sandbox proxy and create a preview card. For Expo Go, call with expoGo:true before Metro starts, then start Metro with the returned expoGo.proxyUrl as EXPO_PACKAGER_PROXY_URL (in an Expo template project: bash scripts/start-expo-preview.sh <proxyUrl> <port>) and share expoGo.url. Both URLs are temporary.",
+      inputSchema: {
+        port: z.number().int().min(1).max(65_535).optional().describe("Development server port. Defaults to 5173."),
+        title: z.string().max(120).optional().describe("Short label for the preview card."),
+        expoGo: z.boolean().optional().describe("Prepare a short-lived Expo Go URL before Metro starts. The port must be a Metro port from 8081 to 8099."),
+        sessionId: z.string().optional().describe("Owning session. Defaults to OMG_SESSION_ID."),
+      },
+    },
+    async ({ port, title, expoGo, sessionId }) => {
+      const sid = await activeSessionId(sessionId);
+      return result(
+        await api("/api/project-preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId: sid, port: port ?? (expoGo ? 8081 : 5173), title, expoGo: expoGo === true }),
         }),
       );
     },
@@ -1257,16 +1295,17 @@ export function buildOmgMcpServer(): McpServer {
     "omg_create_project",
     {
       title: "Create omg.dev Project",
-      description: "Create and register a new project folder with Git, a committed README, and the omg-app-builder skill. Defaults to the configured projects directory. Returns repo.cwd for building and deploying; does not move the calling chat. Read the generated skill before building. Existing folders are never overwritten. Inspect omg_list_repos after an uncertain response before retrying.",
+      description: "Create and register a new project folder with Git and the omg-app-builder skill. Select the expo template for an Expo or universal mobile app; it includes Expo Router, Expo Web, an API route, and EAS configuration. Defaults to a blank project. Returns repo.cwd for building and deploying; does not move the calling chat. Read the generated skill before building. Existing folders are never overwritten. Inspect omg_list_repos after an uncertain response before retrying.",
       inputSchema: {
         name: z.string().min(1).describe("Short project folder name"),
         parent: z.string().optional().describe("Existing parent folder; omit to use the configured projects directory"),
+        template: z.enum(["blank", "expo"]).optional().describe("Starter template. Use expo for Expo or universal mobile apps; omit for blank."),
       },
     },
-    async ({ name, parent }) => result(await api("/api/projects/create-folder", {
+    async ({ name, parent, template }) => result(await api("/api/projects/create-folder", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, parent }),
+      body: JSON.stringify({ name, parent, template }),
     })),
   );
 

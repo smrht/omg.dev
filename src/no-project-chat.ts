@@ -15,7 +15,7 @@ When the user wants to create something, help clarify the outcome in the convers
 Ask only for details needed to proceed; a website, app, API, or image is a starting point, not a full specification.
 Use this workspace for ordinary chat, drafts, and artifacts. For a new software project:
 
-1. Read ${PROJECT_BUILDER_SKILL} completely. Learn the intended outcome, then call omg_create_project with a short, descriptive name.
+1. Read ${PROJECT_BUILDER_SKILL} completely. Learn the intended outcome, then call omg_create_project with a short, descriptive name. Select the \`expo\` template for an Expo or universal mobile app. Otherwise use the default blank template.
    It creates and registers a real project folder with Git, a committed README, and the same app-builder skill.
    Use the returned repo.cwd explicitly for shell commands, file edits, builds, and deployment.
    Keep this conversation in Quick Chat; do not move or relabel it. Future chats can select the new project.
@@ -25,10 +25,19 @@ Keep setup details in agent work. Ask the user about product decisions only when
 Do not change unrelated repositories. Do not claim a project was registered in omg.dev unless it was.
 `;
 
+/** Keep chat workspaces in user-owned data, not ~/.omg. Hosted Computers use
+ * ~/.omg for root-written runtime files, so it is not a safe workspace root. */
+export function noProjectChatsRoot(
+  home = homedir(),
+  dataHome = process.env.XDG_DATA_HOME,
+): string {
+  return join(dataHome?.trim() || join(home, ".local", "share"), "omg", "chats");
+}
+
 /** One workspace per conversation, outside repository instruction ancestry. */
 export async function createNoProjectWorkspace(
   name: string,
-  root = join(homedir(), ".omg", "chats"),
+  root = noProjectChatsRoot(),
 ): Promise<string> {
   if (!/^[a-zA-Z0-9-]+$/.test(name)) throw new Error("Invalid chat workspace name");
   const cwd = join(root, name);

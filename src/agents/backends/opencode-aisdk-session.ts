@@ -78,6 +78,44 @@ function resolveOpencodePath(): string | undefined {
   }
 }
 
+// omg.dev runs OpenCode unattended, so both OpenCode-backed agent kinds
+// ("opencode" and "omg") trust the workspace by default: no permission gate,
+// the same posture as the Claude harness `permissionMode: "bypassPermissions"`
+// (./aisdk-session.ts) and grok-cli.ts. Every permission type in OpenCode's
+// config schema is listed, so a new "ask" default cannot appear silently.
+//
+// `doom_loop` is deliberately NOT allowed. It is not a capability grant: it
+// fires when the model repeats a tool call with byte-identical input, so it is
+// the only circuit breaker against an infinite tool loop. It stays "ask", and
+// the question reaches the user through the normal prompt path below.
+//
+// OPENCODE_PERMISSION is merged LAST by OpenCode's config loader, after the
+// global config, the project config, OPENCODE_CONFIG_CONTENT and managed
+// preferences, so it wins over a stale `permission` block on the box. An
+// operator who sets OPENCODE_PERMISSION before the harness starts keeps it.
+const TRUST_ALL_PERMISSIONS = {
+  edit: "allow",
+  bash: "allow",
+  webfetch: "allow",
+  doom_loop: "ask",
+  external_directory: "allow",
+} as const;
+
+/** @internal exported for unit tests */
+export function trustAllPermissionEnv(
+  env: Record<string, string | undefined>,
+): string {
+  const existing = env.OPENCODE_PERMISSION?.trim();
+  if (existing) return existing;
+  return JSON.stringify(TRUST_ALL_PERMISSIONS);
+}
+
+// Call before createOpencodeServer(): the SDK spawns `opencode serve` with a
+// copy of process.env.
+function ensureOpencodeTrustAll(): void {
+  process.env.OPENCODE_PERMISSION = trustAllPermissionEnv(process.env);
+}
+
 function ensureOpencodeOnPath(): void {
   const bin = resolveOpencodePath();
   if (!bin) return;
@@ -306,6 +344,12 @@ export function permissionToPrompt(pending: OcPendingPermission): AisdkPrompt {
   };
 }
 
+/**
+ * The answer a timed-out OpenCode question receives. @internal exported for tests.
+ */
+export const QUESTION_TIMEOUT_ANSWER =
+  "The user did not answer in time. Do not use the question tool for this again. Ask once in a normal chat message, then end your turn and wait for the reply.";
+
 /** @internal exported for unit tests */
 export function pendingToPrompt(pending: OcPendingQuestion): AisdkPrompt | null {
   const q = pending.questions?.[0];
@@ -331,6 +375,26 @@ export function answersForIndex(pending: OcPendingQuestion, index: number): stri
     const label = typeof pick?.label === "string" ? pick.label : "";
     return label ? [label] : [];
   });
+}
+
+/**
+ * @internal exported for unit tests
+ *
+ * A client can answer by sending the chosen label as a normal message. The iOS
+ * question card does exactly that. While OpenCode's question tool is open the
+ * turn cannot end, so a queued message would wait forever. Treat the text as
+ * the answer to the first question: an exact label picks that option, anything
+ * else is a custom answer. Later questions take their first option, as they
+ * do for an index answer.
+ */
+export function answersForText(pending: OcPendingQuestion, text: string): string[][] {
+  const typed = text.trim();
+  const first = pending.questions?.[0];
+  const options = Array.isArray(first?.options) ? first.options : [];
+  const match = options.findIndex((o) => typeof o?.label === "string" && o.label.trim().toLowerCase() === typed.toLowerCase());
+  const answers = answersForIndex(pending, match >= 0 ? match : 0);
+  if (match < 0 && answers.length) answers[0] = [typed];
+  return answers;
 }
 
 /**
@@ -425,7 +489,9 @@ export function toolPartMessages(
   // and, worse, would permanently occupy the id that the real call needs.
   const hasInput = !!input && input !== "{}";
   const settled = status === "completed" || status === "error";
-  if ((hasInput || settled) && !emitted.has(id)) {
+  // surfaceQuestion() owns the row for an OpenCode question. Its tool call
+  // would show the same question a second time.
+  if (name !== "question" && (hasInput || settled) && !emitted.has(id)) {
     emitted.add(id);
     out.push({
       id,
@@ -484,6 +550,7 @@ export async function pipeToOpencodeAiSdk(
   const cwd = opts.cwd ?? process.cwd();
   if (model.startsWith("omg/")) ensureOmgProvider();
   ensureOpencodeOnPath();
+  ensureOpencodeTrustAll();
   const { createOpencodeServer, createOpencodeClient } = await import("@opencode-ai/sdk");
 
   log(`[runner] piping ${prompt.length} chars to opencode via opencode-sdk (${model})`);
@@ -548,6 +615,7 @@ export async function cmdOpencodeAisdkSession(argv: string[]): Promise<void> {
 
   if (model.startsWith("omg/")) ensureOmgProvider();
   ensureOpencodeOnPath();
+  ensureOpencodeTrustAll();
   const { createOpencodeServer, createOpencodeClient } = await import("@opencode-ai/sdk");
 
   // One server + client per harness, reused across every turn.
@@ -560,7 +628,7 @@ export async function cmdOpencodeAisdkSession(argv: string[]): Promise<void> {
   try {
     // OpenCode supports the string shorthand; the v1 SDK's generated Config
     // type still only describes the older object form.
-    server = await createOpencodeServer(managedOpencodeServerOptions() as any);
+    server = await createOpencodeServer({ ...managedOpencodeServerOptions(), timeout: 15_000 } as any);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error(`opencode-aisdk-session: failed to start opencode server: ${msg}`);
@@ -728,7 +796,7 @@ export async function cmdOpencodeAisdkSession(argv: string[]): Promise<void> {
     ]);
     questionTimer = setTimeout(() => {
       if (openQuestionRef.current?.id === pending.id) {
-        void handleDismissQuestion("timed out waiting for an answer");
+        void handleDismissQuestion("timed out waiting for an answer", true);
       }
     }, QUESTION_TIMEOUT_MS);
   }
@@ -802,7 +870,26 @@ export async function cmdOpencodeAisdkSession(argv: string[]): Promise<void> {
     clearQuestionState(true);
   }
 
-  async function handleDismissQuestion(reason = "dismissed"): Promise<void> {
+  async function handleAnswerText(pending: OcPendingQuestion, text: string): Promise<boolean> {
+    const answers = answersForText(pending, text);
+    if (!(await replyQuestion(serverUrl, pending.id, answers))) {
+      console.error(`opencode-aisdk-session: failed to reply to question ${pending.id}`);
+      return false;
+    }
+    indexSessionMessagesDirect(key, [
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        kind: "text",
+        text: `[answered OpenCode question] ${answers[0]?.[0] ?? text.trim()}`,
+        ts: Date.now(),
+      },
+    ]);
+    if (openQuestionRef.current?.id === pending.id) clearQuestionState(true);
+    return true;
+  }
+
+  async function handleDismissQuestion(reason = "dismissed", timedOut = false): Promise<void> {
     const permission = openPermissionRef.current;
     if (permission) {
       const ok = await replyPermission(serverUrl, permission, "reject");
@@ -814,7 +901,13 @@ export async function cmdOpencodeAisdkSession(argv: string[]): Promise<void> {
     }
     const pending = openQuestionRef.current;
     if (!pending) return;
-    const ok = await rejectQuestion(serverUrl, pending.id);
+    // A rejected question reads to the model as "dismissed", and models then
+    // ask the same question again with the question tool. On a timeout, answer
+    // with the instruction instead, so the next ask is a normal message the
+    // user sees when they come back.
+    const ok = timedOut
+      ? await replyQuestion(serverUrl, pending.id, (pending.questions ?? []).map(() => [QUESTION_TIMEOUT_ANSWER]))
+      : await rejectQuestion(serverUrl, pending.id);
     if (!ok) {
       console.error(`opencode-aisdk-session: failed to reject question ${pending.id}`);
       // Still clear local state so the UI unsticks even if OpenCode already
@@ -1159,10 +1252,21 @@ export async function cmdOpencodeAisdkSession(argv: string[]): Promise<void> {
 
   function dispatch(cmd: AisdkCommand): void {
     if (cmd.type === "send") {
-      if (cmd.text.trim()) {
-        queue.push(cmd.text);
-        void drain();
+      if (!cmd.text.trim()) return;
+      const pending = openQuestionRef.current;
+      if (pending && !openPermissionRef.current) {
+        // Answer the open question instead of queueing behind the turn that
+        // is waiting on it. Queue the text only if OpenCode refused the reply.
+        void handleAnswerText(pending, cmd.text).then((ok) => {
+          if (!ok) {
+            queue.push(cmd.text);
+            void drain();
+          }
+        });
+        return;
       }
+      queue.push(cmd.text);
+      void drain();
     } else if (cmd.type === "set_model") {
       const next = cmd.model.trim();
       if (next) {

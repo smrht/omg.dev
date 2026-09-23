@@ -166,7 +166,8 @@ describe("omg.dev runtime capabilities", () => {
       "omg_request_browser_login / omg_browser_login_status",
       "omg_create_owned_bot / omg_update_self / omg_list_owned_bots / omg_send_message_to_peer",
       "omg_ship",
-      "omg_deploy / omg_apps / omg_whoami / omg_app_visibility",
+      "omg_deploy / omg_deploy_status / omg_apps / omg_whoami / omg_app_visibility",
+      "omg_expose_port",
       "omg_display_image / omg_display_video / omg_display_file",
       "omg_input",
       "omg_find_sessions",
@@ -174,6 +175,14 @@ describe("omg.dev runtime capabilities", () => {
       "omg_create_subagent / omg_delegate_*",
       "omg_list_auto_agents / omg_save_auto_agent / omg_run_auto_agent",
     ]);
+  });
+
+  test("makes the sandbox proxy the Expo Go path", () => {
+    const preview = OMG_CAPABILITIES.find((item) => item.tool === "omg_expose_port");
+    expect(preview?.guidance).toContain("expoGo:true");
+    expect(preview?.guidance).toContain("EXPO_PACKAGER_PROXY_URL");
+    expect(preview?.guidance).toContain("Do not use Expo tunnel");
+    expect(OMG_MCP_INSTRUCTIONS).toContain("prepare the Metro port with expoGo:true");
   });
 
   test("keeps visual display tools without registering omg_output", () => {

@@ -4,7 +4,16 @@ import { omgModelLabel, omgModelSearchText, parseOmgModel } from "../../packages
 import { ModelProviderIcon } from "./lib/model-provider-icons";
 import { useRuntimeLifecycle } from "./lib/runtime-lifecycle";
 import { LiveHeaderContext } from "./components/live-header-context";
-import { ProjectPillRail } from "./components/project-pill-rail";
+import { ProjectPillRail, projectPillsFor } from "./components/project-pill-rail";
+import { HostDrawerSlot, SideNavButton, SideNavDrawer } from "./components/side-nav";
+import { FindingsPill, FindingsSheet } from "./components/findings-pill";
+import { sideNavRows } from "./lib/side-nav-items";
+import {
+  AgentSetupSheet,
+  type SetupAgentTile,
+  type SetupChoice,
+  type SetupSheetPage,
+} from "./components/agent-setup-sheet";
 import { activeMachine } from "./lib/machines";
 import { useHeaderProfile } from "./lib/header-profile";
 import { RuntimeAvailabilityContext, useRuntimeAvailability, shouldReloadRuntime } from "./lib/runtime-availability";
@@ -72,17 +81,25 @@ import {
   type ComputerVersionState,
   type VersionRelation,
 } from "./lib/version-diagnostics";
-import { cacheProjectFilter, readCachedProjectFilter } from "./lib/project-filter";
+import {
+  cacheProjectFilter,
+  NO_PROJECT_FILTER,
+  projectFilterAfterPress,
+  resolveInitialProjectFilter,
+  NO_PROJECT_FILTER_LABEL,
+  projectFilterLabel,
+  readCachedProjectFilter,
+  sessionMatchesProjectFilter,
+} from "./lib/project-filter";
+import { ChatStarterRow } from "./components/chat-starter-row";
 import { groupNodesByProject, type ProjectGroup } from "./lib/session-groups";
 import { pathnameToSessionId, sessionToPath } from "./lib/app-search";
 import {
   BOT_ROSTER_ROW_CLASS,
   isPrimarySurfaceTab,
-  mobileSurfaceDockBottom,
-  mobileSurfaceToggleActive,
   shouldShowBotsInSessionList,
+  shouldShowMobileBackToLive,
   shouldShowInlineBotsSurfaceToggle,
-  shouldShowMobileSurfaceToggle,
 } from "./lib/mobile-bots-nav";
 import { botChatSessionId, botDetachedSession, botStageSession, findBotMainSession } from "./lib/bot-session";
 import {
@@ -145,6 +162,7 @@ import {
   reconcileUserFilter,
   sessionMatchesUserFilter,
   userFilterUpdatesStandaloneIdentity,
+  composerDefaultOwner,
 } from "./lib/user-filter";
 import {
   buildFindRowIndex,
@@ -387,6 +405,7 @@ import {
   Check,
   CheckCheck,
   ChevronDown,
+  ChevronUp,
   ChevronLeft,
   Cpu,
   Gauge,
@@ -443,6 +462,7 @@ import {
 } from "lucide-react";
 import { toast } from "@/lib/notify";
 import { BrowserLoginCard } from "@/components/browser-login-card";
+import { ProjectPreviewCard } from "@/components/project-preview-card";
 import { haptic } from "@/lib/haptics";
 import { feedback } from "@/lib/feedback";
 import { waitForRefine, type AutoAgentRefine } from "@/lib/auto-refine";
@@ -655,7 +675,9 @@ import {
   AGENT_CATALOG,
   configuredAgentOptions,
   displayedAgentOption,
+  knownAgentKind,
   lockedAgentOptions,
+  reconcileSelectedAgent,
   resolveInitialAgent,
   scheduledAgentOptions,
   type AgentAccessMode,
@@ -1207,6 +1229,19 @@ type ModelCatalogItem = {
 };
 
 const ViewPrefsContext = createContext<ViewPrefs>(DEFAULT_VIEW_PREFS);
+
+/**
+ * Write a box-level setting from a surface that is not the Settings page.
+ *
+ * The composer needs exactly one of these: remembering the agent someone
+ * launched, so the choice survives a new device or a cleared webview instead
+ * of living only in this browser's localStorage. It is fire-and-forget on
+ * purpose — a failed write costs the cross-device memory of a preference,
+ * which is not worth a toast over the send the person actually asked for.
+ * The default no-op keeps every unwrapped consumer (tests, embedded stories)
+ * working without a provider.
+ */
+const SettingsWriteContext = createContext<(patch: Partial<GlobalSettings>) => void>(() => {});
 
 
 type TranscriptViewPreference = {
@@ -2027,6 +2062,7 @@ function AgentMark({
   busy,
   rounding = "rounded-lg",
   compact = false,
+  large = false,
   showAccountNumber = true,
 }: {
   session: Session;
@@ -2034,6 +2070,12 @@ function AgentMark({
   rounding?: string;
   /** Smaller secondary identity used in the rail's project badge. */
   compact?: boolean;
+  /**
+   * The session row's own mark, at the size iOS draws it (SESSION_ROW.avatar
+   * is 36). At 24 the mark sat in a 40px box looking like a badge for the
+   * text rather than the row's identity.
+   */
+  large?: boolean;
   /** The rail omits account routing detail; headers keep it by default. */
   showAccountNumber?: boolean;
 }) {
@@ -2044,7 +2086,7 @@ function AgentMark({
           aria-label="working"
           className={cn(
             "pointer-events-none absolute inset-0 m-auto animate-spin text-warning motion-reduce:animate-none",
-            compact ? "size-4" : "size-6",
+            compact ? "size-4" : large ? "size-9" : "size-6",
           )}
           strokeWidth={1.75}
         />
@@ -2055,7 +2097,17 @@ function AgentMark({
         className={cn(
           rounding,
           "transition-all duration-300 ease-ios",
-          busy ? (compact ? "size-3" : "size-4") : compact ? "size-4" : "size-6",
+          busy
+            ? compact
+              ? "size-3"
+              : large
+                ? "size-7"
+                : "size-4"
+            : compact
+              ? "size-4"
+              : large
+                ? "size-9"
+                : "size-6",
         )}
         size={busy || compact ? "sm" : "md"}
       />
@@ -3029,6 +3081,13 @@ function projectName(cwd: string): string {
 
 function repoProject(repo: Repo): string {
   return repo.project || projectName(repo.cwd);
+}
+
+/** The project key of a remembered cwd, if that folder is still listed. */
+function repoProjectForCwd(repos: Repo[], cwd: string | null): string | null {
+  if (!cwd) return null;
+  const repo = repos.find((candidate) => candidate.cwd === cwd);
+  return repo ? repoProject(repo) : null;
 }
 
 function autoAgentProject(agent: AutoAgent, repos: Repo[]): string {
@@ -6255,6 +6314,13 @@ export function App() {
     });
   });
   const [projectFilter, setProjectFilter] = useState(readCachedProjectFilter);
+  // The mobile side navigation. One drawer now answers "where do I go",
+  // replacing both the bottom surface bar and the overflow menu.
+  const [navOpen, setNavOpen] = useState(false);
+  const closeNav = useCallback(() => setNavOpen(false), []);
+  // Read straight from the stored choice rather than through MachineSwitcher,
+  // which owns the list. The button only needs the current name for its label.
+  const navMachineName = activeMachine().name;
   const didDefaultFilter = useRef(false);
   const viewPrefs = useMemo(() => applyRoleViews(settings, roleViewer), [settings, roleViewer]);
   const hiddenPages = roleViewer.hiddenPages;
@@ -6622,6 +6688,27 @@ export function App() {
 
   // Pull auto agents + open findings. New findings (after the first load) raise
   // a toast in the live view.
+  /**
+   * Re-read the project roster.
+   *
+   * An agent can register a project while this page stays open: a chat with no
+   * project calls omg_create_project, the server adds the folder to the repo
+   * store, and nothing tells us. Before this, the new project stayed invisible
+   * until a full reload — no live event carries the roster (the status channel
+   * is nine session fields) and `/api/bootstrap` runs only on mount. iOS
+   * re-probes on screen focus and on app foreground for exactly this reason.
+   *
+   * This reads `/api/repos` rather than calling `loadCore()`. It is the same
+   * list from the same server owner (measured identical to `bootstrap.repos`),
+   * at 1.4 KB against the 247 KB of a bootstrap payload that also rebuilds
+   * identity, onboarding, bots and findings. `sameJson` keeps the array's
+   * identity when nothing changed, so the ordinary case re-renders nothing.
+   */
+  const refreshRepos = useCallback(async () => {
+    const payload = await api<{ repos: Repo[] }>("/api/repos");
+    setRepos((prev) => sameJson(prev, payload.repos ?? []));
+  }, []);
+
   const refreshAuto = useCallback(async () => {
     const [ag, fd] = await Promise.all([
       api<{ agents: AutoAgent[]; tz?: string }>("/api/auto/agents"),
@@ -6972,6 +7059,12 @@ export function App() {
       refreshSessionPins().catch(() => {});
       refreshAuto().catch(() => {});
       refreshBots().catch(() => {});
+      // Rides this cycle instead of a focus listener of its own. On a phone
+      // iOS can wait for focus, because the project rail is only on Home and
+      // you leave the chat to reach it. On the web the rail sits beside the
+      // open chat, so "when the user returns" never happens: they watch the
+      // agent create the project with the stale rail in view.
+      refreshRepos().catch(() => {});
     };
     const cycle = () => {
       cyclesSinceTick += 1;
@@ -7003,7 +7096,7 @@ export function App() {
       stop();
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [refreshSessions, refreshSessionPins, refreshAuto, refreshBots]);
+  }, [refreshSessions, refreshSessionPins, refreshAuto, refreshBots, refreshRepos]);
 
   // Refresh the user roster when the tab regains focus. The roster rarely
   // changes, so it isn't worth the 5s poll above — but avatars carry a
@@ -7117,34 +7210,46 @@ export function App() {
     [rosterSessions, userFilter],
   );
 
-  const projectOptions = useMemo(
-    () =>
-      Array.from(
-        new Set([
-          ...repos.map((repo) => repoProject(repo)),
-          ...autoAgents.map((agent) => autoAgentProject(agent, repos)),
-          ...userScopedRoster.map((s) => s.project).filter((p): p is string => !!p),
-        ]),
-      ).sort((a, b) => shortProject(a).localeCompare(shortProject(b))),
-    [autoAgents, repos, userScopedRoster],
-  );
+  const projectOptions = useMemo(() => {
+    const folders = Array.from(
+      new Set([
+        ...repos.map((repo) => repoProject(repo)),
+        ...autoAgents.map((agent) => autoAgentProject(agent, repos)),
+        ...userScopedRoster.map((s) => s.project).filter((p): p is string => !!p),
+      ]),
+    ).sort((a, b) => shortProject(a).localeCompare(shortProject(b)));
+    // First, and never sorted in among the folders, because it is not one.
+    // iOS leads its rail with the same entry. Last is where this started, and
+    // with sixteen folders that put the only way to start a no-folder chat off
+    // the end of a scroller. It is offered even when no unassigned chat exists
+    // yet, because starting one is its whole job.
+    return [NO_PROJECT_FILTER, ...folders];
+  }, [autoAgents, repos, userScopedRoster]);
   const mobileProjectOptions = useMemo(
     () => projectOptions,
     [projectOptions],
   );
 
-  // If the chosen project is no longer a known repo and has no visible session,
-  // fall back to "all" rather than keeping a dead filter.
+  // Open on a folder. The rail has no "All" pill any more, so an unscoped
+  // filter — a first visit, or a saved folder that has since gone away —
+  // showed every folder with no pill lit and nothing saying why. Resolve it
+  // to a real folder instead, the way iOS always has. The browser's last
+  // session folder leads, because it is the best guess this surface holds.
   useEffect(() => {
-    if (loading) return;
-    if (projectFilter !== "__all" && !projectOptions.includes(projectFilter)) {
-      setProjectFilter("__all");
-    }
-  }, [isMobile, loading, projectFilter, projectOptions]);
+    if (loading || !projectOptions.length) return;
+    const resolved = resolveInitialProjectFilter({
+      saved: projectFilter,
+      options: projectOptions,
+      preferred: repoProjectForCwd(repos, localStorage.getItem("lfg_v2_repo")),
+    });
+    if (resolved !== projectFilter) setProjectFilter(resolved);
+  }, [loading, projectFilter, projectOptions, repos]);
 
   const liveSessions = useMemo(() => {
     if (projectFilter === "__all") return userScopedSessions;
-    return userScopedSessions.filter((session) => session.project === projectFilter);
+    return userScopedSessions.filter((session) =>
+      sessionMatchesProjectFilter(session, projectFilter),
+    );
   }, [userScopedSessions, projectFilter]);
 
   // Same scope as liveSessions, but over the merged roster — this is what the
@@ -7288,8 +7393,12 @@ export function App() {
     if (!sessionMatchesUserFilter(target, userFilter)) {
       setUserFilter("__all");
     }
-    if (projectFilter !== "__all" && target.project !== projectFilter) {
-      setProjectFilter("__all");
+    if (!sessionMatchesProjectFilter(target, projectFilter)) {
+      // Scope to the session's own folder. Clearing to "__all" used to work
+      // because unscoped showed everything; now an unscoped filter resolves
+      // straight back to a folder, which could be the one that was hiding
+      // this session in the first place.
+      setProjectFilter(target.project ? target.project : NO_PROJECT_FILTER);
     }
     setTab("live");
     setLiveFocus({ sid: target.sessionId ?? sid, n: Date.now() });
@@ -8142,12 +8251,15 @@ export function App() {
       repos: repos.map((repo) => ({ cwd: repo.cwd, project: repoProject(repo) })),
       fallbackCwd: localStorage.getItem("lfg_v2_repo"),
     });
-    const launchAgent = resolveInitialAgent(
-      localStorage.getItem("lfg_v2_agent"),
-      resolveInitialAgent(settings.defaultAgent, defaultAgent),
-    );
+    // Same order the composer uses: this browser, then the box's memory of the
+    // last agent someone launched, then the box default, then the host's.
+    const launchAgent =
+      knownAgentKind(localStorage.getItem("lfg_v2_agent")) ??
+      knownAgentKind(settings.lastAgent) ??
+      resolveInitialAgent(settings.defaultAgent, defaultAgent);
     const launchModel =
       localStorage.getItem(`lfg_model_${launchAgent}`) ||
+      (launchAgent === settings.lastAgent ? settings.lastModel : "") ||
       (launchAgent === settings.defaultAgent ? settings.defaultModel : "") ||
       localStorage.getItem("lfg_model") ||
       modelCatalog.defaults[launchAgent] ||
@@ -8199,6 +8311,15 @@ export function App() {
     setSettings(next);
     setSchedTz(next.timeZone);
   }, []);
+  // Fire-and-forget settings write for surfaces outside the Settings page.
+  // See SettingsWriteContext: losing one of these costs a remembered
+  // preference, never the action the person was actually taking.
+  const persistSetting = useCallback(
+    (patch: Partial<GlobalSettings>) => {
+      void updateSettings(patch).catch(() => {});
+    },
+    [updateSettings],
+  );
   // A hidden surface is not a destination. Land on Chat if the URL, a
   // shortcut, or a stale menu still names Bots or Schedules while it is off.
   useEffect(() => {
@@ -8435,6 +8556,22 @@ export function App() {
         loading: "Updating CLI…",
         success: "Update started",
         error: (e) => (e instanceof Error ? e.message : "Couldn't start update"),
+      },
+    );
+  }
+
+  function updateAllCodingAgents() {
+    toast.promise(
+      api<{ agents: CodingAgentInfo[]; models?: ModelCatalogItem[] | null }>("/api/coding-agents/update-all", {
+        method: "POST",
+      }).then((payload) => {
+        setCodingAgents(payload.agents ?? []);
+        setModelCatalog(buildAgentModelCatalog(payload.models));
+      }),
+      {
+        loading: "Starting updates…",
+        success: "Updating every installed agent",
+        error: (e) => (e instanceof Error ? e.message : "Couldn't start updates"),
       },
     );
   }
@@ -8868,10 +9005,12 @@ export function App() {
   // `bottom-[var(--lfg-host-bottom-inset)]`), so the padding here only has to
   // clear the composer. The visual fade overlays the scroll surface and must
   // not also become blank layout space.
+  // No dock to clear any more: the surfaces moved into the side navigation,
+  // so the composer is the only thing left at the bottom of a phone.
   const mainBottomPadding = mobileComposerVisible
-    ? "pb-[calc(var(--lfg-inline-composer-height,var(--lfg-composer-clear))+var(--lfg-mobile-surface-dock-height))] [scroll-padding-bottom:calc(var(--lfg-inline-composer-height,var(--lfg-composer-clear))+var(--lfg-mobile-surface-dock-height))]"
+    ? "pb-[var(--lfg-inline-composer-height,var(--lfg-composer-clear))] [scroll-padding-bottom:var(--lfg-inline-composer-height,var(--lfg-composer-clear))]"
     : isMobile && (tab === "bots" || tab === "auto")
-      ? "pb-[calc(var(--lfg-mobile-surface-dock-height)+var(--lfg-device-safe-bottom))] [scroll-padding-bottom:calc(var(--lfg-mobile-surface-dock-height)+var(--lfg-device-safe-bottom))]"
+      ? "pb-[var(--lfg-device-safe-bottom)] [scroll-padding-bottom:var(--lfg-device-safe-bottom)]"
     : tab === "live"
       ? keyboardOpen
         ? "pb-[calc(var(--lfg-inline-composer-height,var(--lfg-composer-clear))+0.75rem)] md:pb-3"
@@ -8942,7 +9081,7 @@ export function App() {
 
   return (
     <AgentAccessModeContext.Provider
-      value={embedded ? "connected-or-opencode" : "configured"}
+      value={embedded ? "connected-or-hosted" : "configured"}
     >
     <SessionRestoreContext.Provider value={restoreSession}>
     <CodingAgentsContext.Provider value={codingAgents}>
@@ -8951,6 +9090,7 @@ export function App() {
     <AskProvider>
     <UpdateProvider settings={settings} onSettingsChange={updateSettings}>
     <TranscriptViewContext.Provider value={transcriptViewPreference}>
+    <SettingsWriteContext.Provider value={persistSetting}>
     <ViewPrefsContext.Provider value={viewPrefs}>
     <RoleViewerContext.Provider value={roleViewerState}>
     <ArtifactViewerContext.Provider value={openArtifactViewer}>
@@ -9029,9 +9169,15 @@ export function App() {
               : "px-2 md:px-3",
           )}
         >
-          {/* Top left on mobile: an icon only, the header has no room for a
-              name. Same menu as the desktop rail row. */}
-          {!embedded || hostMachines ? <MachineSwitcher variant="icon" /> : null}
+          {/* Top left on mobile: the drawer, where the machine chip used to
+              be. The chip moved inside the drawer as its first row, and its
+              status dot moved onto this button, so the one thing the chip
+              told you at a glance still does. */}
+          <SideNavButton
+            onOpen={() => setNavOpen(true)}
+            machineName={navMachineName}
+            online={useWsLive ? wsLiveStream.connection.status === "live" : true}
+          />
           <LiveHeaderContext
             intro={showHeaderBrandIntro && !error}
             brand={<ProductBrand compact hosted={embedded} />}
@@ -9049,6 +9195,9 @@ export function App() {
             // also has no other entry point on mobile, so the island carries
             // the roster filter, host actions, then our overflow menu.
             <NavIsland className="shrink-0">
+              {/* Still a card here: the host portals its own actions into the
+                  slot below, so this island is usually holding several
+                  controls rather than the avatar alone. */}
               <div className="glass-island flex h-11 items-center gap-1.5 rounded-full px-2">
                 {tab === "auto" ? null : (
                   <UserFilterMenu
@@ -9073,6 +9222,7 @@ export function App() {
                     that still floats keeps working exactly as before. */}
                 <span
                   data-lfg-host-slot="header-actions"
+                  data-lfg-host-drawer={embedded && isMobile ? "footer" : undefined}
                   /* Tells the host its own Settings control is redundant here:
                      our menu is carrying one that calls back into it. A flag
                      on the slot, not an assumed version — a host that docks
@@ -9081,40 +9231,27 @@ export function App() {
                   data-lfg-host-settings={hostSettingsInMenu ? "menu" : undefined}
                   className="flex items-center gap-1.5"
                 />
-                <PagesMenu
-                  tab={tab}
-                  hiddenPages={hiddenPages}
-                  onOpenTab={setTab}
-                  extraTabs={extNavTabs}
-                  showSettings={false}
-                  onOpenHostSettings={hostSettingsInMenu ? onOpenHostSettings : undefined}
-                />
+
               </div>
             </NavIsland>
           ) : (
+            /* No card. The island existed to group the roster filter with the
+               overflow menu; the menu moved into the side navigation, so the
+               card was left drawing a pill around one avatar. */
             <NavIsland className="shrink-0">
-              <div className="glass-island flex h-11 items-center gap-1.5 rounded-full px-2">
-                {/* Not on Scheduled. The roster filter scopes sessions, and
-                    Schedules reads the unscoped list — it groups by OWNER
-                    (Unassigned, then each bot) instead. Carrying the control
-                    onto a page it cannot change would make the shared header
-                    a promise the page does not keep. */}
-                {tab === "auto" ? null : (
-                  <UserFilterMenu
-                    value={userFilter}
-                    users={users}
-                    displayUser={headerProfile}
-                    onChange={changeUserFilter}
-                  />
-                )}
-                <PagesMenu
-                  tab={tab}
-                  hiddenPages={hiddenPages}
-                  onOpenTab={setTab}
-                  extraTabs={extNavTabs}
-                  showSettings
+              {/* Not on Scheduled. The roster filter scopes sessions, and
+                  Schedules reads the unscoped list — it groups by OWNER
+                  (Unassigned, then each bot) instead. Carrying the control
+                  onto a page it cannot change would make the shared header
+                  a promise the page does not keep. */}
+              {tab === "auto" ? null : (
+                <UserFilterMenu
+                  value={userFilter}
+                  users={users}
+                  displayUser={headerProfile}
+                  onChange={changeUserFilter}
                 />
-              </div>
+              )}
             </NavIsland>
           )}
         </header>
@@ -9148,6 +9285,7 @@ export function App() {
               header is still just the back button. */}
           <span
             data-lfg-host-slot="header-actions"
+            data-lfg-host-drawer={embedded && isMobile ? "footer" : undefined}
             className="glass-island flex h-11 shrink-0 items-center gap-1.5 rounded-full px-2"
           />
         </header>
@@ -9159,7 +9297,7 @@ export function App() {
       <header className="relative z-40 flex shrink-0 items-center justify-between gap-2 px-2 pb-3 pt-[calc(0.5rem+env(safe-area-inset-top))] md:px-3 md:pb-1">
         <NavIsland className="shrink-0">
           <div className="glass-island flex h-11 items-center rounded-full px-1.5">
-            {isMobile && (tab === "notifications" || tab === "artifacts" || tab === "board") ? (
+            {shouldShowMobileBackToLive(isMobile, tab) ? (
               <button
                 type="button"
                 onClick={() => setTab("live")}
@@ -9230,6 +9368,7 @@ export function App() {
             {embedded ? (
               <span
                 data-lfg-host-slot="header-actions"
+                data-lfg-host-drawer={embedded && isMobile ? "footer" : undefined}
                 data-lfg-host-settings={hostSettingsInMenu ? "menu" : undefined}
                 className="flex items-center gap-1.5"
               />
@@ -9263,20 +9402,43 @@ export function App() {
                 />
               </>
             )}
-            {/* Same menu as the rail's, so the page axis has one shape wherever
-                the chrome happens to live in a given layout. */}
-            <PagesMenu
-              tab={tab}
-              hiddenPages={hiddenPages}
-              onOpenTab={setTab}
-              extraTabs={extNavTabs}
-              showSettings={!embedded}
-              onOpenHostSettings={embedded && hostSettingsInMenu ? onOpenHostSettings : undefined}
-            />
+            {/* On a phone the drawer is the whole page axis, so this header
+                offers it too rather than a second, smaller list beside it.
+                The tablet band has no drawer and keeps the menu, which is
+                also what the rail shows, so the page axis has one shape at
+                every width that has one. */}
+            {isMobile ? (
+              <SideNavButton
+                onOpen={() => setNavOpen(true)}
+                machineName={navMachineName}
+                online={useWsLive ? wsLiveStream.connection.status === "live" : true}
+              />
+            ) : (
+              <PagesMenu
+                tab={tab}
+                hiddenPages={hiddenPages}
+                onOpenTab={setTab}
+                extraTabs={extNavTabs}
+                showSettings={!embedded}
+                onOpenHostSettings={embedded && hostSettingsInMenu ? onOpenHostSettings : undefined}
+              />
+            )}
           </div>
         </NavIsland>
       </header>
       )}
+
+      {/* The folder rail under the header, as on iOS. It is the mobile
+          composer's folder control: the chosen project is where a new
+          session starts. */}
+      {isMobile && tab === "live" && projectOptions.length > 0 ? (
+        <ProjectPillRail
+          projects={projectPillsFor(projectOptions, shortProject)}
+          value={projectFilter}
+          onChange={(next) => setProjectFilter(projectFilterAfterPress(next, projectFilter))}
+          touch
+        />
+      ) : null}
 
       {embedded ? null : <PwaInstallCallout />}
 
@@ -9398,6 +9560,9 @@ export function App() {
               onNew={() =>
                 isMobile ? setComposerFocusNonce((n) => n + 1) : setNewOpen(true)
               }
+              // The Updates pill floats over this list and has to clear the
+              // composer, which the shell owns.
+              composerVisible={mobileComposerVisible}
               // Desktop, empty stage: the composer fills the pane instead of
               // the drawer. Same props as the drawer below, so both read the
               // same draft, agents and repos.
@@ -9410,9 +9575,7 @@ export function App() {
                   scopedProject={projectFilter}
                   onReposChanged={loadCore}
                   codingAgents={codingAgents}
-                  defaultUser={
-                    userFilter !== "__all" && userFilter !== "__unassigned" ? userFilter : ""
-                  }
+                  defaultUser={composerDefaultOwner(identity, userFilter)}
                   onClose={handlers.onClose}
                   onCreated={async (result) => {
                     await refreshSessions({ seed: result?.session ?? null });
@@ -9518,6 +9681,7 @@ export function App() {
             onVisibleChange={(kind, visible) => void setCodingAgentVisible(kind, visible)}
             onSetup={setupCodingAgent}
             onUpdate={updateCodingAgent}
+            onUpdateAll={updateAllCodingAgents}
             onLogin={(kind, accountId) => loginCodingAgent(kind, undefined, accountId)}
             onAddClaudeAccount={addClaudeAccount}
             onRemoveClaudeAccount={removeClaudeAccountFromSettings}
@@ -9677,13 +9841,49 @@ export function App() {
         </>}
       </main>
 
-      {shouldShowMobileSurfaceToggle(isMobile, tab, selectedBotId) ? (
-        <MobileSurfaceDock
-          active={mobileSurfaceToggleActive(tab)}
-          aboveComposer={mobileComposerVisible}
-          onOpenSessions={() => setTab("live")}
-          onOpenBots={() => setTab("bots")}
-          onOpenAuto={() => setTab("auto")}
+      {isMobile ? (
+        <SideNavDrawer
+          open={navOpen}
+          onOpenChange={setNavOpen}
+          rows={sideNavRows({
+            tab,
+            hiddenPages,
+            showBots: settings.showBots,
+            showSchedules: settings.showSchedules,
+            // A host owns its own settings surface. Before the drawer, the
+            // embedded header passed showSettings={false} unconditionally and
+            // offered the host's control only when it asked for it, so
+            // deciding this on hostSettingsInMenu alone put an in-app
+            // Settings row under hosts that never had one.
+            showSettings: !embedded,
+            extensions: extNavTabs,
+          })}
+          onNavigate={setTab}
+          brand={<ProductBrand hosted={embedded} />}
+          machineSwitcher={
+            !embedded || hostMachines ? <MachineSwitcher variant="nav" /> : null
+          }
+          footer={
+            embedded || (hostSettingsInMenu && onOpenHostSettings) ? (
+              <>
+              {/* Host rows first (for example Upgrade), then Settings. */}
+              {embedded ? <HostDrawerSlot onClose={closeNav} /> : null}
+              {hostSettingsInMenu && onOpenHostSettings ? (
+              <button
+                type="button"
+                onClick={() => {
+                  onOpenHostSettings();
+                  setNavOpen(false);
+                }}
+                className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-left text-[15px] text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+              >
+                <Settings className="size-[18px] shrink-0" />
+                <span className="min-w-0 flex-1 truncate">Settings</span>
+              </button>
+              ) : null}
+              </>
+            ) : null
+          }
         />
       ) : null}
 
@@ -9712,9 +9912,7 @@ export function App() {
               onProjectSwipe={cycleMobileProjectFilter}
               onReposChanged={loadCore}
               codingAgents={codingAgents}
-              defaultUser={
-                userFilter !== "__all" && userFilter !== "__unassigned" ? userFilter : ""
-              }
+              defaultUser={composerDefaultOwner(identity, userFilter)}
               onClose={() => setComposerExpanded(false)}
               onCreated={async (result) => {
                 const launchId = result?.launchId;
@@ -9793,9 +9991,7 @@ export function App() {
         scopedProject={projectFilter}
         onReposChanged={loadCore}
         codingAgents={codingAgents}
-        defaultUser={
-          userFilter !== "__all" && userFilter !== "__unassigned" ? userFilter : ""
-        }
+        defaultUser={composerDefaultOwner(identity, userFilter)}
         onClose={() => {
           setNewOpen(false);
         }}
@@ -9841,7 +10037,7 @@ export function App() {
             configuredAgentOptions(
               AGENT_CATALOG,
               codingAgents,
-              embedded ? "connected-or-opencode" : "configured",
+              embedded ? "connected-or-hosted" : "configured",
             ).map((o) => o.key),
           );
           const kind = (preference[usageKind] ?? [usageKind as AgentKind]).find((k) =>
@@ -9891,6 +10087,7 @@ export function App() {
     </ArtifactViewerContext.Provider>
     </RoleViewerContext.Provider>
     </ViewPrefsContext.Provider>
+    </SettingsWriteContext.Provider>
     </TranscriptViewContext.Provider>
     </UpdateProvider>
     </AskProvider>
@@ -10116,6 +10313,56 @@ function ComposerUsageIndicator({ agent, accountId, enabled = true }: {
   }} />;
 }
 
+// One provider's limit windows: label, percent and next reset. Shared by the
+// desktop rings popover and the mobile agent sheet's Usage page.
+function UsageDetailsBody({ provider }: { provider: ProviderUsage }) {
+  const windows = activityRingOrder(provider.windows ?? []);
+  return (
+    <>
+      <div className="mb-2 flex items-center gap-2">
+        <img src={agentIconSrc(provider.kind)} alt="" className="size-4" />
+        <span className="text-sm font-medium">{provider.label}</span>
+        {provider.plan ? (
+          <span className="rounded-full bg-secondary px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+            {provider.plan}
+          </span>
+        ) : null}
+      </div>
+      {windows.length ? (
+        <div className="flex items-center gap-3">
+          <UsageRings windows={windows} size={52} className="my-0.5" />
+          <div className="min-w-0 flex-1 space-y-1.5">
+            {windows.map((w, i) => (
+              <div key={w.label} className="flex items-center gap-2 text-xs">
+                <span
+                  className="size-2.5 shrink-0 rounded-full"
+                  style={{ backgroundColor: USAGE_RING_COLORS[i % USAGE_RING_COLORS.length] }}
+                />
+                <span className="min-w-0 flex-1 truncate text-muted-foreground">{w.label}</span>
+                <span className="shrink-0 font-medium tabular-nums">
+                  {w.pct == null ? "—" : `${Math.round(w.pct)}%`}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          {provider.available ? provider.note ?? "No limit data reported" : provider.note ?? "Not signed in"}
+        </p>
+      )}
+      {windows.length && provider.note ? (
+        <p className="mt-2 text-[11px] leading-snug text-muted-foreground/80">{provider.note}</p>
+      ) : null}
+      {windows.some((w) => w.resetsAt) ? (
+        <p className="mt-2 border-t border-border/60 pt-2 text-[11px] text-muted-foreground/80">
+          {windows.find((w) => w.resetsAt) ? fmtReset(windows.find((w) => w.resetsAt)!.resetsAt) : ""}
+        </p>
+      ) : null}
+    </>
+  );
+}
+
 // The composer's usage indicator: compact rings that expand into an animated
 // popover breaking down each limit window (label, %, reset time). Works for any
 // provider that reports windows; falls back to the provider note otherwise.
@@ -10164,46 +10411,7 @@ function UsageRingsButton({
         }
       />
       <DropdownMenuContent side="top" align="start" sideOffset={8} className="w-64 p-3">
-        <div className="mb-2 flex items-center gap-2">
-          <img src={agentIconSrc(provider.kind)} alt="" className="size-4" />
-          <span className="text-sm font-medium">{provider.label}</span>
-          {provider.plan ? (
-            <span className="rounded-full bg-secondary px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-              {provider.plan}
-            </span>
-          ) : null}
-        </div>
-        {windows.length ? (
-          <div className="flex items-center gap-3">
-            <UsageRings windows={windows} size={52} className="my-0.5" />
-            <div className="min-w-0 flex-1 space-y-1.5">
-              {windows.map((w, i) => (
-                <div key={w.label} className="flex items-center gap-2 text-xs">
-                  <span
-                    className="size-2.5 shrink-0 rounded-full"
-                    style={{ backgroundColor: USAGE_RING_COLORS[i % USAGE_RING_COLORS.length] }}
-                  />
-                  <span className="min-w-0 flex-1 truncate text-muted-foreground">{w.label}</span>
-                  <span className="shrink-0 font-medium tabular-nums">
-                    {w.pct == null ? "—" : `${Math.round(w.pct)}%`}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <p className="text-xs text-muted-foreground">
-            {provider.available ? provider.note ?? "No limit data reported" : provider.note ?? "Not signed in"}
-          </p>
-        )}
-        {windows.length && provider.note ? (
-          <p className="mt-2 text-[11px] leading-snug text-muted-foreground/80">{provider.note}</p>
-        ) : null}
-        {windows.some((w) => w.resetsAt) ? (
-          <p className="mt-2 border-t border-border/60 pt-2 text-[11px] text-muted-foreground/80">
-            {windows.find((w) => w.resetsAt) ? fmtReset(windows.find((w) => w.resetsAt)!.resetsAt) : ""}
-          </p>
-        ) : null}
+        <UsageDetailsBody provider={provider} />
         <p className="mt-2 border-t border-border/60 pt-2 text-[11px] text-muted-foreground/70">
           Long-press rings for all agents ·{" "}
           <kbd className="rounded bg-muted px-1 font-mono text-[10px]">Shift</kbd> to toggle
@@ -10473,12 +10681,14 @@ function ProjectFilterMenu({
         ? "border-primary/30 bg-primary/10 text-primary"
         : "border-border bg-muted/70 text-muted-foreground",
   );
-  const triggerTitle = active ? shortProject(value) : "All projects";
+  const triggerTitle = projectFilterLabel(value, shortProject);
   const triggerContent = (
     <>
       <Folder className="size-3.5 shrink-0" />
       {active ? (
-        <span className="truncate text-xs font-medium">{shortProject(value)}</span>
+        <span className="truncate text-xs font-medium">
+          {projectFilterLabel(value, shortProject)}
+        </span>
       ) : null}
     </>
   );
@@ -10537,7 +10747,7 @@ function ProjectFilterMenu({
         <option value="__all">All projects</option>
         {projects.map((project) => (
           <option key={project} value={project}>
-            {shortProject(project)}
+            {projectFilterLabel(project, shortProject)}
           </option>
         ))}
       </select>
@@ -11582,6 +11792,8 @@ function LiveView({
   onNew,
   findings = [],
   autoAgents = [],
+  /** Phone only: the inline composer is on screen, so the pill clears it. */
+  composerVisible = false,
   onOpenReport,
   onDismissFinding,
   onTriageFindings,
@@ -11661,6 +11873,7 @@ function LiveView({
   onNew: () => void;
   findings: AutoFinding[];
   autoAgents: AutoAgent[];
+  composerVisible?: boolean;
   /** Open the report sheet for one agent's open findings. */
   onOpenReport: (agentId: string) => void;
   onDismissFinding: (f: AutoFinding) => void;
@@ -11688,6 +11901,8 @@ function LiveView({
   // component's. Only the morph origin is local: it anchors the open/close
   // animation to the row that was tapped, and a DOMRect cannot live in a URL.
   const [sheetOrigin, setSheetOrigin] = useState<DOMRect | null>(null);
+  // Open findings live behind the Updates pill on a phone, not in the list.
+  const [findingsOpen, setFindingsOpen] = useState(false);
   useEffect(() => {
     // The open session ended and is no longer listed: leave its page instead
     // of holding a URL that names nothing.
@@ -12097,42 +12312,50 @@ function LiveView({
         projectFilter={projectFilter}
         onProjectChange={onProjectChange}
         renderItem={renderMobileItem}
-        trailing={
-          findings.length ? (
-            <RailGroup
-              label="Auto"
-              count={findings.length}
-              collapsed={false}
-              foldKey="__auto"
-              action={
-                <span className="flex items-center gap-1">
-                  <ClearFindingsButton
-                    count={findings.length}
-                    busy={clearFindingsBusy}
-                    onClear={() => onClearFindings(findings)}
-                  />
-                  <AutoTriageButton
-                    count={findings.length}
-                    busy={autoTriageBusy}
-                    onClick={onTriageFindings}
-                    compact
-                  />
-                </span>
-              }
-            >
-              {groupFindingsByAgent(findings).map((report) => (
-                <AutoReportRow
-                  key={report.agentId}
-                  report={report}
-                  agentName={nameFor(report.agentId)}
-                  onOpen={() => onOpenReport(report.agentId)}
-                />
-              ))}
-            </RailGroup>
-          ) : null
-        }
+        headerless
       />
     </div>
+    {/* Open findings live behind a pill, not at the end of the list. A group
+        of them there put more work under a list that is already about work,
+        and each one pushed the running sessions further off the fold. Same
+        answer as iOS (mobile/src/omg/findings-pill.tsx). */}
+    <FindingsPill
+      count={findings.length}
+      aboveComposer={composerVisible}
+      onOpen={() => setFindingsOpen(true)}
+    />
+    <FindingsSheet
+      open={findingsOpen && findings.length > 0}
+      onOpenChange={setFindingsOpen}
+      count={findings.length}
+      actions={
+        <span className="flex items-center gap-1">
+          <ClearFindingsButton
+            count={findings.length}
+            busy={clearFindingsBusy}
+            onClear={() => onClearFindings(findings)}
+          />
+          <AutoTriageButton
+            count={findings.length}
+            busy={autoTriageBusy}
+            onClick={onTriageFindings}
+            compact
+          />
+        </span>
+      }
+    >
+      {groupFindingsByAgent(findings).map((report) => (
+        <AutoReportRow
+          key={report.agentId}
+          report={report}
+          agentName={nameFor(report.agentId)}
+          onOpen={() => {
+            setFindingsOpen(false);
+            onOpenReport(report.agentId);
+          }}
+        />
+      ))}
+    </FindingsSheet>
     {openSessionId && sheetSession ? (
       <SessionTitleSheet
         sid={openSessionId}
@@ -12323,6 +12546,8 @@ function RailStage({
   // The desktop rail uses the same polished project sheet and folder browser as
   // the composer, replacing the cramped native-style project dropdown.
   const [projectSheetOpen, setProjectSheetOpen] = useState(false);
+  // Open findings live behind the rail's Updates pill.
+  const [railFindingsOpen, setRailFindingsOpen] = useState(false);
   const [folderBrowserOpen, setFolderBrowserOpen] = useState(false);
   const [folderBrowserCreate, setFolderBrowserCreate] = useState(false);
   const canUseProjectSheet = repos.length > 0 && !!onProjectChange;
@@ -13249,38 +13474,62 @@ function RailStage({
     );
   };
 
-  const autoRailGroup =
+  // Open findings are a pill above the rail's footer, not a group at the end
+  // of the list. A group there put more work under a list that is already
+  // about work, and every finding pushed the running sessions further off
+  // the fold. Same shape as iOS at every width
+  // (mobile/src/omg/findings-pill.tsx), which floats it over the list on the
+  // phone and over the rail footer on iPad.
+  const autoRailPill =
     findings.length && !railCollapsed ? (
-      <RailGroup
-        label="Auto"
-        count={findings.length}
-        collapsed={railCollapsed}
-        foldKey="__auto"
-        action={
-          <span className="flex items-center gap-1">
-            <ClearFindingsButton
-              count={findings.length}
-              busy={clearFindingsBusy}
-              onClear={() => onClearFindings(findings)}
+      <>
+        <div className="pointer-events-none relative z-10 -mb-1 flex justify-center pb-1">
+          <button
+            type="button"
+            onClick={() => setRailFindingsOpen(true)}
+            data-testid="rail-findings-pill"
+            aria-label={`${findings.length} update${findings.length === 1 ? "" : "s"} from auto agents. Open`}
+            className="pointer-events-auto flex h-7 items-center gap-1.5 rounded-full border border-border/70 bg-card/90 px-2.5 text-xs font-medium text-muted-foreground shadow-sm backdrop-blur-xl transition-colors hover:text-foreground"
+          >
+            <span className="tabular-nums">
+              {findings.length} update{findings.length === 1 ? "" : "s"}
+            </span>
+            <ChevronUp className="size-3 shrink-0 opacity-70" />
+          </button>
+        </div>
+        <FindingsSheet
+          open={railFindingsOpen}
+          onOpenChange={setRailFindingsOpen}
+          count={findings.length}
+          actions={
+            <span className="flex items-center gap-1">
+              <ClearFindingsButton
+                count={findings.length}
+                busy={clearFindingsBusy}
+                onClear={() => onClearFindings(findings)}
+              />
+              <AutoTriageButton
+                count={findings.length}
+                busy={autoTriageBusy}
+                onClick={onTriageFindings}
+                compact
+              />
+            </span>
+          }
+        >
+          {groupFindingsByAgent(findings).map((report) => (
+            <AutoReportRow
+              key={report.agentId}
+              report={report}
+              agentName={nameFor(report.agentId)}
+              onOpen={() => {
+                setRailFindingsOpen(false);
+                onOpenReport(report.agentId);
+              }}
             />
-            <AutoTriageButton
-              count={findings.length}
-              busy={autoTriageBusy}
-              onClick={onTriageFindings}
-              compact
-            />
-          </span>
-        }
-      >
-        {groupFindingsByAgent(findings).map((report) => (
-          <AutoReportRow
-            key={report.agentId}
-            report={report}
-            agentName={nameFor(report.agentId)}
-            onOpen={() => onOpenReport(report.agentId)}
-          />
-        ))}
-      </RailGroup>
+          ))}
+        </FindingsSheet>
+      </>
     ) : null;
 
   // On the bot surface the stage shows exactly one column — the bot you picked.
@@ -13337,7 +13586,7 @@ function RailStage({
         <button
           type="button"
           onClick={onNewBot}
-          className="flex h-[3.75rem] w-full items-center gap-3 rounded-lg px-2 text-left text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          className="flex h-20 w-full items-center gap-3 rounded-lg pl-4 pr-3.5 text-left text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
         >
           <span className="flex size-11 shrink-0 items-center justify-center rounded-full border border-dashed border-border">
             <Plus className="size-4" />
@@ -13503,9 +13752,9 @@ function RailStage({
         )}
         {!railCollapsed && railSurface !== "chat" && onProjectChange && projectOptions.length > 0 ? (
           <ProjectPillRail
-            projects={projectOptions.map((project) => ({ value: project, label: shortProject(project) }))}
+            projects={projectPillsFor(projectOptions, shortProject)}
             value={projectFilter}
-            onChange={onProjectChange}
+            onChange={(next) => onProjectChange(projectFilterAfterPress(next, projectFilter))}
           />
         ) : null}
         <div className="session-list-scroll min-h-0 flex-1 overflow-y-auto px-1.5 py-2">
@@ -13539,7 +13788,6 @@ function RailStage({
             projectFilter={projectFilter}
             onProjectChange={onProjectChange}
             renderItem={renderRailItem}
-            trailing={autoRailGroup}
           />
           </>}
         </div>
@@ -13557,6 +13805,7 @@ function RailStage({
             its navigation into. Empty until the box is signed in to omg Cloud
             with a machine it can reach, so a plain install sees no change.
             A hosted surface never shows it: the host owns machine selection. */}
+        {autoRailPill}
         {!hosted || hostMachines ? <MachineSwitcher variant="rail" collapsed={railCollapsed} /> : null}
         {hosted ? (
           <div
@@ -13790,6 +14039,7 @@ function SessionGroups({
   projectFilter,
   onProjectChange,
   renderItem,
+  headerless = false,
   leading,
   trailing,
 }: {
@@ -13800,6 +14050,16 @@ function SessionGroups({
   projectFilter: string;
   onProjectChange?: (value: string) => void;
   renderItem: (session: Session) => ReactNode;
+  /**
+   * Draw the folder groups as plain runs of rows, with no header.
+   *
+   * The phone has the project rail directly above this list: the pills name
+   * every folder and one of them is lit, so a header repeating that name
+   * under it said the same thing twice. Its two controls are covered there
+   * too — the pill scopes, and pressing the lit pill clears. The desktop
+   * rail has no pills, so it keeps its headers and they stay the filter.
+   */
+  headerless?: boolean;
   /** Above every group. The rail puts New session here. */
   leading?: ReactNode;
   /** Below every group. Auto findings. */
@@ -13888,7 +14148,12 @@ function SessionGroups({
           {pinnedNodes.map((node) => renderNode(node))}
         </RailGroup>
       ) : null}
-      {groups.map((group) => (
+      {groups.map((group) =>
+        headerless ? (
+          <div key={group.key} className="flex flex-col gap-2">
+            {group.nodes.map((node) => renderNode(node))}
+          </div>
+        ) : (
         <RailGroup
           key={group.key}
           label={group.label}
@@ -13913,7 +14178,8 @@ function SessionGroups({
         >
           {group.nodes.map((node) => renderNode(node))}
         </RailGroup>
-      ))}
+        ),
+      )}
       {trailing}
     </>
   );
@@ -14084,6 +14350,7 @@ const RailRow = memo(function RailRow({
   onActivate,
   onSwipeRight,
   onSwipeLeft,
+  unread = false,
 }: {
   /** `data-rail-sid`, for surfaces that scroll/cursor rows by id. Omit where nothing looks a row up this way. */
   railKey?: string;
@@ -14099,6 +14366,8 @@ const RailRow = memo(function RailRow({
   preview: ReactNode;
   /** Extra state shown only in the expanded row, between the text column and the trailing slot (e.g. an unread dot). */
   indicator?: ReactNode;
+  /** Draws the title at full weight, so unread does not rest on the dot alone. */
+  unread?: boolean;
   trailingStatic?: ReactNode;
   trailingHover?: ReactNode;
   /** Keeps the hover content shown once it represents committed state rather than an offer (a session's pin, once pinned). */
@@ -14222,7 +14491,10 @@ const RailRow = memo(function RailRow({
           // cursor and shoved every row below it — the whole list twitching
           // while anything was working. The row reserves its one preview
           // line whether or not there is text to put in it yet.
-          collapsed ? "h-11 justify-center px-0" : "h-[3.75rem] px-2",
+          // 5rem and 16/14 padding, from SESSION_ROW in mobile/src/components.tsx.
+          // The web row was 60px with 8px of padding, so the same fleet read
+          // as a denser product on the web than in the app.
+          collapsed ? "h-11 justify-center px-0" : "h-20 pl-4 pr-3.5",
           swiping
             ? "border-transparent bg-card"
             : active
@@ -14247,7 +14519,15 @@ const RailRow = memo(function RailRow({
           <>
             <span className="flex min-w-0 flex-1 flex-col gap-0.5">
               <span className="flex items-baseline gap-1.5">
-                <span className="lfg-film-blur min-w-0 flex-1 truncate text-base font-semibold leading-tight">
+                <span
+                className={cn(
+                  "lfg-film-blur min-w-0 flex-1 truncate text-[17px] leading-tight tracking-[-0.2px]",
+                  // Unread is not the dot's job alone: the title carries full
+                  // weight until it is read, then settles back. Same rule as
+                  // the iOS row.
+                  unread ? "font-bold" : "font-semibold",
+                )}
+              >
                   {title}
                 </span>
                 {titleBadge}
@@ -14266,26 +14546,42 @@ const RailRow = memo(function RailRow({
                 {preview}
               </span>
             </span>
-            {indicator}
-            {/* One slot on the trailing edge, so every row's secondary
-                readout lands on the same edge instead of trailing whatever
-                length its title happened to be. A hover action cross-fades
-                in over it: the static content is what you read while
-                scanning, the action is what you want once you have stopped
-                on a row. Fixed width so the swap cannot reflow the title
-                beside it. */}
-            <span className="relative flex h-10 w-9 shrink-0 items-center justify-end">
-              {trailingStatic ? (
-                <span
-                  className={cn(
-                    "text-xs leading-tight tabular-nums text-muted-foreground/70 transition-opacity duration-150",
-                    !trailingHoverAlwaysVisible && "group-hover:opacity-0",
-                  )}
-                >
-                  {trailingStatic}
-                </span>
-              ) : null}
-              {trailingHover}
+            {/* When it last moved, then what state it is in — the iOS row's
+                order (mobile/src/components.tsx). The web had the mark first,
+                so the two put the same two facts on the trailing edge in
+                opposite orders.
+
+                They travel together in one group at the row's own gap, rather
+                than as two children of the row: at the row's 12px they read as
+                two separate columns instead of one readout. */}
+            <span className="flex shrink-0 items-center gap-1.5">
+              {/* One slot on the trailing edge, so every row's secondary
+                  readout lands on the same edge instead of trailing whatever
+                  length its title happened to be. A hover action cross-fades
+                  in over it: the static content is what you read while
+                  scanning, the action is what you want once you have stopped
+                  on a row. Fixed width so the swap cannot reflow the title
+                  beside it. */}
+              <span className="relative flex h-10 w-9 shrink-0 items-center justify-end">
+                {trailingStatic ? (
+                  <span
+                    className={cn(
+                      "text-xs leading-tight tabular-nums text-muted-foreground/70 transition-opacity duration-150",
+                      !trailingHoverAlwaysVisible && "group-hover:opacity-0",
+                    )}
+                  >
+                    {trailingStatic}
+                  </span>
+                ) : null}
+                {trailingHover}
+              </span>
+              {/* Reserved whether or not there is a mark, so marking a reply
+                  read cannot shift the time column beside it. Sized for the
+                  largest thing that lands here (the working spinner), not
+                  just the unread dot. */}
+              <span className="flex size-4 shrink-0 items-center justify-center">
+                {indicator}
+              </span>
             </span>
           </>
         ) : null}
@@ -14360,6 +14656,7 @@ const RailItem = memo(function RailItem({
       collapsed={collapsed}
       active={active}
       cursored={cursored}
+      unread={unread}
       ariaLabel={sessionRosterRowAriaLabel({
         title,
         working: busy,
@@ -14400,7 +14697,7 @@ const RailItem = memo(function RailItem({
                 src={faviconSrc}
                 alt=""
                 aria-hidden="true"
-                className="size-6 rounded-md object-contain"
+                className="size-9 rounded-md object-contain"
                 loading="lazy"
                 decoding="async"
                 onError={() => setFailedFaviconSrc(faviconSrc)}
@@ -14411,6 +14708,7 @@ const RailItem = memo(function RailItem({
               session={session}
               busy={busy}
               rounding="rounded-none"
+              large
               showAccountNumber={false}
             />
           ) : (
@@ -14597,6 +14895,7 @@ function BotRosterRow({
       collapsed={collapsed}
       active={active}
       cursored={false}
+      unread={unread}
       ariaLabel={botRosterRowAriaLabel({
         name: bot.name,
         enabled: bot.enabled,
@@ -16480,7 +16779,13 @@ function SessionChatBody({
             // composer reads as part of the conversation, not a bolted-on panel.
             // pb uses global --lfg-safe-bottom so embed host chrome never covers
             // the input (session portal is full-bleed outside the shell pad).
-            "relative overflow-x-clip bg-background px-2 pb-[calc(0.5rem+var(--lfg-safe-bottom))] pt-1.5 transition-colors",
+            // px-4 on a phone, matching the app's composer inset
+            // (space.lg in mobile/src/omg/palette.ts). At 8px the bar ran
+            // almost edge to edge and read as a docked panel rather than a
+            // field sitting in the page. Wider screens keep the tighter inset:
+            // the transcript column is already centred there, so the bar is
+            // not near an edge to begin with.
+            "relative overflow-x-clip bg-background px-4 pb-[calc(0.5rem+var(--lfg-safe-bottom))] pt-1.5 transition-colors md:px-2",
             "before:pointer-events-none before:absolute before:inset-x-0 before:-top-6 before:h-8 before:bg-gradient-to-t before:from-background before:to-transparent before:content-['']",
             draggingFiles && "bg-primary/8",
             launching && "lfg-composer-launching",
@@ -16490,6 +16795,7 @@ function SessionChatBody({
               rather than in ChatStream's TypingIndicator slot so the two can
               never be mistaken for each other. */}
           <HumanTypingIndicator participants={typingParticipants} />
+          <ProjectPreviewCard sessionId={sid} user={session.assignedUser} />
           <BrowserLoginCard sessionId={sid} user={session.assignedUser} />
           {files.fileInput}
           <ComposerAttachmentChips
@@ -22040,6 +22346,8 @@ function ComposerProjectSheet({
   onCreate,
   allSelected = false,
   onSelectAll,
+  noProjectSelected = false,
+  onSelectNoProject,
   manageOnly = false,
   onReposChanged,
 }: {
@@ -22052,6 +22360,16 @@ function ComposerProjectSheet({
   onCreate: () => void;
   allSelected?: boolean;
   onSelectAll?: () => void;
+  /** The composer is already on "No project". */
+  noProjectSelected?: boolean;
+  /**
+   * Start chats with no folder at all.
+   *
+   * This sheet is the only route to that scope on a phone, where the rail of
+   * project pills is not drawn. Leaving it out would make the feature
+   * desktop-only on the web while iOS has it on the home screen.
+   */
+  onSelectNoProject?: () => void;
   /**
    * Open as "add and manage folders", with no selection in it at all.
    *
@@ -22244,6 +22562,28 @@ function ComposerProjectSheet({
                 )}
               </button>
             ) : null}
+            {onSelectNoProject && !manageOnly && !needle && !managing ? (
+              <button type="button" onClick={onSelectNoProject} className={rowClass}>
+                <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+                  <Sparkles className="size-4" />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-medium">
+                    {NO_PROJECT_FILTER_LABEL}
+                  </span>
+                  {showPaths ? (
+                    <span className="block truncate text-xs text-muted-foreground">
+                      Start something new, and pick a folder later
+                    </span>
+                  ) : null}
+                </span>
+                {noProjectSelected ? (
+                  <Check className="size-4 shrink-0 text-emerald-500" />
+                ) : (
+                  <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
+                )}
+              </button>
+            ) : null}
             {visibleRepos.map((repo) =>
               managing ? (
                 // A div, not a button: the row carries two buttons of its own,
@@ -22389,22 +22729,45 @@ function NewSessionDialog({
   // choice and the host's built-in default.
   const defaultAgent = resolveInitialAgent(view.defaultAgent, hostDefaultAgent);
   const defaultModelFor = (key: AgentKind) => catalog.defaults[key] ?? AGENT_DEFAULT_MODEL[key];
+  // The box's cross-device memory of the last model launched, which only
+  // answers for the agent it was launched with.
+  const lastModelFor = (key: AgentKind) => (key === view.lastAgent ? view.lastModel : "");
   // The model an agent starts on. With the model list hidden the box default
   // is the only choice, so it wins over anything this browser saved earlier;
   // otherwise the saved pick leads and the box default is the fallback.
   const preferredModelFor = (key: AgentKind) => {
     const boxDefault = key === view.defaultAgent && view.defaultModel ? view.defaultModel : "";
     if (!view.showComposerModels && boxDefault) return boxDefault;
-    return localStorage.getItem(`lfg_model_${key}`) || boxDefault || defaultModelFor(key);
+    return (
+      localStorage.getItem(`lfg_model_${key}`) ||
+      lastModelFor(key) ||
+      boxDefault ||
+      defaultModelFor(key)
+    );
   };
+  // The agent this person chose, if they ever have: this browser first, then
+  // the box's memory of the last agent launched here. Both hold explicit picks
+  // only (see the launch write below), so they outrank whatever the roster
+  // happens to list first. Null means nobody has chosen, and the composer is
+  // free to follow the box or host default.
+  const savedAgentChoice = (): AgentKind | null =>
+    knownAgentKind(localStorage.getItem("lfg_v2_agent")) ?? knownAgentKind(view.lastAgent);
   // With the agent picker hidden the box default is the only agent; the
   // browser's saved pick is ignored rather than silently launching something
   // the composer never showed.
-  const [agent, setAgent] = useState<AgentKind>(() =>
-    view.showComposerAgents
-      ? resolveInitialAgent(localStorage.getItem("lfg_v2_agent"), defaultAgent)
-      : defaultAgent,
+  const [agent, setAgent] = useState<AgentKind>(
+    () => (view.showComposerAgents ? savedAgentChoice() : null) ?? defaultAgent,
   );
+  // What the person actually asked for, as opposed to what is launchable right
+  // now. Only an explicit pick writes it, and it is restored the moment that
+  // agent can run again — see reconcileSelectedAgent. `undefined` is the
+  // one-time init marker, so the localStorage read happens once rather than on
+  // every render; `null` is the settled "nobody has picked".
+  const desiredAgentRef = useRef<AgentKind | null | undefined>(undefined);
+  if (desiredAgentRef.current === undefined) {
+    desiredAgentRef.current = view.showComposerAgents ? savedAgentChoice() : null;
+  }
+  const persistSetting = useContext(SettingsWriteContext);
   const [claudeAccountId, setClaudeAccountId] = useState("");
   // No role picker here. The server gives a new session the role of the
   // user it is tagged with (src/policy/roles.ts members); a member cannot
@@ -22414,10 +22777,25 @@ function NewSessionDialog({
     () =>
       (view.showComposerModels ? "" : preferredModelFor(agent)) ||
       localStorage.getItem(`lfg_model_${agent}`) ||
+      lastModelFor(agent) ||
       (agent === view.defaultAgent ? view.defaultModel : "") ||
       localStorage.getItem("lfg_model") ||
       defaultModelFor(agent),
   );
+  // The box's remembered choice travels with bootstrap, which can land after
+  // this composer has already mounted on its defaults. Adopt it once, and only
+  // while nobody has picked anything here: a local choice, saved or just
+  // tapped, always outranks what another device remembered.
+  useEffect(() => {
+    if (desiredAgentRef.current) return;
+    if (!view.showComposerAgents) return;
+    const remembered = knownAgentKind(view.lastAgent);
+    if (!remembered) return;
+    desiredAgentRef.current = remembered;
+    setAgent(remembered);
+    setModel(preferredModelFor(remembered));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view.lastAgent, view.showComposerAgents]);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(
     () => savedThinkingLevel(),
   );
@@ -22429,7 +22807,7 @@ function NewSessionDialog({
   // hides it, so "I created a session but don't see it". The Owner dropdown still
   // lets you pick Unassigned explicitly.
   const [user, setUser] = useState(() =>
-    resolveRosterUser(defaultUser || localStorage.getItem("lfg_user"), users),
+    resolveRosterUser(defaultUser || localStorage.getItem("lfg_user") || "", users),
   );
   const [prompt, setPromptState] = useState(
     () => readPromptDraft("new-session")?.text ?? "",
@@ -22472,11 +22850,21 @@ function NewSessionDialog({
   // expands the section so opening the dialog stays instant; reset on close.
   const [resumeOpen, setResumeOpen] = useState(false);
   const [resumable, setResumable] = useState<ResumableSession[] | null>(null);
+  // Mobile agent sheet (the iOS AgentSetupSheet layout). `setupPage` is where
+  // it opens: the root controls, or straight to the Claude profiles.
   const [agentPopoverOpen, setAgentPopoverOpen] = useState(false);
+  const [setupPage, setSetupPage] = useState<SetupSheetPage>("root");
+  const setupModelInputRef = useRef<HTMLInputElement>(null);
+  // The inline composer morphs like iOS HomeComposer: one row at rest, then the
+  // field on its own line with the controls under it while focused or filled.
+  const [composerFocused, setComposerFocused] = useState(false);
+  const blurTimerRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (blurTimerRef.current != null) window.clearTimeout(blurTimerRef.current);
+  }, []);
   const [folderBrowserOpen, setFolderBrowserOpen] = useState(false);
   const [projectSheetOpen, setProjectSheetOpen] = useState(false);
   const [folderBrowserCreate, setFolderBrowserCreate] = useState(false);
-  const [modelLayerOpen, setModelLayerOpen] = useState(false);
   // Swipe-to-switch state for the inline composer's agent icon. `dir`/`nonce`
   // drive the slide+fade animation when the icon swaps; the button ref lets us
   // own the gesture with native listeners.
@@ -22484,17 +22872,9 @@ function NewSessionDialog({
   const cycleAgentRef = useRef<(dir: 1 | -1) => void>(() => {});
   const [agentIconDir, setAgentIconDir] = useState<1 | -1>(1);
   const [agentIconNonce, setAgentIconNonce] = useState(0);
-  const handleModelLayerOpenChange = useCallback((next: boolean) => {
-    setModelLayerOpen(next);
-  }, []);
-  const handleAgentPopoverOpenChange = useCallback(
-    (next: boolean) => {
-      // Keep the agent popover open while its nested model layer is open.
-      if (!next && modelLayerOpen) return;
-      setAgentPopoverOpen(next);
-    },
-    [modelLayerOpen],
-  );
+  const inlineExpanded =
+    variant === "inline" &&
+    (composerFocused || !!prompt.trim() || attachments.length > 0 || pendingUploads.length > 0);
 
   // Own the agent-icon gesture end-to-end with pointer events (one code path
   // for mouse-drag, touch and pen) plus wheel/trackpad. Base UI's trigger opens
@@ -22550,9 +22930,10 @@ function NewSessionDialog({
       window.removeEventListener("pointermove", onPointerMove, true);
       window.removeEventListener("pointerup", endDrag, true);
       window.removeEventListener("pointercancel", endDrag, true);
-      // A clean press with no drag is a tap → toggle the popover ourselves.
+      // A clean press with no drag is a tap → open the agent sheet.
       if (d && !d.dragged && e.type === "pointerup") {
-        setAgentPopoverOpen((current) => !current);
+        setSetupPage("root");
+        setAgentPopoverOpen(true);
       }
     };
     const onPointerDown = (e: PointerEvent) => {
@@ -22597,7 +22978,9 @@ function NewSessionDialog({
       window.removeEventListener("pointerup", endDrag, true);
       window.removeEventListener("pointercancel", endDrag, true);
     };
-  }, [open, variant]);
+    // The icon moves between the resting row and the expanded controls row,
+    // which mounts a new button; rebind the gesture to it.
+  }, [open, variant, inlineExpanded]);
   // Close the resume sheet and drop the cached list so the next open refetches
   // (and shows the skeleton) instead of flashing a stale roster.
   const closeResume = useCallback(() => {
@@ -22876,11 +23259,12 @@ function NewSessionDialog({
     resume(false);
   }
 
-  // Each time the dialog opens, default the owner to the currently selected
-  // user (the live-view filter / active profile) so a new session lands with us.
+  // Each time the dialog opens, default the owner to the selected profile (the
+  // header's "who are you"), so a new session lands with us. With no profile,
+  // the session stays unassigned rather than going to the first roster entry.
   useEffect(() => {
     if (open) {
-      setUser(resolveRosterUser(defaultUser || localStorage.getItem("lfg_user"), users));
+      setUser(resolveRosterUser(defaultUser || localStorage.getItem("lfg_user") || "", users));
     }
   }, [open, defaultUser, users]);
 
@@ -22897,32 +23281,46 @@ function NewSessionDialog({
   // that project's repo (and hide the picker below). Falls back to the normal
   // localStorage/first-repo default when viewing "All projects" or when the
   // filtered project has no matching repo in the list.
+  // "No project" is a scope, not a folder, so it never resolves to a repo.
+  // This is the whole hazard of the feature: the normal fallback chain would
+  // quietly hand the chat the last folder you used, and the person would have
+  // started a session in a real repository while the UI said "No project".
+  const unassigned = scopedProject === NO_PROJECT_FILTER;
   const scopedRepo =
-    scopedProject !== "__all"
+    scopedProject !== "__all" && !unassigned
       ? repos.find((r) => repoProject(r) === scopedProject)
       : undefined;
   const projectScoped = !!scopedRepo;
   // The live view is unfiltered. There is no chosen folder to name, only the
   // fallback the next session would land in, so the chip does not claim one.
   const allProjects = scopedProject === "__all";
-  const selectedRepo = resolveComposerRepo({
-    scopedCwd: scopedRepo?.cwd,
-    lastCwd: repo,
-    repos,
-  });
-  const selectedRepoName =
-    repos.find((candidate) => candidate.cwd === selectedRepo)?.name ||
-    (selectedRepo ? shortProject(selectedRepo) : "Project");
+  const selectedRepo = unassigned
+    ? ""
+    : resolveComposerRepo({
+        scopedCwd: scopedRepo?.cwd,
+        lastCwd: repo,
+        repos,
+      });
+  const selectedRepoName = unassigned
+    ? projectFilterLabel(NO_PROJECT_FILTER, shortProject)
+    : repos.find((candidate) => candidate.cwd === selectedRepo)?.name ||
+      (selectedRepo ? shortProject(selectedRepo) : "Project");
   const launching = pendingCreates > 0;
   // The project the resume picker should open scoped to: the composer's currently
   // selected repo (which already folds in the live-view filter via `scopedRepo`),
   // falling back to the live filter, then "all". Matches the backend `project`
   // field on resumable rows (both derive from the repo's top-folder name).
   const composerProject = (() => {
+    if (unassigned) return NO_PROJECT_FILTER;
     const r = repos.find((x) => x.cwd === selectedRepo);
     if (r) return repoProject(r);
     return scopedProject !== "__all" ? scopedProject : "__all";
   })();
+  // The resume picker asks the server for one project by name. "No project" is
+  // not a name the server knows, so scoping the picker to it would return an
+  // empty list rather than the scratch chats it is supposed to find. Open it
+  // unscoped instead; it has its own project control inside.
+  const resumeScope = unassigned ? "__all" : composerProject;
 
   function setPrompt(text: string) {
     setPromptState(text);
@@ -23015,13 +23413,21 @@ function NewSessionDialog({
   const selectedLaunchId =
     agent === "aisdk" && claudeAccountId ? `aisdk:${claudeAccountId}` : agent;
 
+  // Keep the selection on something this box can launch without overwriting
+  // what the person chose. The rules, and why they exist, live with
+  // reconcileSelectedAgent.
   useEffect(() => {
-    if (visibleAgentOptions.some((option) => option.key === agent)) return;
-    const next = visibleAgentOptions[0]?.key;
+    const next = reconcileSelectedAgent(
+      visibleAgentOptions,
+      agent,
+      desiredAgentRef.current ?? "",
+      defaultAgent,
+    ) as AgentKind | null;
     if (!next) return;
     setAgent(next);
-    setModel(localStorage.getItem(`lfg_model_${next}`) || defaultModelFor(next));
-  }, [agent, visibleAgentOptions]);
+    setModel(preferredModelFor(next));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agent, defaultAgent, visibleAgentOptions]);
 
   useEffect(() => {
     if (agent !== "aisdk") return;
@@ -23040,6 +23446,7 @@ function NewSessionDialog({
     if (!agentRequest) return;
     if (appliedAgentNonce.current === agentRequest.nonce) return;
     appliedAgentNonce.current = agentRequest.nonce;
+    desiredAgentRef.current = agentRequest.kind;
     setAgent(agentRequest.kind);
     if (agentRequest.kind === "aisdk") setClaudeAccountId(agentRequest.accountId ?? "");
     setModel(preferredModelFor(agentRequest.kind));
@@ -23104,8 +23511,18 @@ function NewSessionDialog({
       ),
     ]);
     setPendingCreates((n) => n + 1);
-    localStorage.setItem("lfg_v2_agent", launchAgent);
-    localStorage.setItem("lfg_v2_repo", selectedRepo);
+    // Remember an agent only when it is the one the person picked. A launch on
+    // an agent this composer SUBSTITUTED (theirs was not launchable at that
+    // moment) must never become the new saved choice: that is how a single bad
+    // roster read used to pin a device to an agent nobody selected. The box
+    // copy is what carries the choice to their next device.
+    if (launchAgent === desiredAgentRef.current) {
+      localStorage.setItem("lfg_v2_agent", launchAgent);
+      persistSetting({ lastAgent: launchAgent, lastModel: launchModel });
+    }
+    // A no-project chat has no folder to remember. Writing "" here would erase
+    // the folder the next ordinary session is supposed to open in.
+    if (!unassigned) localStorage.setItem("lfg_v2_repo", selectedRepo);
     localStorage.setItem(`lfg_model_${launchAgent}`, launchModel);
     if (thinkingLevels.length) localStorage.setItem("lfg_thinking_level", launchThinkingLevel);
     if (launchAgent === "claude") localStorage.setItem("lfg_model", launchModel);
@@ -23129,11 +23546,17 @@ function NewSessionDialog({
       // exactly this request. It takes the already-composed prompt, which means
       // a retry never re-uploads the attachments — their ids are in that string.
       const postCreate = (composedPrompt: string, overLimit: boolean) =>
-        api<CreateResult>("/api/sessions/new", {
+        // A chat with no project goes to its own endpoint, which gives it a
+        // persistent ~/.omg/chats workspace and stamps project: "". It rejects
+        // `cwd`, so none is sent. An older box 404s this path; that surfaces as
+        // an error here on purpose, because the alternative — falling back to
+        // /api/sessions/new — would start the chat in the default repository
+        // without saying so. See docs/no-project-chat.md.
+        api<CreateResult>(unassigned ? "/api/sessions/new-unassigned" : "/api/sessions/new", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            cwd: selectedRepo,
+            cwd: unassigned ? undefined : selectedRepo,
             prompt: composedPrompt || undefined,
             user: launchUser || undefined,
             agent: launchAgent,
@@ -23228,7 +23651,7 @@ function NewSessionDialog({
   const compact = variant === "inline" && !expanded;
   const canSubmit =
     !runtime.loading && runtime.ready && runtime.status === "live" && !runtime.error &&
-    !!selectedRepo &&
+    (unassigned || !!selectedRepo) &&
     visibleAgentOptions.some((option) => option.key === agent) &&
     (!!prompt.trim() || attachments.length > 0);
   const selectedAgentOption = displayedAgentOption<AgentLaunchOption>(
@@ -23259,6 +23682,7 @@ function NewSessionDialog({
     if ((next.selectorId ?? nextKey) === selectedLaunchId) return;
     setAgentIconDir(dir);
     setAgentIconNonce((n) => n + 1);
+    desiredAgentRef.current = nextKey;
     setAgent(nextKey);
     if (nextKey === "aisdk") setClaudeAccountId(next.accountId ?? "");
     setModel(preferredModelFor(nextKey));
@@ -23290,36 +23714,15 @@ function NewSessionDialog({
       onExpandedChange?.(false);
       return;
     }
+    desiredAgentRef.current = key;
     setAgent(key);
     if (key === "aisdk") setClaudeAccountId(option?.accountId ?? "");
     setModel(preferredModelFor(key));
   };
 
-  const agentSelector = (
-    <AgentIconStrip
-      options={agentButtons}
-      value={agent}
-      selectedId={selectedLaunchId}
-      flat={variant === "inline"}
-      onLocked={onAgentLocked}
-      onSelect={onAgentSelect}
-    />
-  );
-
   const modelControls = (
     <>
-      {variant === "inline" ? (
-        view.showComposerModels ? (
-          <ModelPicker
-            value={model}
-            models={models}
-            onChange={setModel}
-            flat
-            width="max-w-28"
-            onMobileLayerOpenChange={handleModelLayerOpenChange}
-          />
-        ) : null
-      ) : (
+      {
         // Desktop: one pill for "which agent, which model". The agent strip
         // and the model list live in the same popover, so the row carries one
         // control fewer and the two choices that belong together are made
@@ -23338,7 +23741,7 @@ function NewSessionDialog({
           showModels={view.showComposerModels}
           showAgents={view.showComposerAgents}
         />
-      )}
+      }
 
       {/* Tibo mode pins Fast plus High, so its own pill is the single control
           for both. Showing the thinking and Fast pills next to it would offer
@@ -23382,29 +23785,18 @@ function NewSessionDialog({
             aria-label="Choose project"
             className="max-w-28 truncate pr-1 text-xs font-medium outline-none"
           >
-            {repos.find((item) => item.cwd === selectedRepo)?.name || "Choose project"}
+            {unassigned
+              ? selectedRepoName
+              : repos.find((item) => item.cwd === selectedRepo)?.name || "Choose project"}
           </button>
         </FieldPill>
       )}
     </>
   );
 
-  // In the inline composer the controls reveal as two independent mini cards:
-  // agent choices first, then model/thinking/project. Each card enters from the
-  // trigger's bottom-left corner so the stack feels emitted by the agent icon.
-  // The drawer keeps the same controls in its existing wrapping row.
-  const controlsInner = variant === "inline" ? (
-    <div className="flex w-max max-w-[calc(100vw-1rem)] origin-bottom-left flex-col items-start gap-1.5">
-      {agentButtons.length && view.showComposerAgents ? (
-        <div className="origin-bottom-left rounded-2xl bg-popover px-2 py-1.5 shadow-xl ring-1 ring-foreground/5 animate-in fade-in-0 zoom-in-75 slide-in-from-bottom-3 duration-200 ease-out">
-          {agentSelector}
-        </div>
-      ) : null}
-      <div className="flex max-w-full origin-bottom-left items-center gap-1.5 overflow-hidden rounded-2xl bg-popover px-2.5 py-1.5 shadow-xl ring-1 ring-foreground/5 animate-in fade-in-0 zoom-in-75 slide-in-from-bottom-3 duration-200 ease-out [animation-delay:55ms] [animation-fill-mode:backwards]">
-        {modelControls}
-      </div>
-    </div>
-  ) : (
+  // The drawer and the stage keep every control in one wrapping row. The inline
+  // mobile composer carries them in the agent sheet instead.
+  const controlsInner = (
     <div className="flex flex-wrap items-center gap-1.5 pb-0.5">
       {modelControls}
     </div>
@@ -23430,64 +23822,232 @@ function NewSessionDialog({
     </button>
   );
 
-  // Inline composer: the agent icon sits at the start of the input's action row
-  // and opens the full agent / model / thinking / repo controls in a popover
-  // *above* it — reclaiming the separate row those controls used to occupy while
-  // the tall field leaves plenty of empty space.
+  // Inline composer: the agent icon opens the agent sheet, the web copy of the
+  // iOS AgentSetupSheet. A vertical swipe on the icon still steps through the
+  // agents without opening anything.
   const agentPopover = (
-    <DropdownMenu open={agentPopoverOpen} onOpenChange={handleAgentPopoverOpenChange}>
-      <DropdownMenuTrigger
-        render={
-          <button
-            ref={agentIconBtnRef}
-            type="button"
-            title={
-              view.showComposerAgents
-                ? `${selectedAgentOption.label} — swipe to switch agent`
-                : selectedAgentOption.label
-            }
-            aria-label={
-              view.showComposerAgents
-                ? `Agent: ${selectedAgentOption.label}. Swipe up or down to switch.`
-                : `Agent: ${selectedAgentOption.label}. Open composer options.`
-            }
-            style={{ touchAction: "none" }}
-            className="relative flex size-8 shrink-0 items-center justify-center rounded-full border border-border bg-background text-foreground shadow-sm transition active:scale-[0.96]"
-          >
-            <span className="pointer-events-none relative flex size-5 items-center justify-center overflow-hidden">
-              <img
-                key={`${agent}-${agentIconNonce}`}
-                src={agentIconSrc(agent)}
-                alt=""
-                draggable={false}
-                className={cn(
-                  "size-5 select-none",
-                  agentIconNonce > 0 &&
-                    (agentIconDir === 1
-                      ? "animate-in fade-in-0 slide-in-from-bottom-2 duration-200"
-                      : "animate-in fade-in-0 slide-in-from-top-2 duration-200"),
-                )}
-              />
-            </span>
-            {selectedAgentOption.badge != null ? (
-              <span className="pointer-events-none absolute -bottom-0.5 -right-0.5 flex size-3.5 items-center justify-center rounded-full bg-foreground text-[8px] font-bold leading-none text-background ring-1 ring-background">
-                {selectedAgentOption.badge}
-              </span>
-            ) : null}
-          </button>
-        }
-      />
-      <DropdownMenuContent
-        side="top"
-        align="start"
-        sideOffset={8}
-        className="w-max min-w-0 max-w-[calc(100vw-1rem)] origin-bottom-left overflow-visible bg-transparent p-0 shadow-none ring-0"
-      >
-        {controlsInner}
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <button
+      ref={agentIconBtnRef}
+      type="button"
+      title={
+        view.showComposerAgents
+          ? `${selectedAgentOption.label} — swipe to switch agent`
+          : selectedAgentOption.label
+      }
+      aria-label={
+        view.showComposerAgents
+          ? `Agent: ${selectedAgentOption.label}. Swipe up or down to switch.`
+          : `Agent: ${selectedAgentOption.label}. Open composer options.`
+      }
+      aria-haspopup="dialog"
+      aria-expanded={agentPopoverOpen}
+      // Pointer taps are handled by the gesture listener, which swallows their
+      // click. Only keyboard activation (detail 0) reaches this handler.
+      onClick={(event) => {
+        if (event.detail !== 0) return;
+        setSetupPage("root");
+        setAgentPopoverOpen(true);
+      }}
+      style={{ touchAction: "none" }}
+      className="relative flex size-8 shrink-0 items-center justify-center rounded-full text-foreground transition active:scale-[0.96]"
+    >
+      <span className="pointer-events-none relative flex size-5 items-center justify-center overflow-hidden">
+        <img
+          key={`${agent}-${agentIconNonce}`}
+          src={agentIconSrc(agent)}
+          alt=""
+          draggable={false}
+          className={cn(
+            "size-5 select-none",
+            agentIconNonce > 0 &&
+              (agentIconDir === 1
+                ? "animate-in fade-in-0 slide-in-from-bottom-2 duration-200"
+                : "animate-in fade-in-0 slide-in-from-top-2 duration-200"),
+          )}
+        />
+      </span>
+      {selectedAgentOption.badge != null ? (
+        <span className="pointer-events-none absolute -bottom-0.5 -right-0.5 flex size-3.5 items-center justify-center rounded-full bg-foreground text-[8px] font-bold leading-none text-background ring-1 ring-background">
+          {selectedAgentOption.badge}
+        </span>
+      ) : null}
+    </button>
   );
 
+  // One tile per agent, as on iOS. The per-account Claude entries fold into the
+  // Claude tile; the sheet's profile page chooses between them.
+  const claudeLaunchOptions = visibleAgentOptions.filter((option) => option.key === "aisdk");
+  const setupTiles: SetupAgentTile[] = view.showComposerAgents
+    ? agentButtons
+        .filter((option, index, all) => all.findIndex((other) => other.key === option.key) === index)
+        .map((option) => ({
+          id: option.key,
+          label: AGENT_CATALOG.find((entry) => entry.key === option.key)?.label ?? option.label,
+          iconSrc: agentIconSrc(option.key),
+          selected: !option.locked && option.key === agent,
+          locked: option.locked,
+          badge:
+            option.key === "aisdk" && claudeAccountId
+              ? claudeLaunchOptions.find((item) => item.accountId === claudeAccountId)?.badge
+              : undefined,
+        }))
+    : [];
+  const setupProfiles: SetupChoice[] =
+    claudeLaunchOptions.length > 1
+      ? claudeLaunchOptions.map((option) => ({
+          id: option.accountId ?? "",
+          label: option.accountId ? String(option.badge ?? option.label) : "Auto",
+          selected: (option.accountId ?? "") === claudeAccountId,
+        }))
+      : [];
+  const { usage, loading: usageLoading } = useProviderUsage({
+    agent,
+    accountId: agent === "aisdk" ? claudeAccountId || null : null,
+    combineAccounts: agent === "aisdk" && !claudeAccountId,
+    enabled: open,
+  });
+  const agentSheet =
+    variant === "inline" ? (
+      <AgentSetupSheet
+        open={agentPopoverOpen}
+        onOpenChange={setAgentPopoverOpen}
+        initialPage={setupPage}
+        title={(() => {
+          const label = AGENT_CATALOG.find((entry) => entry.key === agent)?.label ?? selectedAgentOption.label;
+          return label.charAt(0).toUpperCase() + label.slice(1);
+        })()}
+        agents={setupTiles}
+        onSelectAgent={(id) => {
+          const key = id as AgentKind;
+          if (key === agent) return;
+          desiredAgentRef.current = key;
+          setAgent(key);
+          if (key === "aisdk") setClaudeAccountId("");
+          setModel(preferredModelFor(key));
+        }}
+        onLockedAgent={() => {
+          setAgentPopoverOpen(false);
+          onAgentLocked();
+        }}
+        profiles={setupProfiles}
+        onSelectProfile={(id) => setClaudeAccountId(id)}
+        modelLabel={view.showComposerModels ? omgModelLabel(model) || model || null : null}
+        renderModels={
+          view.showComposerModels
+            ? (done) => (
+                <ModelOptionList
+                  value={model}
+                  models={models}
+                  onChoose={(next) => {
+                    setModel(next);
+                    done();
+                  }}
+                  onEscape={done}
+                  inputRef={setupModelInputRef}
+                  large
+                />
+              )
+            : undefined
+        }
+        fast={
+          fastModeAvailable && !tiboModeActive
+            ? { enabled: fastModeEnabled, onToggle: () => setFastMode(!fastModeEnabled) }
+            : null
+        }
+        tibo={tiboModeAvailable ? { enabled: tiboModeActive, onToggle: () => setTiboMode(!tiboMode) } : null}
+        thinking={
+          !tiboModeActive && agentSupportsThinking(agent)
+            ? {
+                options: thinkingLevels.map((level) => ({
+                  id: level,
+                  label: thinkingLevelLabel(level),
+                  selected: level === thinkingLevel,
+                })),
+                onPick: (level) => changeComposerThinkingLevel(level as ThinkingLevel),
+              }
+            : null
+        }
+        usageRing={
+          usage ? (
+            <UsageRings
+              windows={
+                usage.windows?.length
+                  ? activityRingOrder(usage.windows)
+                  : [{ label: "usage", pct: null, resetsAt: null }]
+              }
+            />
+          ) : usageLoading ? (
+            <UsageRingsLoading />
+          ) : null
+        }
+        usageDetails={usage ? <UsageDetailsBody provider={usage} /> : null}
+      />
+    ) : null;
+
+  const micButton = (
+    <MicButton
+      minimal
+      className={cn("size-9 shrink-0", variant !== "inline" && "absolute bottom-1 right-1")}
+      silenceMs={2500}
+      baseText={prompt}
+      onText={(text, base) => {
+        setPrompt(base.trim() ? `${base.trimEnd()} ${text}` : text);
+        setDictationScrollNonce((nonce) => nonce + 1);
+      }}
+      onInterim={(text, base) => {
+        setPrompt(base.trim() ? `${base.trimEnd()} ${text}` : text);
+        setDictationScrollNonce((nonce) => nonce + 1);
+      }}
+      onAutoSubmit={(text, base) => {
+        const combined = base.trim() ? `${base.trimEnd()} ${text}` : text;
+        void submit(undefined, combined);
+      }}
+      onCancel={(base) => setPrompt(base)}
+    />
+  );
+  const attachButton = (
+    <Button
+      size="icon-sm"
+      type="button"
+      variant={draggingFiles ? "brand-soft" : variant === "inline" ? "ghost" : "outline"}
+      className={cn("size-8 rounded-full", variant !== "inline" && "shadow-sm")}
+      onClick={files.openFilePicker}
+      aria-label="Attach files"
+      title="Attach files"
+    >
+      <Plus className="size-4" />
+    </Button>
+  );
+  // Mobile sends with the iOS button: a round arrow, filled when there is
+  // something to send. Thinking is set in the agent sheet, so the desktop
+  // Start button's hold-to-choose-thinking is not needed here.
+  const startButton = variant === "inline" ? (
+    <button
+      type="submit"
+      disabled={!canSubmit}
+      aria-label="Start session"
+      title="Start session"
+      className="flex size-10 shrink-0 items-center justify-center rounded-full bg-foreground text-background transition active:scale-95 disabled:bg-secondary disabled:text-muted-foreground"
+    >
+      <ArrowUp className="size-5" strokeWidth={2.5} />
+    </button>
+  ) : (
+    <ComposerStartButton
+      disabled={!canSubmit}
+      thinkingLevel={thinkingLevel}
+      thinkingLevels={
+        tiboModeActive
+          ? ["high"]
+          : agentSupportsThinking(agent)
+            ? thinkingLevels
+            : []
+      }
+      onLaunch={(next) => {
+        changeComposerThinkingLevel(next);
+        submit(undefined, undefined, next);
+      }}
+    />
+  );
   const formBody = (
     <>
     <form
@@ -23499,7 +24059,11 @@ function NewSessionDialog({
         // Embed cancels --lfg-device-safe-bottom to 0 (host owns that zone) and
         // the shell still applies host-inset, so Start clears the pill without
         // a double gap. Drawer / dialog are full-bleed → global safe bottom.
-        "relative overscroll-contain px-2 transition-colors",
+        "relative overscroll-contain transition-colors",
+        // The inline home composer takes the app's 16px inset; the drawer and
+        // the stage are already inset by their own container, so widening
+        // them would only narrow the field.
+        variant === "inline" ? "px-4" : "px-2",
         variant === "inline"
           ? "overflow-visible pb-[max(var(--lfg-device-safe-bottom),0.5rem)] pt-1.5"
           : variant === "stage"
@@ -23513,19 +24077,58 @@ function NewSessionDialog({
       )}
     >
       {files.fileInput}
+      {/* A chat with no folder starts from these four, the way it does on iOS.
+          They sit above the field and only while the field is empty: once
+          there is anything to send, the person has said what they want and
+          four suggestions are in the way. */}
+      {unassigned && !prompt.trim() && attachments.length === 0 ? (
+        <ChatStarterRow
+          className="mb-2"
+          disabled={launching}
+          onStart={(starterPrompt) => submit(undefined, starterPrompt)}
+        />
+      ) : null}
       <div
         className={cn(
-          "lfg-gfield relative rounded-2xl",
-          // Inline: a single row with the agent icon, field, and mic all
-          // centered at rest, then pinned to the bottom as the textarea grows.
+          "lfg-gfield relative",
+          // Inline follows iOS HomeComposer. At rest it is one row: agent,
+          // field, attach, mic. Focus or content gives the field its own line
+          // and moves agent, attach, mic and Start under it.
           variant === "inline"
             ? cn(
-                "flex gap-1.5 overflow-visible px-2.5 py-2",
-                promptMultiline ? "items-end" : "items-center",
+                "flex overflow-visible transition-[border-radius,padding] duration-200 ease-out motion-reduce:transition-none",
+                inlineExpanded
+                  ? "flex-col items-stretch gap-3 rounded-[30px] px-3.5 pb-3 pt-3.5"
+                  : cn("flex-row gap-2 rounded-[26px] px-2 py-[7px]", promptMultiline ? "items-end" : "items-center"),
               )
-            : "relative px-2 py-1",
+            : "relative rounded-2xl px-2 py-1",
         )}
         ref={fieldRef}
+        onFocus={
+          variant === "inline"
+            ? (event) => {
+                if (event.target instanceof HTMLTextAreaElement) {
+                  if (blurTimerRef.current != null) window.clearTimeout(blurTimerRef.current);
+                  blurTimerRef.current = null;
+                  setComposerFocused(true);
+                }
+              }
+            : undefined
+        }
+        onBlur={
+          variant === "inline"
+            ? (event) => {
+                if (!(event.target instanceof HTMLTextAreaElement)) return;
+                // Collapse a moment later, so a tap on a control that is about
+                // to move still lands on it.
+                if (blurTimerRef.current != null) window.clearTimeout(blurTimerRef.current);
+                blurTimerRef.current = window.setTimeout(() => {
+                  blurTimerRef.current = null;
+                  setComposerFocused(false);
+                }, 200);
+              }
+            : undefined
+        }
       >
         {launching ? (
           <div
@@ -23536,7 +24139,9 @@ function NewSessionDialog({
             <ShimmerText className="text-sm font-medium">Creating session…</ShimmerText>
           </div>
         ) : null}
-        {variant === "inline" ? agentPopover : null}
+        {/* The field keeps its child index in both shapes, so React updates it
+            in place and focus survives the morph. `null` holds a slot. */}
+        {variant === "inline" && !inlineExpanded ? agentPopover : null}
         <ComposerTextarea
           value={prompt}
           onValueChange={setPrompt}
@@ -23554,30 +24159,37 @@ function NewSessionDialog({
           className={cn(
             "border-0 bg-transparent text-base leading-relaxed shadow-none focus-visible:border-0 focus-visible:ring-0",
             variant === "inline"
-              ? "min-h-9 flex-1 px-1 py-1.5"
+              ? cn("min-h-9 px-1 py-1.5", !inlineExpanded && "flex-1")
               : "min-h-40 max-h-[42dvh] px-1 py-1 pr-10",
           )}
         />
-        <MicButton
-          minimal
-          className={cn("size-9 shrink-0", variant !== "inline" && "absolute bottom-1 right-1")}
-          silenceMs={2500}
-          baseText={prompt}
-          onText={(text, base) => {
-            setPrompt(base.trim() ? `${base.trimEnd()} ${text}` : text);
-            setDictationScrollNonce((nonce) => nonce + 1);
-          }}
-          onInterim={(text, base) => {
-            setPrompt(base.trim() ? `${base.trimEnd()} ${text}` : text);
-            setDictationScrollNonce((nonce) => nonce + 1);
-          }}
-          onAutoSubmit={(text, base) => {
-            const combined = base.trim() ? `${base.trimEnd()} ${text}` : text;
-            void submit(undefined, combined);
-          }}
-          onCancel={(base) => setPrompt(base)}
-        />
+        {variant === "inline" ? (
+          <div
+            className="flex shrink-0 items-center gap-2"
+            // Keep the field focused while a control is tapped, so the
+            // composer does not collapse under the finger.
+            onMouseDown={(event) => {
+              if (inlineExpanded) event.preventDefault();
+            }}
+          >
+            {/* Fixed slots, so the mic never remounts mid-dictation when the
+                first words expand the composer. */}
+            {inlineExpanded ? agentPopover : null}
+            {attachButton}
+            {/* The project rail under the mobile header chooses the folder,
+                as on iOS, so the composer carries no folder button. */}
+            {inlineExpanded ? resumeButton : null}
+            {inlineExpanded ? <span className="flex-1" /> : null}
+            {micButton}
+            {inlineExpanded ? startButton : null}
+          </div>
+        ) : (
+          micButton
+        )}
       </div>
+      {variant === "inline" && error ? (
+        <p className="mt-1.5 truncate px-3 text-xs text-destructive">{error}</p>
+      ) : null}
 
       <ComposerAttachmentChips
         className="mt-2"
@@ -23598,89 +24210,48 @@ function NewSessionDialog({
           ONLY the configuration pills (agent / model / thinking / project) —
           usage and resume live in the action row below, so both variants read
           as the same two-row composer instead of a ragged four-row stack. */}
+      {/* The drawer and the stage keep an always-open controls row and an
+          action row. The inline composer carries the controls in the agent
+          sheet and its actions inside the field, as on iOS. */}
       {variant !== "inline" ? (
-        <div className="mt-2 flex flex-wrap items-center gap-1.5">{controlsInner}</div>
+        <>
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">{controlsInner}</div>
+          <div className={cn("flex items-center gap-2", compact ? "mt-2" : "mt-3")}>
+            {/* Left: Apple-Watch-style usage rings; tap to expand the breakdown. */}
+            {usageLoading ? (
+              <UsageRingsLoadingIndicator />
+            ) : usage ? (
+              <UsageRingsButton provider={usage} />
+            ) : null}
+            <span
+              className={cn(
+                "min-w-0 flex-1 truncate text-xs",
+                error ? "text-destructive" : "text-muted-foreground",
+              )}
+            >
+              {error || ""}
+            </span>
+            {/* Right cluster: resume + photo + send, stacked together. */}
+            <div className="flex shrink-0 items-center gap-2">
+              {resumeButton}
+              {attachButton}
+              {startButton}
+            </div>
+          </div>
+        </>
       ) : null}
 
-      <div
-        className={cn(
-          "flex items-center gap-2",
-          compact ? "mt-2" : "mt-3",
-        )}
-      >
-        {/* Left: Apple-Watch-style usage rings; tap to expand the breakdown. */}
-        <ComposerUsageIndicator agent={agent} accountId={claudeAccountId} enabled={open} />
-        <span
-          className={cn(
-            "min-w-0 flex-1 truncate text-xs",
-            error ? "text-destructive" : "text-muted-foreground",
-          )}
-        >
-          {error || ""}
-        </span>
-        {/* Right cluster: resume + folder + photo + send, stacked together. */}
-        <div className="flex shrink-0 items-center gap-2">
-          {resumeButton}
-          {variant === "inline" && projectOptions && onProjectChange ? (
-            <Button
-              size="sm"
-              type="button"
-              variant="outline"
-              className={cn(
-                "h-8 shrink-0 rounded-full shadow-sm",
-                // Icon alone when nothing is scoped — the same shape
-                // MobileProjectPicker collapses to for "__all". Naming the
-                // composer's fallback repo here made choosing "All projects"
-                // look ignored: the list widened while the chip went on
-                // showing the folder you had just moved away from.
-                allProjects ? "size-8 px-0" : "max-w-36 px-2.5",
-              )}
-              onClick={openProjectSheet}
-              aria-label={
-                allProjects
-                  ? "Choose project. Showing all projects"
-                  : `Choose project. Current project: ${selectedRepoName}`
-              }
-              title={allProjects ? "All projects" : selectedRepo || "Choose project"}
-            >
-              <Folder className="size-4 shrink-0" />
-              {allProjects ? null : <span className="truncate">{selectedRepoName}</span>}
-            </Button>
-          ) : null}
-          <Button
-            size="icon-sm"
-            type="button"
-            variant={draggingFiles ? "brand-soft" : "outline"}
-            className="size-8 rounded-full shadow-sm"
-            onClick={files.openFilePicker}
-            aria-label="Attach files"
-            title="Attach files"
-          >
-            <Plus className="size-4" />
-          </Button>
-          <ComposerStartButton
-            disabled={!canSubmit}
-            thinkingLevel={thinkingLevel}
-            thinkingLevels={
-              tiboModeActive
-                ? ["high"]
-                : agentSupportsThinking(agent)
-                  ? thinkingLevels
-                  : []
-            }
-            onLaunch={(next) => {
-              changeComposerThinkingLevel(next);
-              submit(undefined, undefined, next);
-            }}
-          />
+      {variant === "inline" ? (
+        <div className="mt-2 flex items-center gap-2">
+          <ComposerUsageIndicator agent={agent} accountId={claudeAccountId} enabled={open} />
         </div>
-      </div>
-
+      ) : null}
+      {agentSheet}
       {resumeOpen ? (
         <Suspense fallback={null}>
           <ResumeSessionSheet
             initial={resumable}
-            scopedProject={composerProject}
+            scopedProject={resumeScope}
             onRestore={(entry) => setPrompt(entry.text)}
             onPick={(session) => {
               closeResume();
@@ -23726,6 +24297,15 @@ function NewSessionDialog({
               }
             : undefined
         }
+        noProjectSelected={unassigned}
+        onSelectNoProject={
+          onProjectChange
+            ? () => {
+                onProjectChange(NO_PROJECT_FILTER);
+                setProjectSheetOpen(false);
+              }
+            : undefined
+        }
         onReposChanged={async (removedCwd?: string) => {
           // A composer pointed at a project that no longer exists would launch
           // into a 400 "unknown repo", so drop the selection when the thing it
@@ -23765,7 +24345,7 @@ function NewSessionDialog({
       <Suspense fallback={null}>
         <ResumeSessionSheet
           initial={resumable}
-          scopedProject={composerProject}
+          scopedProject={resumeScope}
           onRestore={(entry) => setPrompt(entry.text)}
           onPick={(session) => {
             closeResume();
@@ -25006,9 +25586,20 @@ function ModelPicker({
         >
           <Popover.Popup
             initialFocus={searchable ? inputRef : true}
-            className="w-80 max-w-[calc(100vw-1rem)] rounded-2xl border border-border bg-popover p-2 text-popover-foreground shadow-2xl ring-1 ring-foreground/5 outline-none"
+            // Clamped to the room below the trigger. It is pinned under the
+            // pill on purpose (collisionAvoidance above), so without a cap a
+            // long list simply ran off the bottom of the screen and its last
+            // models could not be reached at all.
+            className="flex max-h-[var(--available-height)] w-80 max-w-[calc(100vw-1rem)] flex-col overflow-hidden rounded-2xl border border-border bg-popover p-2 text-popover-foreground shadow-2xl ring-1 ring-foreground/5 outline-none"
           >
-            {optionList}
+            <ModelOptionList
+              value={value}
+              models={models}
+              onChoose={choose}
+              onEscape={() => setOpen(false)}
+              inputRef={inputRef}
+              fill
+            />
           </Popover.Popup>
         </Popover.Positioner>
       </Popover.Portal>
@@ -25030,6 +25621,7 @@ export function ModelOptionList({
   onEscape,
   inputRef,
   large = false,
+  fill = false,
 }: {
   value: string;
   models: string[];
@@ -25037,6 +25629,14 @@ export function ModelOptionList({
   onEscape?: () => void;
   inputRef?: { current: HTMLInputElement | null };
   large?: boolean;
+  /**
+   * Take the height the container gives instead of a fixed cap.
+   *
+   * The desktop popover is clamped to the space below the trigger, so the
+   * list has to shrink into whatever is left. With its own max-height it
+   * kept asking for 18rem and the popover ran off the bottom of the screen.
+   */
+  fill?: boolean;
 }) {
   const [query, setQuery] = useState("");
   const filtered = useMemo(() => {
@@ -25047,7 +25647,12 @@ export function ModelOptionList({
     return models.filter((item) => omgModelSearchText(item).includes(q));
   }, [models, query]);
   return (
-    <div className={large ? "min-h-0 space-y-3" : "space-y-2"}>
+    <div
+      className={cn(
+        large ? "min-h-0 space-y-3" : "space-y-2",
+        fill && "flex min-h-0 flex-1 flex-col gap-2 space-y-0",
+      )}
+    >
       {modelListSearchable(models) ? (
         <div className="relative">
           <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -25065,7 +25670,12 @@ export function ModelOptionList({
           />
         </div>
       ) : null}
-      <div className={cn("overflow-y-auto pr-1", large ? "max-h-[52dvh]" : "max-h-72")}>
+      <div
+        className={cn(
+          "overflow-y-auto pr-1",
+          fill ? "min-h-0 flex-1" : large ? "max-h-[52dvh]" : "max-h-72",
+        )}
+      >
         {filtered.length ? (
           filtered.map((item) => {
             const selected = value === item;
@@ -25208,7 +25818,13 @@ export function AgentModelPicker<K extends AgentKind>({
         >
           <Popover.Popup
             initialFocus={showModels && modelListSearchable(models) ? inputRef : true}
-            className="w-80 max-w-[calc(100vw-1rem)] rounded-2xl border border-border bg-popover p-2 text-popover-foreground shadow-2xl ring-1 ring-foreground/5 outline-none"
+            // Clamped to the room below the trigger, like the model pill's
+            // own popover. It is pinned under the composer on purpose
+            // (collisionAvoidance above), so without a cap the list ran off
+            // the bottom of the screen and its last models could not be
+            // reached at all — reported on an iPad, where the composer sits
+            // low and the agent strip eats the space above the list.
+            className="flex max-h-[var(--available-height)] w-80 max-w-[calc(100vw-1rem)] flex-col overflow-hidden rounded-2xl border border-border bg-popover p-2 text-popover-foreground shadow-2xl ring-1 ring-foreground/5 outline-none"
           >
             {/* No section labels. The icon strip is obviously the agent
                 row and the list under it is obviously models; the words
@@ -25237,6 +25853,7 @@ export function AgentModelPicker<K extends AgentKind>({
                 }}
                 onEscape={() => setOpen(false)}
                 inputRef={inputRef}
+                fill
               />
             ) : null}
           </Popover.Popup>
@@ -29614,34 +30231,10 @@ function SurfaceToggle({
   );
 }
 
-function MobileSurfaceDock({
-  active,
-  aboveComposer,
-  onOpenSessions,
-  onOpenBots,
-  onOpenAuto,
-}: {
-  active: "sessions" | "chat" | "auto";
-  aboveComposer: boolean;
-  onOpenSessions: () => void;
-  onOpenBots: () => void;
-  onOpenAuto: () => void;
-}) {
-  return (
-    <div
-      className="pointer-events-none fixed inset-x-0 z-[56] flex justify-center px-4 pb-2"
-      style={{ bottom: mobileSurfaceDockBottom(aboveComposer) }}
-    >
-      <SurfaceToggle
-        compact
-        active={active}
-        onOpenSessions={onOpenSessions}
-        onOpenBots={onOpenBots}
-        onOpenAuto={onOpenAuto}
-      />
-    </div>
-  );
-}
+// The mobile surface dock is gone. Chat, Bots and Schedules moved into the
+// side navigation (components/side-nav.tsx) along with every page that used
+// to sit behind the overflow menu, so a phone has one answer to "where do I
+// go" instead of two that each held half the destinations.
 
 /** Stable per-bot phase offset, so a roster breathes out of lockstep. */
 function botSeed(id: string): number {

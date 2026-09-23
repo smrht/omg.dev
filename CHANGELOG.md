@@ -2,6 +2,142 @@
 
 Recent product updates and deployment notes.
 
+## September 23, 2026 - Google Drive, and Upgrade in the phone menu (v0.6.117)
+
+- Google Drive now works through omg's own connector, on the same Google sign-in as Gmail. Agents can search, read, create and trash files. Docs and Slides read as text, and Sheets read as CSV.
+- When Google's consent screen left a permission unticked, Gmail and Drive now say how to fix it.
+- A connection you give to a role, or to the whole team, now works for that role's agents. A running agent sees new connections without a restart.
+- Your connections list shows your own, each role's and the team's connections, grouped by who can use them.
+- On a phone, the home composer and the chat input sit 16px from the screen edge, as in the app.
+- The phone navigation menu has a place for the host's own rows, above Settings. On omg.dev the Upgrade button moves there, so it no longer sits in the top bar.
+
+## September 23, 2026 - Reliable agent deploys (v0.6.116)
+
+- An agent's `omg_deploy` now answers within 45 seconds. A longer build returns `pending`, and the new `omg_deploy_status` tool waits for it. Agents no longer report a failed deploy for an app that went live.
+- When you do not answer an agent's question in time, the agent asks again once in a normal chat message instead of repeating the question card.
+- A new project on an older Computer gets a default git identity, so the agent's first commit works. Your own git identity always wins.
+- When another project's Metro holds the preview port, the Expo preview script names the next port to use.
+
+## September 23, 2026 - The app's list, on the web (v0.6.115)
+
+- Gmail now works through omg's own connector. It searches, reads, sends, replies, drafts, labels and trashes mail directly with the Gmail API. Google's own Gmail server answers only for accounts in a Google preview programme, so Gmail never worked through it.
+- The signed-in mailbox is shown in the Gmail connection name, so two Google accounts are told apart.
+- The session list on the web now matches the app. Rows are taller, the agent mark is larger, and the title is larger. The title of an unread chat stays at full weight until you read it.
+- The time a chat last moved is shown before its unread mark, as it is in the app.
+- The web list opens on a folder. Before, it could open with no folder selected and nothing to say why.
+- Open findings are behind an "Updates" pill, on the phone and in the sidebar. They were a list section at the end of the chats.
+- The folder name above each group of chats is gone on the phone. The folder pills above the list say the same thing.
+- The profile picture at the top right is larger, and it no longer sits on a grey plate.
+- The model list no longer goes below the bottom of the screen. It fits the space under the composer and scrolls.
+- The agent sheet no longer opens as an empty card after you close it and open it again.
+- Expo previews name the next port to use when another project holds the one you asked for.
+- Production builds for iOS use Xcode 26.6.
+
+## September 23, 2026 - Expo Go links are limited to Metro ports (v0.6.114)
+
+- Expo Go links now work only for a Metro port from 8081 to 8099. An Expo Go link skips the owner sign-in, so it must not open other services on your Computer. `omg_expose_port` explains the range when an agent picks another port.
+
+## September 23, 2026 - Faster Expo previews that recover after sleep (v0.6.113)
+
+- New Expo projects start their preview with one command, `bash scripts/start-expo-preview.sh`. It waits for Metro, builds the iOS and web bundles ahead of time so the first Expo Go open is fast, and checks the sandbox proxy.
+- When a Computer sleeps and its preview stops, the preview card now says Stopped and offers Restart preview. The button asks the agent to start it again.
+- App-building agents ask one question at a time and wait for you to say what the app should do.
+- An OpenCode question no longer appears twice in the transcript.
+
+## September 23, 2026 - One navigation on a phone (v0.6.112)
+
+- The web app on a phone now has a side navigation. Chat, Bots, Schedules, Notifications, Artifacts, Computer, Board and Settings are all in it, and the bar at the bottom of the screen is gone.
+- The navigation opens from the button at the top left. It starts with the computer you are working on, and that button shows whether the computer is online.
+- The project rail no longer has an "All" pill. Press the selected folder again to see every folder.
+- The agent sheet no longer draws a block below itself, and it now changes smoothly between the agent list and the model list.
+- The iOS app's Coding agents settings have a Refresh models button. It asks your computer to read the model list from every provider again.
+- On a phone, the web composer now works like the iOS composer. Tap the agent icon to open the agent sheet. It holds the agent, the model, Fast mode, and the thinking level. Long-press Claude to choose a Claude profile.
+- The web composer on a phone is one row until you type. Then the text moves to its own line, and the controls move below it. It sends with a round arrow button, as on iOS.
+- A new session now belongs to the profile that you selected. Before, it belonged to the person that the session list was filtered to.
+
+## September 23, 2026 - Expo Go card and unstuck OpenCode answers (v0.6.111)
+
+- An Expo preview card now offers Open in Expo Go. On iOS it shows setup steps with an App Store button, and on web it shows a QR code.
+- An OpenCode session no longer stops when the iOS app answers its question with a chat message. The message now answers the open question.
+
+## September 22, 2026 - Claude Opus 5.5 in the model picker
+
+- Claude and Agent SDK sessions can select `claude-opus-5-5` by name. The `opus` alias also resolves to Opus 5.5.
+- The full id needs Claude Code 2.1.280 or newer. An older CLI rejects it, so use the `opus` alias until you update.
+
+## September 22, 2026 - Expo Go uses the sandbox proxy (v0.6.110)
+
+- `omg_expose_port` now prepares a short-lived `exps://` link for Expo Go on any Metro port.
+- Expo agents start one Metro server for web and device testing through the omg.dev sandbox proxy.
+- New Expo projects no longer use Expo tunnel, `exp.direct`, ngrok, or LAN exposure.
+
+## September 22, 2026 - Expo previews use the sandbox proxy first (v0.6.109)
+
+- Expo Web agents now expose the development server's actual port through the omg.dev preview card before trying any other route.
+- Expo tunnel stays a separate path for explicit native Expo Go device testing.
+
+## September 22, 2026 - Live previews support any port (v0.6.108)
+
+- `omg_expose_port` now accepts any valid TCP port from 1 through 65535.
+- Agents can expose the port that an existing web or Expo server already uses instead of restarting it on port 5173.
+
+## September 22, 2026 - App starters work on managed Computers (v0.6.107)
+
+- App, Website, API, and Image starters now create their chat workspace in a user-owned data folder.
+- A root-owned managed runtime folder no longer makes the starter fail with `cloud_runtime_unavailable`.
+
+## September 22, 2026 - Reliable mobile and web UI checks (v0.6.106)
+
+- The model picker now shows the xAI mark for Grok models.
+- Mobile and web behavior checks now follow the current navigation, plan, archive, finding-page, and transcript behavior.
+- Browser test state no longer leaks into later server tests. The full test suite passes again.
+
+## September 22, 2026 - A useful Expo app from the first message (v0.6.105)
+
+- New app projects start as a working todo app with Lucide icons and native Liquid Glass on supported iPhones.
+- The todo list uses the omg.dev database. The same data works in the hosted Expo Web app and in Expo Go.
+- The project skill now guides the agent through the web deploy, the Expo Go QR code, and the native API URL setup.
+- Apple Sign In stays optional because it requires an Apple Developer account, an app identifier, and a native development build.
+- Chats without a project are now in the web app, as they are on iOS. A plus tab leads the project rail. It scopes the list to chats with no folder, and an empty composer offers the Website, App, API, and Image starters.
+- A project that the agent creates during one of those chats now appears in the web project list without a page reload.
+- The Computer screenshot and read tools no longer fail when they run before anything opens a page.
+
+## September 22, 2026 - The composer keeps the agent you chose (v0.6.104)
+
+- The composer no longer replaces your selected agent when the agent list is still loading or is briefly incomplete. Your choice is restored as soon as that agent can run again.
+- A substituted agent is never saved as your new choice. Before, one incorrect read of the agent list could pin a device to an agent that nobody selected.
+- The opencode agent is now off by default. It stays a full agent, and one switch in Settings turns it on. Installing it from onboarding or from Settings also turns it on.
+- A hosted Computer now offers the omg agent when no account is connected. Before, only the opencode agent was offered, and it came with a DeepSeek model.
+- Your agent and model choice is now stored on the box. The choice follows you to a new phone, a reinstalled app, or a cleared browser.
+- The Computer Use MCP is now on for each new session. The desktop tools reach the agent with no manual configuration. The Settings switch still turns the server off.
+
+## September 22, 2026 - Managed Expo project starters (v0.6.103)
+
+- New Expo projects can start from a versioned Expo Router template with Expo Web, a server API route, and EAS build profiles already configured.
+- Expo Go device testing now uses a project-local tunnel dependency. A fresh Cloud Computer can show a QR code without installing a global tool.
+- The project builder skill verifies Expo Web first, then offers the temporary Expo Go tunnel for real device testing.
+- Website login requests and agent questions now appear as inline message cards with consistent corners.
+
+## September 22, 2026 - Reliable hosted agent startup (v0.6.102)
+
+- Hosted omg agents now allow enough time for the bundled MCP tools to start on a cold Computer.
+- The opencode agent and the omg agent no longer stop to ask permission to edit a file, run a command, fetch a web page, or read an external directory. A headless session does not wait for an answer that nobody is there to give.
+- The loop guard stays on. A tool call that repeats with the same input still asks before it continues.
+
+## September 22, 2026 - Hosted omg agent tools (v0.6.101)
+
+- DeepSeek Flash and other omg models now receive the omg.dev MCP tools in hosted sandboxes, including live port previews.
+
+## September 22, 2026 - Headless Expo preview startup (v0.6.100)
+
+- Expo Web previews no longer try to open a desktop browser inside a headless Cloud Computer.
+
+## September 22, 2026 - Live sandbox project previews (v0.6.99)
+
+- Agents can now expose a live web or Expo Web server from a Cloud Computer as a private preview card in the session.
+- The card opens inside the web app or iOS app, and it also offers an external browser action.
+- New project skills use the portable local Expo dependency and do not depend on Xcode, a simulator, SSH hosts, or omg.dev repository paths.
+
 ## September 21, 2026 - Current website login request (v0.6.98)
 
 - Website login cards now select the newest request by creation time. An older failed transfer can no longer hide a newer pending login request when the server returns them out of order.

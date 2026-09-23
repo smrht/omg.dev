@@ -26,6 +26,12 @@ export interface CatalogEntry {
    * the endpoint instead of trusting the catalog.
    */
   authKind: string | null;
+  /** Sign in with this provider's pre-registered client (./oauth-apps.ts). */
+  oauthApp?: string;
+  /** A connector omg implements itself (./native.ts); added as `kind: "native"`. */
+  native?: string;
+  /** Shown above the searchable catalog. Only curated entries set it. */
+  recommended?: boolean;
 }
 
 const TTL_MS = 60 * 60 * 1000;
@@ -110,4 +116,55 @@ export function searchCatalog(entries: CatalogEntry[], query: string, limit = 50
 
 export function resetCatalogCacheForTests(): void {
   cache = null;
+}
+
+/**
+ * Entries omg curates and tests itself. Each one is a connector omg runs
+ * natively, so it works end to end rather than depending on a remote server.
+ *
+ * Google's own MCP servers (gmailmcp.googleapis.com and the rest) are not
+ * listed: they answer tool calls only for Cloud projects enrolled in the
+ * Workspace Developer Preview Program. Gmail and Drive run natively over the
+ * REST API instead and sign in against the MCP server's resource metadata for
+ * scopes.
+ */
+export const RECOMMENDED_CATALOG: CatalogEntry[] = [
+  {
+    id: "omg/gmail",
+    slug: "gmail",
+    name: "Gmail",
+    description: "Search, read, draft, send, label and trash mail.",
+    kind: "native",
+    categories: ["google", "email"],
+    connectUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+    icon: "https://fonts.gstatic.com/s/i/productlogos/gmail_2020q4/v8/web-96dp/logo_gmail_2020q4_color_2x_web_96dp.png",
+    domain: "mail.google.com",
+    needsOAuth: true,
+    authKind: "oauth",
+    oauthApp: "google",
+    native: "gmail",
+    recommended: true,
+  },
+  {
+    id: "omg/google-drive",
+    slug: "google-drive",
+    name: "Google Drive",
+    description: "Search, read, create and trash files. Docs, Sheets and Slides read as text.",
+    kind: "native",
+    categories: ["google", "files"],
+    connectUrl: "https://drivemcp.googleapis.com/mcp/v1",
+    icon: "https://fonts.gstatic.com/s/i/productlogos/drive_2020q4/v8/web-96dp/logo_drive_2020q4_color_2x_web_96dp.png",
+    domain: "drive.google.com",
+    needsOAuth: true,
+    authKind: "oauth",
+    oauthApp: "google",
+    native: "google-drive",
+    recommended: true,
+  },
+];
+
+/** The curated entries first, then the index, without a second copy of an endpoint. */
+export function withRecommended(entries: CatalogEntry[]): CatalogEntry[] {
+  const curated = new Set(RECOMMENDED_CATALOG.map((e) => e.connectUrl));
+  return [...RECOMMENDED_CATALOG, ...entries.filter((e) => !curated.has(e.connectUrl))];
 }

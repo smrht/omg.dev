@@ -4,7 +4,7 @@ import { DEFAULT_MAX_BOT_SCHEDULES } from "./settings.ts";
 // Bump whenever an agent-facing omg.dev capability or its operating guidance
 // changes. Managed sessions persist the value they launched with, which lets
 // the UI identify long-lived sessions whose MCP/tool catalog predates a ship.
-export const OMG_CAPABILITY_VERSION = "2026-09-21.3";
+export const OMG_CAPABILITY_VERSION = "2026-09-23.1";
 
 export const OMG_CAPABILITIES = [
   {
@@ -30,10 +30,16 @@ export const OMG_CAPABILITIES = [
       "This is how finished work reaches the human — a session that never ships is invisible. Post a headline, a tweet-length result and the strongest evidence. Posting does not close the session. Never ship planning, partial, or blocked work.",
   },
   {
-    tool: "omg_deploy / omg_apps / omg_whoami / omg_app_visibility",
+    tool: "omg_deploy / omg_deploy_status / omg_apps / omg_whoami / omg_app_visibility",
     useWhen: "A project folder must be published to omg Infra, listed, or have its URL visibility changed.",
     guidance:
-      "These verbs inherit the runtime Cloud credential. A local box uses ~/.omg/credentials.json. A Cloud Computer gets the binding token from Infra. Do not ask the user to paste a token. omg_ship is a feed post, not a deploy.",
+      "These verbs inherit the runtime Cloud credential. A local box uses ~/.omg/credentials.json. A Cloud Computer gets the binding token from Infra. Do not ask the user to paste a token. omg_deploy waits at most 45 seconds; when it returns pending: true, call omg_deploy_status with the slug until the build is ready or failed, and do not deploy again. omg_ship is a feed post, not a deploy.",
+  },
+  {
+    tool: "omg_expose_port",
+    useWhen: "A live HTTP development server in an omg.dev Cloud Computer should appear as a preview card.",
+    guidance:
+      "For web previews, start one server on 0.0.0.0 and expose its exact port. For Expo Go, choose a free Metro port and call with expoGo:true before Metro starts. In an Expo template project, start Metro with `bash scripts/start-expo-preview.sh <expoGo.proxyUrl> <port>`; elsewhere start Metro with EXPO_PACKAGER_PROXY_URL set to expoGo.proxyUrl. Then give the user expoGo.url. Do not use Expo tunnel, exp.direct, ngrok, or LAN exposure.",
   },
   {
     tool: "omg_display_image / omg_display_video / omg_display_file",
@@ -90,7 +96,7 @@ export const OMG_MCP_INSTRUCTIONS = [
   "In a task session, publish every verified result with omg_ship; work that is never shipped never reaches the human. A named bot conversation runs under its own bot runtime contract instead: it replies in chat, never ships, and never closes.",
   "Decide autonomously; use omg_input only for a genuinely irreversible, risky, or ambiguous decision. Use omg.dev-managed delegation only when delegation is explicitly requested.",
   "Recurring scheduled work belongs to the auto agent tools (omg_list_auto_agents, omg_compose_auto_agent, omg_save_auto_agent, omg_run_auto_agent, omg_list_findings).",
-  "Hosted apps use omg_deploy, omg_apps, omg_whoami, and omg_app_visibility; the runtime supplies the Cloud credential.",
+  "Hosted apps use omg_deploy, omg_deploy_status, omg_apps, omg_whoami, and omg_app_visibility. For a live Cloud Computer preview, use omg_expose_port. For Expo Go, prepare the Metro port with expoGo:true and use the returned sandbox proxy URL. The runtime supplies the Cloud credential.",
   `Session ids are returned in short form (${SHORT_SESSION_ID_LENGTH}-char prefix, like a git short sha). Pass them back exactly as given — any unambiguous prefix resolves to the full id.`,
 ].join(" ");
 

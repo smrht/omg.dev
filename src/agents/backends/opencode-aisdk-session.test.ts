@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   answersForIndex,
+  answersForText,
   isTrustedUploadPermission,
   managedOpencodeServerOptions,
   pendingToPrompt,
@@ -9,6 +10,7 @@ import {
   sessionErrorText,
   shouldPublishDraftPart,
   toolPartMessages,
+  trustAllPermissionEnv,
 } from "./opencode-aisdk-session.ts";
 
 describe("managed OpenCode server permissions", () => {
@@ -130,6 +132,30 @@ describe("opencode question prompt helpers", () => {
   });
 });
 
+describe("opencode answer from a sent message", () => {
+  // The exact two-question shape that stranded an App session on iOS.
+  const appType = {
+    id: "que_app",
+    questions: [
+      { question: "What kind of app would you like to build?", header: "App type", options: [
+        { label: "Mobile app (Expo)" }, { label: "Website / web app" }, { label: "Web API / backend" },
+      ] },
+      { question: "Roughly, what should this app do?", header: "Purpose", options: [
+        { label: "I'll describe it now" },
+      ] },
+    ],
+  };
+
+  test("a sent option label answers with that option", () => {
+    expect(answersForText(appType, "Mobile app (Expo)")).toEqual([["Mobile app (Expo)"], ["I'll describe it now"]]);
+    expect(answersForText(appType, "  website / WEB app ")).toEqual([["Website / web app"], ["I'll describe it now"]]);
+  });
+
+  test("other text is a custom answer to the first question", () => {
+    expect(answersForText(appType, "A habit tracker")).toEqual([["A habit tracker"], ["I'll describe it now"]]);
+  });
+});
+
 describe("opencode permission prompt helpers", () => {
   test("trusts only external-directory access scoped to LFG uploads", () => {
     expect(
@@ -191,6 +217,20 @@ describe("opencode tool part streaming", () => {
     }
     return rows;
   };
+
+  test("leaves the question call to the question row, keeps its result", () => {
+    const emitted = new Set<string>();
+    const running = toolPartMessages(
+      { id: "prt_q", type: "tool", tool: "question", state: { status: "running", input: { questions: [{ question: "App type?" }] } } },
+      "fallback", emitted,
+    );
+    expect(running).toEqual([]);
+    const done = toolPartMessages(
+      { id: "prt_q", type: "tool", tool: "question", state: { status: "completed", input: { questions: [] }, output: "User has answered" } },
+      "fallback", emitted,
+    );
+    expect(done.map((row) => row.id)).toEqual(["prt_q:result"]);
+  });
 
   test("skips the empty pending snapshot", () => {
     expect(feed([{ status: "pending", input: {} }])).toEqual([]);
@@ -279,5 +319,25 @@ describe("opencode session.error handling", () => {
 test("omg model preserves the nested router id in the OpenCode request", () => {
   expect(opencodePromptBody("omg/deepseek/deepseek-v4-flash-0731", undefined, "hello").model).toEqual({
     providerID: "omg", modelID: "deepseek/deepseek-v4-flash-0731",
+  });
+});
+
+describe("opencode permission posture", () => {
+  test("trusts every capability, but keeps the repeat-loop guard", () => {
+    expect(JSON.parse(trustAllPermissionEnv({}))).toEqual({
+      edit: "allow",
+      bash: "allow",
+      webfetch: "allow",
+      doom_loop: "ask",
+      external_directory: "allow",
+    });
+  });
+
+  test("keeps an operator-supplied OPENCODE_PERMISSION", () => {
+    expect(trustAllPermissionEnv({ OPENCODE_PERMISSION: '{"bash":"ask"}' })).toBe('{"bash":"ask"}');
+  });
+
+  test("replaces a blank OPENCODE_PERMISSION", () => {
+    expect(JSON.parse(trustAllPermissionEnv({ OPENCODE_PERMISSION: "  " })).edit).toBe("allow");
   });
 });

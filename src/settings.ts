@@ -28,11 +28,12 @@ export type GlobalSettings = {
   // rotates when a human applies a configuration change, and a long-lived
   // conversation eventually fails at the wall the way it does today.
   botAutoCompactionEnabled: boolean;
-  // Expose the Computer Use MCP to agents on this box. Off by default and
-  // deliberately opt-in: its tools drive a real desktop that only exists where
-  // someone installed the X stack, and advertising them where there is no
-  // screen would offer an agent capabilities it cannot use. Local only -- this
-  // never travels to a hosted Computer.
+  // Expose the Computer Use MCP to agents on this box. ON by default: every
+  // box this runtime ships on now has a Computer tab, and the common case is
+  // an agent that needs the desktop and browser. A box with no X stack still
+  // gets the tools; computer_start is the one that reports the missing stack,
+  // and the owner can turn the whole server off here. Local only -- this never
+  // travels to a hosted Computer.
   computerMcpEnabled: boolean;
   // Share of the model's context window at which that rotation fires. Bounded
   // well away from both ends: see sanitizeBotCompactionThreshold for why 40 and
@@ -64,6 +65,17 @@ export type GlobalSettings = {
   defaultAgent: string;
   // Model to pair with defaultAgent. "" means the catalog default.
   defaultModel: string;
+  // The agent + model the composer last LAUNCHED on this box, written only
+  // when the person picked it themselves. Not a switch and not edited in
+  // Settings: it is the cross-device memory of a choice that used to live
+  // only in one browser's localStorage, so a new phone, a reinstalled app or
+  // a cleared webview started over on whatever the roster happened to offer
+  // first. Distinct from defaultAgent on purpose — that one is an explicit
+  // preference the owner sets, and silently rewriting it from the composer
+  // would also change what `showComposerAgents: false` forces every session
+  // onto. "" means nothing has been launched yet.
+  lastAgent: string;
+  lastModel: string;
   // View preferences. All on by default (everyone sees everything). Off
   // hides the piece of UI for every viewer of this box; a role system will
   // decide per viewer later, so these are plain box-wide switches for now.
@@ -190,8 +202,9 @@ function sanitize(input: Partial<GlobalSettings> | null | undefined): GlobalSett
     ? input.customInstructions.trim().slice(0, CUSTOM_INSTRUCTIONS_MAX_LENGTH)
     : "";
   const botAutoCompactionEnabled = input?.botAutoCompactionEnabled !== false;
-  // Note the polarity: unlike bot auto-compaction, this defaults OFF.
-  const computerMcpEnabled = input?.computerMcpEnabled === true;
+  // Missing means on: a new box offers the Computer Use MCP without anyone
+  // opting in. Only an explicit stored `false` turns it off.
+  const computerMcpEnabled = input?.computerMcpEnabled !== false;
   const botCompactionThresholdPercent = sanitizeBotCompactionThreshold(
     input?.botCompactionThresholdPercent,
   );
@@ -201,6 +214,13 @@ function sanitize(input: Partial<GlobalSettings> | null | undefined): GlobalSett
     : "";
   const defaultModel = typeof input?.defaultModel === "string"
     ? input.defaultModel.trim().slice(0, DEFAULT_MODEL_MAX_LENGTH)
+    : "";
+  const lastAgent = typeof input?.lastAgent === "string" &&
+      /^[a-z0-9-]*$/i.test(input.lastAgent.trim())
+    ? input.lastAgent.trim().slice(0, DEFAULT_AGENT_KEY_MAX_LENGTH)
+    : "";
+  const lastModel = typeof input?.lastModel === "string"
+    ? input.lastModel.trim().slice(0, DEFAULT_MODEL_MAX_LENGTH)
     : "";
   // Missing means on: a box that predates these keys must not lose UI.
   const showSidebarAgentIcons = input?.showSidebarAgentIcons !== false;
@@ -232,6 +252,8 @@ function sanitize(input: Partial<GlobalSettings> | null | undefined): GlobalSett
     customInstructions,
     defaultAgent,
     defaultModel,
+    lastAgent,
+    lastModel,
     showSidebarAgentIcons,
     showSidebarFavicons,
     showSessionAgentIcons,
@@ -351,6 +373,8 @@ export async function setGlobalSettings(patch: Partial<GlobalSettings>): Promise
     write.run("customInstructions", JSON.stringify(next.customInstructions), now);
     write.run("defaultAgent", JSON.stringify(next.defaultAgent), now);
     write.run("defaultModel", JSON.stringify(next.defaultModel), now);
+    write.run("lastAgent", JSON.stringify(next.lastAgent), now);
+    write.run("lastModel", JSON.stringify(next.lastModel), now);
     write.run("showSidebarAgentIcons", JSON.stringify(next.showSidebarAgentIcons), now);
     write.run("showSidebarFavicons", JSON.stringify(next.showSidebarFavicons), now);
     write.run("showSessionAgentIcons", JSON.stringify(next.showSessionAgentIcons), now);

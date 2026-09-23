@@ -16,7 +16,7 @@ import {
 import { PATHS, appVersion, installInfo, localServeBaseUrl } from "../config.ts";
 import { desktopRuntimeReadyPayload } from "../desktop-parent.ts";
 import { handleServerAccessRequest } from "../server-access.ts";
-import { createCloudAccount } from "../cloud-account.ts";
+import { CloudAccountError, createCloudAccount } from "../cloud-account.ts";
 import { generateSessionTitle } from "../session-auto-title.ts";
 import { buildContinueSessionPrompt } from "../session-continue-prompt.ts";
 import { regenerateSessionTitle } from "../session-title-regenerate.ts";
@@ -46,6 +46,7 @@ import { compressedAssetResponse, maybeCompressResponse } from "../http-compress
 import { serveOmgMcpRequest, serveComputerMcpRequest } from "../mcp-http.ts";
 import { resolveCaller } from "../policy/caller.ts";
 import { createBrowserLoginService } from "../computer/login.ts";
+import { createProjectPreviewService } from "../project-previews.ts";
 import { importBrowserLogin } from "../computer/browser.ts";
 import {
   configureConnectors,
@@ -65,6 +66,15 @@ import {
   resetConnector,
   loadCatalog,
   searchCatalog,
+  withRecommended,
+  RECOMMENDED_CATALOG,
+  getOAuthApp,
+  saveOAuthApp,
+  clearOAuthApp,
+  isOAuthAppProvider,
+  oauthAppStatuses,
+  callbackUrl as connectorCallbackUrl,
+  recordConnectorAccount,
   startConnectorOAuth,
   completeConnectorOAuth,
   hasTokens as hasOAuthTokens,
@@ -77,8 +87,12 @@ import {
   pendingConnectorApprovalByAsk,
   registerPendingConnectorApproval,
   resolveConnectorApproval,
+  connectorsForMember,
+  listConnectorsForAdmin,
+  emitConnectorsChanged,
 } from "@omg-dev/connectors";
 import { enforceRole } from "../policy/mcp-filter.ts";
+import { withConnectorGrants } from "../policy/connector-grants.ts";
 import { createRole, deleteRole, getRole, listRoles, roleEgress, roleForUser, roleSandbox, updateRole, OWNER_ROLE_ID, VIEW_TOGGLE_KEYS } from "../policy/roles.ts";
 import { DEFAULT_ALLOW_HOSTS, startEgressProxy, type EgressProxy } from "../sandbox/egress-proxy.ts";
 import { sessionToken, verifySessionToken, boxSecretMaterial } from "../policy/session-token.ts";
@@ -451,6 +465,7 @@ import {
   prepareProjectFolder,
   useProjectFolder,
 } from "../repos-store.ts";
+import { isProjectTemplate } from "../project-starter.ts";
 import { projectName, reposRoot } from "../projects.ts";
 import { listConfiguredRepos } from "../repo-list.ts";
 import { runExecCommand, clampExecTimeout, MAX_EXEC_TIMEOUT_MS } from "../exec.ts";
@@ -491,11 +506,14 @@ import {
   getCodingAgentAuth,
   getCodingAgentSetupLog,
   loginCommandFor,
+  markCodingAgentRequested,
   pendingCodingAgentLogins,
   registerClaudeMcpForAccount,
   runCodingAgentSetup,
   runCodingAgentSetups,
   runCodingAgentUpdate,
+  runCodingAgentUpdates,
+  updatableCodingAgentKinds,
   runSetupAction,
   setCodingAgentVisibility,
   startCodingAgentAuth,
@@ -4006,6 +4024,24 @@ export async function cmdServe() {
     localName: () => getGlobalSettingsSync().machineName,
     renameLocal: async (machineName) => { await setGlobalSettings({ machineName }); },
   });
+  const projectPreview = createProjectPreviewService({
+    session: async (id) => {
+      const row = (await listSessions()).find(s => s.sessionId === id || s.nativeSessionId === id);
+      return row?.sessionId ? { id: row.sessionId, owner: row.assignedUser ?? null } : null;
+    },
+    viewer: req => botViewerFromRequest(req, new URL(req.url).searchParams.get("user")).identity,
+    resolve: async (port, options) => {
+      if (!cloudAccount.status().inherited) {
+        throw new CloudAccountError("Live sandbox previews are available inside an omg.dev Cloud Computer.", 409);
+      }
+      const response = await cloudAccount.cloudFetch(`/api/cli/computer/preview?port=${port}${options?.expoGo ? "&expoGo=1" : ""}`);
+      const body = await response.json().catch(() => ({})) as { url?: string; expoGoUrl?: string; error?: string };
+      if (!response.ok || !body.url) {
+        throw new CloudAccountError(body.error || `Could not expose port ${port}.`, response.status || 502);
+      }
+      return { url: body.url, expoGoUrl: body.expoGoUrl };
+    },
+  });
   const cloudMachineProxy = createCloudMachineProxy({ account: cloudAccount });
   const server = Bun.serve<AppSocketData>({
     port: PORT,
@@ -4341,7 +4377,9 @@ export async function cmdServe() {
             return { held: false };
           }
         };
-        return await enforceRole(req, caller.role, { namespace: "connectors", split: "__" }, (r) =>
+        // A connection given to this role (or the team) is its own permission.
+        const role = withConnectorGrants(caller.role, connectorsForMember(owner, caller.role.id));
+        return await enforceRole(req, role, { namespace: "connectors", split: "__" }, (r) =>
           serveConnectorsMcpRequest(r, owner, gate, caller.role.id),
         );
       }
@@ -4384,6 +4422,9 @@ export async function cmdServe() {
 
       if (path === "/api/browser-login" || path.startsWith("/api/browser-login/")) {
         return await browserLogin(req);
+      }
+      if (path === "/api/project-preview") {
+        return await projectPreview(req);
       }
 
       // ---- the computer: a shared desktop, streamed and controllable ----
@@ -4440,8 +4481,11 @@ export async function cmdServe() {
         const user = url.searchParams.get("user");
         const owner = ownerForUser(user);
         const roleId = roleForUser(user).id;
+        // The owner manages every role's and the team's connections, so they
+        // all stay listed whatever the scope picker last added.
+        const rows = roleId === OWNER_ROLE_ID ? listConnectorsForAdmin(owner) : listConnectors(owner, roleId);
         return json({
-          connectors: listConnectors(owner, roleId).map((c) => ({ ...publicView(c), oauthConnected: hasOAuthTokens(c.id) })),
+          connectors: rows.map((c) => ({ ...publicView(c), oauthConnected: hasOAuthTokens(c.id) })),
         });
       }
 
@@ -4463,8 +4507,34 @@ export async function cmdServe() {
             (typeof body?.state === "string" && body.state.length >= 16 ? body.state : undefined) ??
             oauthRelayState();
           const result = await startConnectorOAuth(connector, base, state);
+          // A connector on a pre-registered app that the box has no client
+          // for yet: the client shows the setup form instead of an error.
+          if (!result.ok && result.needsOAuthApp) return json({ error: result.error, needsOAuthApp: result.needsOAuthApp }, { status: 409 });
           if (!result.ok) return err(502, result.error);
           return json(result);
+        }
+      }
+      // Pre-registered OAuth clients (Google has no dynamic registration).
+      // One per provider per box, stored encrypted. `redirectUri` is the
+      // value the owner registers with the client, the same base
+      // oauth/start uses for this request.
+      if (path === "/api/connectors/oauth-apps" && req.method === "GET") {
+        return json({ apps: oauthAppStatuses(getOAuthApp), redirectUri: connectorCallbackUrl(oauthRedirectBase(req)) });
+      }
+      {
+        const m = path.match(/^\/api\/connectors\/oauth-apps\/([a-z0-9-]+)$/);
+        if (m && !isOAuthAppProvider(m[1]!)) return err(404, `unknown OAuth app "${m[1]}"`);
+        if (m && req.method === "PUT") {
+          const body = (await req.json().catch(() => null)) as { clientId?: unknown; clientSecret?: unknown } | null;
+          const clientId = typeof body?.clientId === "string" ? body.clientId.trim() : "";
+          const clientSecret = typeof body?.clientSecret === "string" ? body.clientSecret.trim() : "";
+          if (!clientId) return err(400, "clientId is required");
+          saveOAuthApp(m[1]!, { clientId, clientSecret });
+          return json({ apps: oauthAppStatuses(getOAuthApp) });
+        }
+        if (m && req.method === "DELETE") {
+          clearOAuthApp(m[1]!);
+          return json({ apps: oauthAppStatuses(getOAuthApp) });
         }
       }
       if (path === "/api/connectors/oauth/callback" && req.method === "GET") {
@@ -4473,7 +4543,10 @@ export async function cmdServe() {
         const errorParam = url.searchParams.get("error");
         if (errorParam) return oauthClosePage(`Authorization was cancelled: ${errorParam}`, false);
         const result = code && state ? await completeConnectorOAuth(state, code, getConnector) : { ok: false as const, error: "missing code or state" };
-        if (result.ok) await resetConnector(result.connectorId);
+        if (result.ok) {
+          await resetConnector(result.connectorId);
+          await recordConnectorAccount(result.connectorId);
+        }
         return oauthClosePage(result.ok ? "Connected. You can close this window." : `Could not connect: ${result.error}`, result.ok);
       }
       if (path === "/api/connectors/oauth/callback" && req.method === "POST") {
@@ -4483,6 +4556,7 @@ export async function cmdServe() {
         const result = await completeConnectorOAuth(body.state, body.code, getConnector);
         if (!result.ok) return err(502, result.error);
         await resetConnector(result.connectorId);
+        await recordConnectorAccount(result.connectorId);
         return json({ ok: true });
       }
       {
@@ -4496,7 +4570,7 @@ export async function cmdServe() {
       }
       if (path === "/api/connectors" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as
-          | { user?: string; org?: boolean; role?: string; name?: string; endpoint?: string; headers?: Record<string, string>; catalogSlug?: string; icon?: string; oauth?: boolean; requireApproval?: boolean }
+          | { user?: string; org?: boolean; role?: string; name?: string; endpoint?: string; headers?: Record<string, string>; catalogSlug?: string; icon?: string; oauth?: boolean; oauthApp?: string; native?: string; requireApproval?: boolean }
           | null;
         if (!body) return err(400, "invalid JSON body");
         // Three levels: `org` is the team, `role` is every member of that
@@ -4512,6 +4586,8 @@ export async function cmdServe() {
           catalogSlug: body.catalogSlug,
           icon: body.icon,
           oauth: body.oauth,
+          oauthApp: typeof body.oauthApp === "string" ? body.oauthApp : undefined,
+          native: typeof body.native === "string" ? body.native : undefined,
           requireApproval: body.requireApproval,
         });
         if (!result.ok) return err(400, result.error);
@@ -4533,10 +4609,17 @@ export async function cmdServe() {
       }
       if (path === "/api/connectors/catalog" && req.method === "GET") {
         try {
-          const entries = await loadCatalog(url.searchParams.get("refresh") === "1");
           const q = url.searchParams.get("q") ?? "";
           const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 50, 1), 200);
-          return json({ total: entries.length, results: searchCatalog(entries, q, limit) });
+          // The curated entries need no network, so they stay offered when
+          // the public index is unreachable.
+          const entries = await loadCatalog(url.searchParams.get("refresh") === "1")
+            .then(withRecommended)
+            .catch((e: unknown) => {
+              if (q.trim()) throw e;
+              return RECOMMENDED_CATALOG;
+            });
+          return json({ total: entries.length, results: searchCatalog(entries, q, limit), recommended: RECOMMENDED_CATALOG });
         } catch (e) {
           return err(502, e instanceof Error ? e.message : "could not load the catalog");
         }
@@ -4630,6 +4713,8 @@ export async function cmdServe() {
           if (!body) return err(400, "invalid JSON body");
           const result = updateRole(m[1]!, body);
           if (!result.ok) return err(result.error === "role not found" ? 404 : 400, result.error);
+          // New rules change which connector tools pass for running sessions.
+          emitConnectorsChanged();
           return json({ role: result.role });
         }
         if (m && req.method === "DELETE") {
@@ -4667,6 +4752,7 @@ export async function cmdServe() {
           if (!row) return err(404, "session not found");
           patchManaged(row.tmuxName, { role: requested === OWNER_ROLE_ID ? undefined : requested });
           invalidateListSessionsCache();
+          emitConnectorsChanged();
           return json({ ok: true, role: requested });
         }
       }
@@ -5456,6 +5542,25 @@ a{color:#60a5fa}
               return err(400, `defaultModel must be a string of ${DEFAULT_MODEL_MAX_LENGTH} characters or fewer`);
             patch.defaultModel = b.defaultModel;
           }
+          // The composer's own memory of the last agent the person launched.
+          // Same shapes as defaultAgent/defaultModel, separate field: see the
+          // note on lastAgent in settings.ts for why it does not write the
+          // owner's explicit default.
+          if (b?.lastAgent !== undefined) {
+            if (
+              typeof b.lastAgent !== "string" ||
+              b.lastAgent.length > DEFAULT_AGENT_KEY_MAX_LENGTH ||
+              !/^[a-z0-9-]*$/i.test(b.lastAgent)
+            ) {
+              return err(400, "lastAgent must be an agent key (letters, digits, dashes) or empty");
+            }
+            patch.lastAgent = b.lastAgent;
+          }
+          if (b?.lastModel !== undefined) {
+            if (typeof b.lastModel !== "string" || b.lastModel.length > DEFAULT_MODEL_MAX_LENGTH)
+              return err(400, `lastModel must be a string of ${DEFAULT_MODEL_MAX_LENGTH} characters or fewer`);
+            patch.lastModel = b.lastModel;
+          }
           // One explicit branch per switch: settings-validation.test.ts reads
           // this handler for a `patch.<field> =` per GlobalSettings key.
           if (b?.showSidebarAgentIcons !== undefined) {
@@ -5670,12 +5775,30 @@ a{color:#60a5fa}
           }
           const kinds = [...new Set(b.kinds)];
           if (!kinds.every(isCodingAgentKind)) return err(404, "unknown coding agent");
+          // Asking for an agent by name is the opt-in for a kind that needs one.
+          for (const kind of kinds) await markCodingAgentRequested(kind);
           void runCodingAgentSetups(kinds).catch((e) =>
             console.error(`[coding-agents] batch setup failed:`, e),
           );
           const agents = await listCodingAgents();
           return json({ ok: true, agents, models: listModelCatalog(agents) });
         }
+      }
+      // One tap for every installed agent. Starts the run and answers at once;
+      // clients watch `setupRunning` on the agents to see it finish. Sits
+      // above the `/api/coding-agents/:kind` POST, which would take the path.
+      if (path === "/api/coding-agents/update-all" && req.method === "POST") {
+        const current = await listCodingAgents();
+        if (current.some((agent) => agent.status.setupRunning)) {
+          return err(409, "an agent setup or update is already running");
+        }
+        const kinds = updatableCodingAgentKinds(current);
+        if (!kinds.length) return err(400, "no installed coding agent can be updated");
+        void runCodingAgentUpdates(kinds).catch((e) =>
+          console.error("[coding-agents] update-all failed:", e),
+        );
+        const agents = await listCodingAgents();
+        return json({ ok: true, kinds, agents, models: listModelCatalog(agents) });
       }
       {
         const m = path.match(/^\/api\/coding-agents\/([a-z0-9_-]+)$/);
@@ -5694,6 +5817,7 @@ a{color:#60a5fa}
         if (m && req.method === "POST") {
           const kind = m[1];
           if (!isCodingAgentKind(kind)) return err(404, "unknown coding agent");
+          await markCodingAgentRequested(kind);
           void runCodingAgentSetup(kind).catch((e) =>
             console.error(`[coding-agents] ${kind} setup failed:`, e),
           );
@@ -8013,12 +8137,17 @@ a{color:#60a5fa}
         const b = (await req.json().catch(() => null)) as {
           parent?: unknown;
           name?: unknown;
+          template?: unknown;
         } | null;
-        if (typeof b?.name !== "string" || (b.parent !== undefined && typeof b.parent !== "string")) {
-          return err(400, "name is required; parent must be a string when provided");
+        if (
+          typeof b?.name !== "string" ||
+          (b.parent !== undefined && typeof b.parent !== "string") ||
+          (b.template !== undefined && !isProjectTemplate(b.template))
+        ) {
+          return err(400, "name is required; parent must be a string and template must be blank or expo when provided");
         }
         try {
-          const repo = await createProjectFolder(b.parent, b.name);
+          const repo = await createProjectFolder(b.parent, b.name, b.template ?? "blank");
           return json({ repo, repos: await listRepos() });
         } catch (e) {
           return err(400, e instanceof Error ? e.message : String(e));

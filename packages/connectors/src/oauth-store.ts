@@ -32,13 +32,27 @@ export interface ConnectorOAuthState {
   connectorId: string;
   clientInformation?: OAuthClientInfo;
   tokens?: OAuthTokenSet;
+  /** When `tokens` was stored, so `expires_in` can be read as an expiry time. */
+  tokensSavedAt?: number;
   /** PKCE verifier for an in-flight authorization, keyed by state below. */
   pending?: { state: string; codeVerifier: string; redirectUri: string; createdAt: number };
+}
+
+/**
+ * A pre-registered OAuth client for a provider that does not support dynamic
+ * client registration (Google). One per provider per box, shared by every
+ * connector that names it, so Gmail, Calendar and Drive use one client.
+ */
+export interface OAuthApp {
+  clientId: string;
+  clientSecret?: string;
+  updatedAt: number;
 }
 
 interface FileShape {
   version: 1;
   byConnector: Record<string, ConnectorOAuthState>;
+  apps?: Record<string, OAuthApp>;
 }
 
 function filePath(): string {
@@ -77,7 +91,7 @@ function read(): FileShape {
     const dec = decrypt(readFileSync(filePath(), "utf8"));
     if (!dec) return { version: 1, byConnector: {} };
     const parsed = JSON.parse(dec) as Partial<FileShape>;
-    return { version: 1, byConnector: parsed.byConnector ?? {} };
+    return { version: 1, byConnector: parsed.byConnector ?? {}, apps: parsed.apps ?? {} };
   } catch {
     return { version: 1, byConnector: {} };
   }
@@ -105,7 +119,7 @@ export function saveTokens(connectorId: string, tokens: OAuthTokenSet): void {
   const file = read();
   const cur = file.byConnector[connectorId] ?? { connectorId };
   // A completed authorization clears the pending PKCE material.
-  file.byConnector[connectorId] = { ...cur, tokens, pending: undefined };
+  file.byConnector[connectorId] = { ...cur, tokens, tokensSavedAt: Date.now(), pending: undefined };
   write(file);
 }
 
@@ -129,4 +143,20 @@ export function clearOAuth(connectorId: string): void {
 
 export function hasTokens(connectorId: string): boolean {
   return !!read().byConnector[connectorId]?.tokens?.access_token;
+}
+
+export function getOAuthApp(provider: string): OAuthApp | undefined {
+  return read().apps?.[provider];
+}
+
+export function saveOAuthApp(provider: string, app: { clientId: string; clientSecret?: string }): void {
+  const file = read();
+  file.apps = { ...(file.apps ?? {}), [provider]: { clientId: app.clientId, clientSecret: app.clientSecret || undefined, updatedAt: Date.now() } };
+  write(file);
+}
+
+export function clearOAuthApp(provider: string): void {
+  const file = read();
+  if (file.apps) delete file.apps[provider];
+  write(file);
 }
