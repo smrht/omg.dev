@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   accessibleModelsForAgent,
+  AISDK_MODELS,
+  CLAUDE_MODELS,
   CODEX_AISDK_MODELS,
   CODEX_MODELS,
+  curateCodexModels,
+  withCodexMuseModels,
   curateCursorModels,
   curateOpenCodeModels,
   defaultModelForAgent,
@@ -308,6 +312,29 @@ describe("curateCursorModels", () => {
   });
 });
 
+describe("Codex model catalog", () => {
+  test("keeps entitlement-proven Astra ahead of a stale discovery result", () => {
+    expect(curateCodexModels(["gpt-5.6-sol"])).toEqual(["gpt-6-astra", "gpt-5.6-sol"]);
+  });
+
+  test("muse-spark joins the codex-aisdk list only while a Muse subscription credential exists", () => {
+    expect(withCodexMuseModels(["gpt-6-astra", "gpt-5.6-sol"], true)).toEqual(["gpt-6-astra", "gpt-5.6-sol", "muse-spark-1.3", "muse-spark-1.2"]);
+    expect(withCodexMuseModels(["gpt-6-astra", "gpt-5.6-sol"], false)).toEqual(["gpt-6-astra", "gpt-5.6-sol"]);
+    expect(withCodexMuseModels(["muse-spark-1.3"], true)).toEqual(["muse-spark-1.3", "muse-spark-1.2"]);
+  });
+
+  test.each(["codex", "codex-aisdk"] as const)(
+    "%s offers Astra while Sol remains the default",
+    (key) => {
+      const item = listModelCatalog([codingAgent(key, true)]).find((entry) => entry.key === key);
+
+      expect(item?.models[0]).toBe("gpt-6-astra");
+      expect(item?.models).toContain("gpt-6-astra");
+      expect(item?.defaultModel).toBe("gpt-5.6-sol");
+    },
+  );
+});
+
 test("grok catalog defaults to Grok 4.7 and keeps the fast variant", async () => {
   const { GROK_MODELS, defaultModelForAgent, listModelCatalog } = await import("./agent-catalog.ts");
   expect(GROK_MODELS[0]).toBe("grok-4.7");
@@ -359,4 +386,11 @@ test("omg thinking levels follow the model: effort where OpenRouter honours it, 
   expect(item.thinkingLevels).toEqual(["low", "medium", "high"]);
   expect(Object.keys(item.thinkingLevelsByModel ?? {})).toHaveLength(11);
   expect(item.thinkingLevelsByModel?.["omg/qwen/qwen3-coder-next"]).toBeUndefined();
+});
+
+test("claude pickers carry one row per family alias, no pinned duplicates", () => {
+  for (const list of [CLAUDE_MODELS, AISDK_MODELS]) {
+    expect(list).toEqual(["opus", "fable", "sonnet", "haiku"]);
+    expect(list.filter((m) => m.includes("fable"))).toHaveLength(1);
+  }
 });

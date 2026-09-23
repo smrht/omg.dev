@@ -8,6 +8,7 @@ import { marked } from "marked";
 import {
   AgentAdmissionController,
   NO_AGENT_LIMIT,
+  admissionResidentPool,
   agentLaunchMemoryBudget,
   computerAgentAdmissionContext,
   isScheduleSpawned,
@@ -85,6 +86,9 @@ import * as pwaBootLog from "../pwa-boot-log.ts";
 import { botRuntimeContract, shortSessionId } from "../omg-capabilities.ts";
 import {
   getCachedResumableSession,
+  queryHistoricalCache,
+  hideFromRosterWhenCached,
+  setRosterHidden,
   updateResumableUser,
   upsertResumableRows,
   type ResumableCacheRow,
@@ -246,6 +250,7 @@ import {
 import { listSessionTree, readSessionFile } from "../session-files.ts";
 import { reportClientError, listClientErrors } from "../client-errors.ts";
 import {
+  claudeOrgIdForProvider,
   getAllUsage,
   getProviderUsage,
   getUsageSummary,
@@ -253,6 +258,7 @@ import {
   listUsageProviders,
 } from "../usage.ts";
 import { consumeCodexRateLimitResetCredit } from "../codex-rate-limits.ts";
+import { consumeClaudeWebReset } from "../claude-web-resets.ts";
 import { sessionTokenUsage } from "../session-token-usage.ts";
 import {
   vapidPublicKey,
@@ -305,8 +311,9 @@ import {
   listSessionsCached,
   noteListSessionsClientActivity,
 } from "../session-cache.ts";
+import { createCleanupHandler } from "../session-cleanup.ts";
 import { buildSessionUsageReport, findSessionDevServerPids } from "../session-usage.ts";
-import { memoryReclaimCandidates } from "../idle-archive.ts";
+import { capReclaimCandidate, memoryReclaimCandidates } from "../idle-archive.ts";
 import { CODING_AGENT_ADAPTERS, pickDefaultSessionAgent, resolveActiveSessionAgent, usesCommandFileRuntime } from "../coding-agent-adapters.ts";
 import { launchCodingAgentSession } from "../coding-agent-provider.ts";
 import {
@@ -384,12 +391,16 @@ import {
 import {
   browserClick,
   browserControlAvailable,
+  browserInspectElement,
+  browserInspectionStatus,
   browserNavigate,
   browserPaste,
   browserPress,
   browserReadText,
   browserScreenshot,
   browserType,
+  cancelBrowserInspection,
+  closeAgentView,
 } from "../computer/browser.ts";
 import { capturePaneScroll, capturePaneEscaped, paneWidth } from "../tmux.ts";
 import { detectUrls } from "../links.ts";
@@ -920,12 +931,14 @@ async function activationGate(
 ): Promise<Response | { release: () => void; reclaimed?: number }> {
   const settings = getGlobalSettingsSync();
   const computer = computerAgentAdmissionContext();
-  // Schedule admission is a Computer-plan rule. A self-hosted box has no plan
-  // file, so spawnedBy=schedule is just another session under maxLiveAgents.
-  const kind = computer && options?.kind === "schedule" ? "schedule" : "interactive";
+  // Schedule admission keeps its own resident pool everywhere (issue 521).
+  // On a Computer the plan's scheduleLimit bounds it; on a self-hosted box
+  // the same maxLiveAgents preference bounds the schedule pool SEPARATELY,
+  // so a full interactive roster can no longer starve cron work.
+  const kind = options?.kind === "schedule" ? "schedule" : "interactive";
   const limit =
-    kind === "schedule" && computer
-      ? computer.scheduleLimit
+    kind === "schedule"
+      ? (computer?.scheduleLimit ?? settings.maxLiveAgents)
       : (computer?.limit ?? settings.maxLiveAgents);
   if (limit === 0) return { release: () => {} };
   const overLimit = !computer && options?.overLimit === true;
@@ -935,12 +948,10 @@ async function activationGate(
     async () => {
       const available = hostAvailableMemory();
       const sessions = await listSessions().catch(() => []);
-      const pool = (!computer
-        ? sessions
-        : kind === "schedule"
-          ? sessions.filter((session) => session.spawnedBy === "schedule")
-          : sessions.filter((session) => session.spawnedBy !== "schedule"))
-        .filter((session) => !session.persistent);
+      // Disjoint pools for Computer AND self-hosted boxes (issue 521):
+      // interactive launches count only interactive residents, schedule
+      // launches only schedule residents; persistent bots hold no slot.
+      const pool = admissionResidentPool(kind, sessions);
       return {
         sessions: pool,
         // Always measured, so every launch books its share of memory even on
@@ -957,7 +968,16 @@ async function activationGate(
         enforceMemory: computer !== null || (overLimit && available.trusted),
       };
     },
-    computer ? archiveIdleDurableAgentsForMemory : undefined,
+    computer
+      ? archiveIdleDurableAgentsForMemory
+      : kind === "interactive"
+        ? reclaimIdleDurableAgentForInteractiveCap
+        : undefined,
+    // A self-hosted interactive launch at its own live cap may trade the
+    // oldest safe idle durable ordinary session for the slot instead of
+    // refusing the owner (issue 521). Computer plans keep reclaim
+    // memory-pressure-only.
+    computer ? undefined : { reclaimOnLimit: kind === "interactive" },
   );
   if (reservation.ok) return reservation;
   // Tagged `plan_limit` ONLY on a hosted Computer. An ordinary LFG install that
@@ -1098,6 +1118,24 @@ async function serverStats() {
 // in would multiply the cost of the cheap panel by the expensive one. Callers
 // fetch it only while the breakdown is expanded, and the short cache below
 // collapses concurrent viewers onto a single scan.
+const manualSessionCleanup = createCleanupHandler({
+  snapshot: async () => {
+    const owners = await listSessions();
+    return { owners, rows: (await buildSessionUsageReport(owners)).sessions };
+  },
+  close: async (id, owner) => {
+    const session = owner as Session;
+    if (!session) throw new Error("Session missing");
+    const result = await closeLiveSession(session, id, { source: "manual-usage" }, true);
+    if (!result.ok) throw new Error(result.reason);
+  },
+  refresh: async () => {
+    sessionUsageCache = null;
+    if (sessionUsageInflight) await sessionUsageInflight;
+    sessionUsageCache = null;
+    return sessionUsage();
+  },
+});
 const SESSION_USAGE_TTL_MS = 2_000;
 let sessionUsageCache: { at: number; value: Awaited<ReturnType<typeof buildSessionUsageReport>> } | null = null;
 let sessionUsageInflight: Promise<Awaited<ReturnType<typeof buildSessionUsageReport>>> | null = null;
@@ -1122,6 +1160,14 @@ async function sessionUsage() {
         managed: session.managed,
       })),
     );
+    for (const row of report.sessions) {
+      if (!row.title && row.worktreePath) {
+        const history = queryHistoricalCache({ project: row.worktreePath, limit: 20 }).sessions;
+        const match = history.find(item => item.sessionId === row.sessionId)
+          ?? history.find(item => item.cwd === row.worktreePath);
+        if (match) { row.title = match.title; row.historySessionId = match.sessionId; }
+      }
+    }
     sessionUsageCache = { at: Date.now(), value: report };
     return report;
   })();
@@ -1156,10 +1202,16 @@ type RepoEntry = Awaited<ReturnType<typeof listRepos>>[number];
 // still group them under the owning repo's project. projectName() collapses
 // worktree cwds back to the main checkout, so compute it server-side — the
 // browser cannot read .git files to do this itself.
-function withAutoAgentMeta<T extends { id: string; cwd?: string }>(a: T) {
+function withAutoAgentMeta<T extends { id: string; cwd?: string; projectCwd?: string }>(a: T) {
+  const executionCwd = a.cwd;
+  const logicalCwd = a.projectCwd || executionCwd;
   return {
     ...a,
-    project: projectName(a.cwd || SELF_REPO),
+    // The schedule editor Repo picker is a logical project assignment. Keep
+    // the actual runner cwd separate so saving cannot load a large repo.
+    cwd: logicalCwd,
+    executionCwd,
+    project: projectName(logicalCwd || SELF_REPO),
     running: isRunning(a.id),
     refine: refineStatus(a.id),
   };
@@ -1197,7 +1249,7 @@ export function truncateAutoAgentPrompt(prompt: string): {
 }
 
 /** List-shaped agent: same as withAutoAgentMeta, minus the prompt tail. */
-function withAutoAgentListMeta<T extends { id: string; cwd?: string; prompt?: string }>(a: T) {
+function withAutoAgentListMeta<T extends { id: string; cwd?: string; projectCwd?: string; prompt?: string }>(a: T) {
   const meta = withAutoAgentMeta(a);
   // An agent with no prompt at all keeps that shape rather than gaining an
   // empty string, so the editor's "is this a preview?" check stays honest.
@@ -2067,8 +2119,22 @@ async function closeLiveSession(
   sess: Session,
   id: string,
   closeLog: Record<string, unknown>,
+  alreadyStopped = false,
 ): Promise<CloseOutcome> {
   persistManagedResume(sess);
+  if (alreadyStopped) {
+    if (isAisdkPidAlive(sess.pid)) return { ok: false, status: 409, reason: "Agent draait nog" };
+    const entry = findAisdkEntryByAnyId(id);
+    if (entry && isAisdkPidAlive(entry.harnessPid)) return { ok: false, status: 409, reason: "Sessie is opnieuw gestart" };
+    markClosed(sess.pid);
+    if (entry) removeAisdkEntry(entry.sessionId);
+    if (sess.tmuxName) { removeManaged(sess.tmuxName); assignUser(sess.tmuxName, null); }
+    clearResolved(id);
+    invalidateListSessionsCache();
+    hideFromRosterWhenCached(id);
+    evlog("session_close_done", { ...closeLog, mode: "manual-graceful" });
+    return { ok: true, mode: "manual-graceful" };
+  }
   // Reap headless Chrome for this managed name before killing the agent.
   // agent-browser daemons reparent under user systemd and outlive tmux/harness
   // exit; idle timeout is the backstop, this is the explicit teardown path.
@@ -2201,6 +2267,27 @@ async function archiveIdleDurableAgentsForMemory(): Promise<number> {
     if (memory.availableBytes >= memory.reserveBytes + memory.launchBytes) break;
   }
   return archived;
+}
+
+// The self-hosted twin of the cap story (issue 521): the limit is the
+// owner's own preference, so an interactive launch that hits it trades the
+// OLDEST safe idle durable ordinary session for the slot instead of
+// returning a 429 the owner would first have to edit a number to avoid.
+// Safety is exactly memoryReclaimCandidates (never busy, launching,
+// persistent, unmanaged or non-resumable work) plus one addition in
+// capReclaimCandidate: schedule-spawned residents belong to the separate
+// schedule pool. closeLiveSession persists the resume record first, so
+// the closed chat reopens with its transcript and session context. One
+// close per admission: the retry then either fits or refuses.
+async function reclaimIdleDurableAgentForInteractiveCap(): Promise<number> {
+  const candidate = capReclaimCandidate(await listSessions());
+  if (!candidate) return 0;
+  const sessionId = candidate.sessionId as string;
+  const outcome = await closeLiveSession(candidate, sessionId, {
+    sessionId,
+    source: "selfhosted_cap_reclaim",
+  });
+  return outcome.ok ? 1 : 0;
 }
 
 const BOT_COMPACTION_SWEEP_MS = 15_000;
@@ -4308,7 +4395,7 @@ export async function cmdServe() {
         // kept running, and reporting "stopped" for a live screen is worse
         // than the extra probe costs.
         await ensureDesktopAdopted();
-        return json(desktopStatus());
+        return json({ ...desktopStatus(), inspection: browserInspectionStatus() });
       }
 
       if (path === "/api/computer/start" && req.method === "POST") {
@@ -4321,17 +4408,27 @@ export async function cmdServe() {
           const status = await startDesktop({
             ...(body.width ? { width: body.width } : {}),
             ...(body.height ? { height: body.height } : {}),
-            ...(body.proxy ? { proxy: body.proxy } : {}),
+            // Issue 710: omitted means the configured default; an explicit
+            // empty string means direct egress and must override that default.
+            ...("proxy" in body ? { proxy: body.proxy || undefined } : {}),
           });
-          return json(status);
+          return json({ ...status, inspection: browserInspectionStatus() });
         } catch (e) {
           return err(500, e instanceof Error ? e.message : "failed to start the computer");
         }
       }
 
       if (path === "/api/computer/stop" && req.method === "POST") {
+        await cancelBrowserInspection("desktop stopped");
+        closeAgentView();
         await stopDesktop();
-        return json(desktopStatus());
+        return json({ ...desktopStatus(), inspection: browserInspectionStatus() });
+      }
+
+      if (path === "/api/computer/browser/inspect/cancel" && req.method === "POST") {
+        return json({
+          cancelled: await cancelBrowserInspection("cancelled from the Computer"),
+        });
       }
 
 
@@ -4577,6 +4674,18 @@ export async function cmdServe() {
       // Agent control of the browser on that desktop, via Bun.WebView attached
       // over DevTools. These are what the MCP tools call; they act on the one
       // visible tab, so whatever the agent does shows up on the streamed screen.
+      // Every action the dispatcher serves, as full route literals: the
+      // startsWith prefix below is invisible to the route scanner in
+      // client-api-route-coverage.test.ts, and the 404 names them for humans.
+      const browserActionRoutes = [
+        "/api/computer/browser/navigate",
+        "/api/computer/browser/click",
+        "/api/computer/browser/type",
+        "/api/computer/browser/press",
+        "/api/computer/browser/text",
+        "/api/computer/browser/inspect",
+        "/api/computer/browser/screenshot",
+      ];
       if (path.startsWith("/api/computer/browser/") && req.method === "POST") {
         if (!desktopStatus().running) return err(409, "the computer is not running");
         const action = path.slice("/api/computer/browser/".length);
@@ -4588,6 +4697,7 @@ export async function cmdServe() {
             y?: number;
             text?: string;
             key?: string;
+            timeoutMs?: number;
           };
           switch (action) {
             case "navigate": {
@@ -4619,12 +4729,25 @@ export async function cmdServe() {
             case "text": {
               return json({ text: await browserReadText() });
             }
+            case "inspect": {
+              return json(
+                await browserInspectElement({
+                  ...(body.timeoutMs ? { timeoutMs: body.timeoutMs } : {}),
+                  signal: req.signal,
+                }),
+              );
+            }
             case "screenshot": {
               const blob = await browserScreenshot();
               return new Response(blob, { headers: { "content-type": "image/png" } });
             }
             default:
-              return err(404, `unknown browser action: ${action}`);
+              return err(
+                404,
+                `unknown browser action: ${action} (known: ${browserActionRoutes
+                  .map((route) => route.slice("/api/computer/browser/".length))
+                  .join(", ")})`,
+              );
           }
         } catch (e) {
           return err(500, e instanceof Error ? e.message : "browser action failed");
@@ -5173,6 +5296,12 @@ a{color:#60a5fa}
       }
       if (path === "/api/server/wake-tick" && req.method === "POST") {
         return handleWakeTick((l) => console.log(l));
+      }
+      if (path === "/api/server/session-usage/preview" && req.method === "POST") {
+        return manualSessionCleanup(req, "preview");
+      }
+      if (path === "/api/server/session-usage/confirm" && req.method === "POST") {
+        return manualSessionCleanup(req, "confirm");
       }
       if (path === "/api/server/session-usage" && req.method === "GET") {
         return json({ usage: await sessionUsage() });
@@ -6691,11 +6820,13 @@ a{color:#60a5fa}
             schedule?: string;
             enabled?: boolean;
             cwd?: string;
+            executionCwd?: string;
             agent?: string;
             claudeAccountId?: string | null;
             model?: string;
             thinkingLevel?: string;
             tools?: string[];
+            quiet?: boolean;
             owner?: { kind?: string; botId?: string } | null;
           } | null;
           if (!b?.name || !b?.prompt || !b?.schedule) {
@@ -6771,12 +6902,23 @@ a{color:#60a5fa}
             schedule: b.schedule,
             enabled: b.enabled !== false,
             owner,
-            cwd: b.cwd,
+            // Browser cwd is the logical Repo picker; MCP callers send
+            // executionCwd when they intentionally move the runner.
+            cwd:
+              (typeof b.executionCwd === "string" ? b.executionCwd.trim() : "") ||
+              existingForEdit?.cwd ||
+              b.cwd,
+            projectCwd:
+              (typeof b.cwd === "string" ? b.cwd.trim() : "") ||
+              existingForEdit?.projectCwd ||
+              existingForEdit?.cwd ||
+              b.executionCwd,
             agent: autoAgent as any,
             claudeAccountId,
             model,
             thinkingLevel,
             tools: Array.isArray(b.tools) ? b.tools : undefined,
+            quiet: typeof b.quiet === "boolean" ? b.quiet : existingForEdit?.quiet,
           });
           return json({ agent: withAutoAgentMeta(agent) });
         }
@@ -7106,6 +7248,7 @@ a{color:#60a5fa}
           if (!allowed.ok) return err(allowed.status, allowed.error);
           const b = (await req.json().catch(() => null)) as {
             enabled?: unknown;
+            quiet?: unknown;
             agent?: string;
             model?: string;
             thinkingLevel?: string;
@@ -7114,6 +7257,8 @@ a{color:#60a5fa}
           if (!b || typeof b !== "object") return err(400, "a JSON body is required");
           if (b.enabled !== undefined && typeof b.enabled !== "boolean")
             return err(400, "enabled must be a boolean");
+          if (b.quiet !== undefined && typeof b.quiet !== "boolean")
+            return err(400, "quiet must be a boolean");
           // The stored backend is the fallback, not "aisdk": a body that sets
           // only `model` on a grok row must be validated against grok.
           //
@@ -7131,6 +7276,7 @@ a{color:#60a5fa}
           if (!runtime.ok) return err(runtime.status, runtime.error);
           const touched =
             b.enabled !== undefined ||
+            b.quiet !== undefined ||
             runtime.agent !== undefined ||
             runtime.model !== undefined ||
             runtime.thinkingLevel !== undefined ||
@@ -7139,6 +7285,7 @@ a{color:#60a5fa}
           const saved = await saveAutoAgent({
             ...agent,
             enabled: b.enabled ?? agent.enabled,
+            quiet: typeof b.quiet === "boolean" ? b.quiet : agent.quiet,
             agent: runtime.agent ?? agent.agent,
             model: runtime.model ?? agent.model,
             thinkingLevel: runtime.thinkingLevel ?? agent.thinkingLevel,
@@ -7215,9 +7362,61 @@ a{color:#60a5fa}
           // of the same instruction; the first one wins.
           if (!markRefining(agent.id)) return err(409, "this agent is already being updated from feedback");
           console.log(`[auto] refining ${agent.id} from feedback (${feedback.length} chars)`);
+          // Feedback on a finding is an instruction NOW as much as a lesson for
+          // later: "that's wrong, do X instead" (Sam, 16-09-2026). The rewrite
+          // below only changes the next scheduled run, so on its own it looked
+          // like nothing happened. Graduate the finding into a real session
+          // seeded with the owner's words first — the same launch the reply
+          // arrow does — and let the rewrite run behind it. The session decides
+          // whether the words are work to do or only a reporting note.
+          // (fork: refine-act)
+          if (finding) {
+            const composed =
+              `An automated watch agent ("${agent.name}") flagged this:\n\n` +
+              `${finding.title}\n\n` +
+              (finding.reasoning.length
+                ? `Reasoning:\n${finding.reasoning.map((r) => `- ${r}`).join("\n")}\n\n`
+                : "") +
+              (finding.suggest ? `Suggested fix: ${finding.suggest}\n\n` : "") +
+              `The owner replied to this finding with:\n"${feedback}"\n\n` +
+              "Treat that reply as the instruction. If it corrects the facts, wants something other than the " +
+              "suggested fix, or asks for the work to be done: do exactly that now, in this repo, and verify it. " +
+              "If it is only feedback about how the watch agent should report (what to flag, what to skip), " +
+              "answer in one line and stop — the agent's standing instruction is being rewritten separately.";
+            const launchAgent = agent.agent ?? "aisdk";
+            const launchModel = agent.model;
+            const levels = thinkingLevelsForAgent(launchAgent, launchModel);
+            const roster = userRoster();
+            void (async () => {
+              const r = await fetch(`http://127.0.0.1:${PORT}/api/sessions/new`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  cwd: agent.cwd || undefined,
+                  prompt: composed,
+                  title: finding.title.trim().slice(0, 200) || undefined,
+                  user: roster.length === 1 ? roster[0]?.email : undefined,
+                  agent: launchAgent,
+                  model: launchModel,
+                  thinkingLevel: levels?.length ? agent.thinkingLevel : undefined,
+                }),
+              });
+              const data = (await r.json().catch(() => null)) as { sessionId?: string; error?: string } | null;
+              if (!r.ok || !data?.sessionId) {
+                throw new Error(data?.error ?? `session launch failed (${r.status})`);
+              }
+              await updateFinding(finding.id, { status: "session", sessionId: data.sessionId });
+              console.log(`[auto] feedback on ${finding.id} started session ${data.sessionId} (${launchAgent}/${launchModel ?? "default"})`);
+            })().catch((e) => {
+              console.error(`[auto] feedback session for ${finding.id} failed: ${e instanceof Error ? e.message : String(e)}`);
+            });
+          }
           void (async () => {
             const { refineAutoPrompt } = await import("../auto/enhance.ts");
-            const cwd = await resolveAutoCwd(agent.cwd);
+            // No repo inspection for a rewrite: the current instruction already
+            // names the real paths, and the Read/Grep/Glob pass is what made a
+            // one-line correction take ~100 s (measured 16-09-2026, 103 s).
+            const cwd = undefined;
             const prompt = await refineAutoPrompt(
               {
                 name: agent.name,
@@ -7254,17 +7453,13 @@ a{color:#60a5fa}
               tools: current.tools,
             });
             console.log(`[auto] refined ${agent.id} from feedback (${prompt.length} chars)`);
-            // The finding the owner was looking at is answered by the rewrite:
-            // leaving it open under "Auto" reads as "still needs doing" (the
-            // very first report of this fix was a screenshot of it still
-            // sitting there). "read", NOT "dismissed": a dismissed title is
-            // fed back to the next run as "do NOT resurface" (runner.ts), and
-            // feedback usually means the opposite — "handle this properly" —
-            // so dismissing it made the retuned agent skip exactly that case
-            // on its very next run. "read" drops it from the open list and
-            // still counts as unresolved, so a real recurrence escalates.
+            // Reading removes the answered item from the open list, while a
+            // genuine recurrence can still escalate. Dismissed would instead
+            // tell the next run never to surface this title again.
+            // Graduated above → already "session"; only a plain rewrite marks read.
             if (finding && finding.status === "open") {
-              await updateFinding(finding.id, { status: "read" });
+              const now = (await listFindings()).find((x) => x.id === finding.id);
+              if (now?.status === "open") await updateFinding(finding.id, { status: "read" });
             }
           })().then(
             () => settleRefine(agent.id),
@@ -8055,6 +8250,30 @@ a{color:#60a5fa}
             return err(400, "UI updates are only available for Git and release installs.");
           }
           try {
+            // Fork-gate (27-08-2026): op deze box hangt een lokale patchlaag
+            // aan elke release. De UI-knop deed vroeger een kale bundleswap,
+            // en die swap naar 0.6.16 gooide de fork er stil af. Bestaat de
+            // veilige route, dan draait de knop díe: snapshot, update, apply.sh
+            // en health-gate met automatische rollback. Als eigen transient
+            // unit, want de herstart die erop volgt mag hem niet meenemen.
+            // Ontbreekt het script, dan blijft upstream-gedrag staan — een
+            // fork-gate mag updaten nooit onmogelijk maken.
+            const safeUpdate = process.env.OMG_SAFE_UPDATE_BIN ?? "/home/agent/bin/omg-safe-update";
+            if (install.channel === "release" && existsSync(safeUpdate)) {
+              const unit = `omg-safe-update-${Date.now()}`;
+              Bun.spawn({
+                cmd: ["systemd-run", "--user", "--collect", `--unit=${unit}`, safeUpdate, "--apply"],
+                stdin: "ignore",
+                stdout: "ignore",
+                stderr: "ignore",
+              }).unref();
+              return json({
+                install,
+                update: { state: "running", message: `Safe update started as ${unit}.` },
+                restarting: true,
+                bootId: SERVER_INSTANCE_ID,
+              });
+            }
             const result = await withSelfUpdate(async () => {
               if (install.channel === "release") {
                 const current = await releaseUpdateStatus(PATHS.root, install);
@@ -8113,6 +8332,41 @@ a{color:#60a5fa}
           const outcome = await consumeCodexRateLimitResetCredit({ creditId, idempotencyKey });
           invalidateProviderUsage("codex");
           const provider = await getProviderUsage("codex", { force: true });
+          return json({ outcome, provider });
+        } catch (error) {
+          return err(502, error instanceof Error ? error.message : String(error));
+        }
+      }
+
+      // Claude "Reset for free" (claude.ai-only grant). Redeemed through the
+      // signed-in Computer browser, exactly like claude.ai's own button.
+      if (path === "/api/usage/claude/reset-credit") {
+        if (req.method !== "POST") return err(405, "method not allowed");
+        const body = (await req.json().catch(() => null)) as {
+          providerId?: unknown;
+          creditId?: unknown;
+          idempotencyKey?: unknown;
+        } | null;
+        const providerId = typeof body?.providerId === "string" && body.providerId.trim()
+          ? body.providerId.trim()
+          : "claude";
+        const creditId = typeof body?.creditId === "string" ? body.creditId.trim() : "";
+        const idempotencyKey = typeof body?.idempotencyKey === "string"
+          ? body.idempotencyKey.trim()
+          : "";
+        if (!creditId || !idempotencyKey) {
+          return err(400, "creditId and idempotencyKey are required");
+        }
+        try {
+          const orgId = await claudeOrgIdForProvider(providerId);
+          if (!orgId) return err(404, `no Claude account behind ${providerId}`);
+          const outcome = await consumeClaudeWebReset({
+            orgId,
+            grantId: creditId,
+            requestId: idempotencyKey,
+          });
+          invalidateProviderUsage(providerId);
+          const provider = await getProviderUsage(providerId, { force: true });
           return json({ outcome, provider });
         } catch (error) {
           return err(502, error instanceof Error ? error.message : String(error));
@@ -8194,6 +8448,26 @@ a{color:#60a5fa}
         }
       }
 
+      // Remove a finished session from the Live workspace's history roster
+      // (issue 521 follow-up). This is a list decision, not archiving: the
+      // durable row keeps its transcript and stays in the Resume > Sessions
+      // picker, which queries without ?roster=1. Live sessions are refused —
+      // a running process must go through the normal close/archive route.
+      {
+        const m = path.match(/^\/api\/sessions\/([0-9a-fA-F-]{36})\/roster-hide$/);
+        if (m && req.method === "POST") {
+          const sessionId = m[1];
+          const liveIds = await liveSessionIdsCached();
+          if (liveIds.has(sessionId)) {
+            return err(409, "session is live — archive it instead of hiding it");
+          }
+          const cached = getCachedResumableSession(sessionId);
+          if (!cached) return err(404, "session not found in the resumable cache");
+          if (!setRosterHidden(sessionId, true)) return err(404, "session not found");
+          return json({ ok: true });
+        }
+      }
+
       // Start a new lfg-managed session. Native interactive agents use a tmux
       // pane; command-file SDK agents launch as direct processes. The durable
       // managed name identifies either lifecycle boundary end-to-end.
@@ -8211,6 +8485,10 @@ a{color:#60a5fa}
           ? agentParam
           : undefined;
         const project = url.searchParams.get("project")?.trim() || undefined;
+        // ?roster=1 serves the Live workspace's merged history list, which
+        // drops rows removed from that list (roster_hidden). The Resume >
+        // Sessions picker omits the param and keeps seeing every row.
+        const roster = url.searchParams.get("roster") === "1";
         // Headless schedule runs are hidden unless the caller asks for them.
         // They are the bulk of the catalog on a box with active auto agents
         // and none of them is a conversation a human wants to resume.
@@ -8223,6 +8501,7 @@ a{color:#60a5fa}
           project,
           includeScheduled,
           excludeIds: liveIds,
+          roster,
         });
         return json({ sessions, total, facets, scheduledTotal });
       }
@@ -9090,7 +9369,10 @@ a{color:#60a5fa}
           fastMode,
           sessionId: launchId,
           omgUser: assignedUser,
-          containInAgentSlice: isSubagent,
+          // Issue 521: parents run contained too — their own
+          // lfg-agent-*.service, so omg.service restarts stop
+          // accumulating orphaned children.
+          containInAgentSlice: true,
           claudeAccountId,
           // Restricted roles run their harness in a filesystem sandbox
           // (src/sandbox/bwrap.ts). Owner and unknown roles get none.
@@ -9776,6 +10058,7 @@ a{color:#60a5fa}
             project?: string;
             mediaPaths?: Array<{ path: string; caption?: string }>;
             artifactIds?: string[];
+            commitRefs?: string[];
           } | null;
           const shipTitle = body?.title?.trim();
           if (!body || !shipTitle) return err(400, "title required");
@@ -9806,7 +10089,7 @@ a{color:#60a5fa}
             // every other project shipped with no source-control record at all,
             // which is how posts that were never committed became
             // indistinguishable from posts that landed and deployed.
-            const code = collectShipProvenance(sourceManaged);
+            const code = collectShipProvenance(sourceManaged, body.commitRefs);
             const unlanded = shipBlockReason(code);
             if (unlanded && code) {
               // Refused, not annotated. A post the reader has to distrust is
@@ -10678,6 +10961,10 @@ a{color:#60a5fa}
           if (!sess) return err(404, "session not found");
           const outcome = await closeLiveSession(sess, m[1], closeLog);
           if (!outcome.ok) return err(outcome.status, outcome.reason);
+          // Closed by the user = gone from the Live list, as the archive
+          // dialog promises; the transcript stays in Resume > Sessions. Without
+          // this the row came straight back as "Finished" on the next refresh.
+          hideFromRosterWhenCached(m[1]);
           return json({ ok: true });
         }
       }

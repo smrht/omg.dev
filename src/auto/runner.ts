@@ -1,3 +1,5 @@
+// Agentbox isolation v1 (issue 1003)
+import { isolatedAutoBackend } from "../omg-isolation-runtime.ts";
 import { defaultModelForAgent } from "../agent-catalog.ts";
 // Runs one auto agent: build a prompt from the agent's instruction + the
 // dismiss-feedback block, pipe it to a real headless Claude session with
@@ -35,14 +37,44 @@ import {
  */
 const MAX_FINDINGS_PER_RUN = 5;
 
-// The opening sentence is shared with the resume-cache scan, which uses it to
-// keep scheduled runs out of the archive picker. See watch-agent-signature.ts.
-const SYSTEM = `${WATCH_AGENT_OPENING} Carry out the instruction below.
-
-You have read-only tools (Read, Grep, Glob, WebSearch, WebFetch) — use them to
+/**
+ * The framing every run gets ahead of the owner's instruction.
+ *
+ * It is built per agent because a run with Bash or Skill can act. Describing
+ * that run as read-only made the system prompt override an instruction to
+ * handle the work itself, so acting agents repeatedly reported work instead.
+ */
+export function buildSystem(extraTools: readonly string[] = [], quiet = false): string {
+  const acting = extraTools.filter((t) => !READONLY_TOOLS.includes(t));
+  // A quiet routine reports blockers only: the owner asked not to be told
+  // about every successful tick, so "what I did" is not a finding here.
+  const completed = quiet
+    ? `Work you completed and a valid no-op are NOT findings: for those, answer
+{"findings": []} and nothing else. Something you were told to handle but could
+not is a finding, with the reason.`
+    : `Work you completed is not a problem to surface:
+report it as ONE low-severity finding whose title says what you did, so the
+owner can see it happened. Something you were told to handle but could not is
+a finding of its own, with the reason.`;
+  const tools = acting.length
+    ? `You have read-only tools (${READONLY_TOOLS.join(", ")}) and, on top of those,
+${acting.join(", ")} — so you can ACT, not only look. Use the read-only tools to
+gather your own context. If the instruction tells you to handle something
+yourself (send, label, write, run a script, load a skill), then do it, exactly
+within what the instruction allows — never file "someone should do X" for work
+the instruction told you to do. ${completed} Beyond that, decide what, if anything,
+is worth surfacing as a notification right now. Be strict: most runs should
+surface nothing. Only surface something concrete, high-leverage, and actionable
+— never filler.`
+    : `You have read-only tools (${READONLY_TOOLS.join(", ")}) — use them to
 gather your own context. Decide what, if anything, is worth surfacing as a
 notification right now. Be strict: most runs should surface nothing. Only
-surface something concrete, high-leverage, and actionable — never filler.
+surface something concrete, high-leverage, and actionable — never filler.`;
+  // The opening sentence is shared with the resume-cache scan, which uses it to
+  // keep scheduled runs out of the archive picker. See watch-agent-signature.ts.
+  return `${WATCH_AGENT_OPENING} Carry out the instruction below.
+
+${tools}
 
 Report every INDEPENDENT problem you find, not just the most important one — two
 unrelated problems are two findings. This is not licence to pad: if one thing is
@@ -64,6 +96,7 @@ Each finding must stand alone: its title names one specific problem, and its
 reasoning and suggest refer only to that problem.
 
 Rules: title is one line. At most 4 short reasoning bullets per finding. No essay.`;
+}
 
 function normSeverity(s: unknown): Severity {
   const v = String(s ?? "").toLowerCase();
@@ -237,7 +270,7 @@ async function runClaude(
   }
 }
 
-async function runSelectedBackend(
+export async function runSelectedBackendUncontained(
   agent: AutoAgent,
   prompt: string,
   cwd: string,
@@ -439,7 +472,7 @@ async function runAutoAgentInner(
   const mine = (await listFindings()).filter((f) => f.agentId === agent.id);
   const feedback = buildFindingFeedback(mine);
 
-  const prompt = `${SYSTEM}\n\n## Instruction\n${agent.prompt}${feedback}`;
+  const prompt = `${buildSystem(agent.tools ?? [], agent.quiet === true)}\n\n## Instruction\n${agent.prompt}${feedback}`;
   // The agent's base repo (chosen from the repo list in the UI) is where it runs
   // and from which it inherits .claude/settings.json. If it's unset, fall back to
   // the repo root but say so loudly — a missing base means the agent is watching
@@ -448,7 +481,7 @@ async function runAutoAgentInner(
   if (!agent.cwd) {
     onLog(`[auto] WARNING: agent "${agent.id}" has no base repo (cwd) — defaulting to ${PATHS.root}; set one in the editor`);
   }
-  const result = await runSelectedBackend(agent, prompt, cwd, onLog);
+  const result = await isolatedAutoBackend(agent, prompt, cwd, onLog);
 
   const parsed = parseFindings(result);
   if (parsed === null) {
@@ -458,6 +491,17 @@ async function runAutoAgentInner(
   if (parsed.length === 0) {
     onLog("[auto] agent surfaced nothing");
     return [];
+  }
+  // A quiet routine's low rows are "what I did" reports the owner opted out
+  // of. Dropping them here, not only in the prompt, keeps a chatty model from
+  // pushing a notification for every successful tick anyway.
+  if (agent.quiet === true) {
+    const kept = parsed.filter((f) => normSeverity((f as { severity?: unknown })?.severity) !== "low");
+    if (kept.length !== parsed.length) {
+      onLog(`[auto] quiet routine: dropped ${parsed.length - kept.length} low-severity report(s)`);
+    }
+    if (kept.length === 0) return [];
+    parsed.splice(0, parsed.length, ...kept);
   }
 
   const filed: Finding[] = [];

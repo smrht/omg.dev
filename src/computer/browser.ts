@@ -22,6 +22,12 @@
 //     long-lived view and activate its target so the tab is the visible one.
 
 import { cdpWebSocketUrl, desktopStatus } from "./desktop.ts";
+import {
+  BrowserInspector,
+  type BrowserInspectionOptions,
+  type BrowserInspectionResult,
+  type BrowserInspectionStatus,
+} from "./inspection.ts";
 import type { BrowserLoginCookie } from "../../packages/protocol/src/browser-login";
 
 /** Import only cookies already validated against the user's approved origin. */
@@ -81,6 +87,56 @@ interface WebViewLike {
 
 let view: WebViewLike | null = null;
 let viewTargetId: string | null = null;
+/**
+ * The `startedAt` of the desktop this view was attached to. A view outlives the
+ * Chrome it points at: the idle janitor stops the desktop, `computer_start`
+ * brings up a new one, and the cached view still refers to the dead target.
+ * Comparing generations is what makes a restart heal itself.
+ */
+let viewStartedAt: number | null = null;
+const inspector = new BrowserInspector(async () => await agentView());
+const NAVIGATION_TIMEOUT_MS = 30_000;
+
+interface NavigationView {
+  navigate(url: string): Promise<void>;
+}
+
+interface NavigationRecoveryOptions {
+  timeoutMs?: number;
+  recover: () => void;
+}
+
+/**
+ * Bound Bun.WebView's exclusive navigation operation. A request can disappear
+ * while WebView keeps its internal operation pending; every later navigate()
+ * then fails with "navigation already pending" until the serve process exits.
+ * Closing only the agent-owned view clears that state without restarting the
+ * shared Chromium desktop or touching tabs opened directly by the person.
+ */
+export async function navigateWithRecovery(
+  target: NavigationView,
+  url: string,
+  options: NavigationRecoveryOptions,
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? NAVIGATION_TIMEOUT_MS;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      reject(new Error(`browser navigation timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+
+  try {
+    await Promise.race([target.navigate(url), timeout]);
+  } catch (error) {
+    if (timedOut) options.recover();
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 function webViewCtor(): (new (opts: unknown) => WebViewLike) | null {
   const ctor = (Bun as unknown as { WebView?: new (opts: unknown) => WebViewLike }).WebView;
@@ -98,14 +154,25 @@ export function browserControlAvailable(): boolean {
  * littering the window with a new tab per call.
  */
 export async function agentView(): Promise<WebViewLike> {
+  const status = desktopStatus();
+  if (!status.running) throw new Error("the computer is not running; start it first");
+
+  // A cached view can outlive the Chrome it was attached to. computer-idle-janitor
+  // stops the desktop after 30 idle minutes and the next computer_start spawns a
+  // FRESH Chrome, so a view from the previous generation points at a dead target
+  // and throws "view is closed" on every call -- status stays green while the
+  // screen is unreachable. Drop it and rebuild rather than hand back a corpse.
+  if (view && viewStartedAt !== status.startedAt) closeAgentView();
+  // Same Chrome, but the tab itself may be gone (a person watching closed it, a
+  // renderer crashed). One CDP roundtrip over loopback is cheaper than a failed
+  // tool call the agent has to interpret.
+  if (view && !(await viewResponds(view))) closeAgentView();
   if (view) return view;
 
   const Ctor = webViewCtor();
   if (!Ctor) {
     throw new Error("this Bun build has no Bun.WebView (needs Bun 1.3.12 or later)");
   }
-  const status = desktopStatus();
-  if (!status.running) throw new Error("the computer is not running; start it first");
 
   const url = await cdpWebSocketUrl();
   if (!url) throw new Error("cannot reach the desktop browser's DevTools endpoint");
@@ -116,6 +183,7 @@ export async function agentView(): Promise<WebViewLike> {
     height: status.height - 40,
   });
   view = v;
+  viewStartedAt = status.startedAt;
   return v;
 }
 
@@ -141,6 +209,20 @@ async function captureViewTarget(v: WebViewLike): Promise<string | null> {
   return viewTargetId;
 }
 
+/**
+ * Does this view still have a live CDP target behind it? Any throw counts as
+ * dead: a closed view raises "Invalid state" before the call leaves the process,
+ * and a vanished target raises from the other end. Both mean rebuild.
+ */
+async function viewResponds(v: WebViewLike): Promise<boolean> {
+  try {
+    await v.cdp("Target.getTargetInfo");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Bring the agent's tab back to the front (a person may have switched tabs). */
 export async function focusAgentTab(): Promise<void> {
   if (!view || !viewTargetId) return;
@@ -152,7 +234,8 @@ export async function focusAgentTab(): Promise<void> {
 export async function browserNavigate(url: string): Promise<{ url: string; title: string }> {
   const v = await agentView();
   await focusAgentTab();
-  await v.navigate(url);
+  await inspector.cancel("navigation");
+  await navigateWithRecovery(v, url, { recover: closeAgentView });
   await captureViewTarget(v);
   return { url: v.url, title: v.title };
 }
@@ -331,11 +414,28 @@ export async function browserReadText(max = 4000): Promise<string> {
   return String(out ?? "").slice(0, max);
 }
 
+export function browserInspectionStatus(): BrowserInspectionStatus {
+  return inspector.status();
+}
+
+export async function browserInspectElement(
+  options: BrowserInspectionOptions = {},
+): Promise<BrowserInspectionResult> {
+  await focusAgentTab();
+  return await inspector.inspect(options);
+}
+
+export async function cancelBrowserInspection(reason?: string): Promise<boolean> {
+  return await inspector.cancel(reason);
+}
+
 /** Drop the agent's view. Does not touch the desktop or the person's tabs. */
 export function closeAgentView(): void {
+  void inspector.cancel("browser closed");
   try {
     view?.close();
   } catch {}
   view = null;
   viewTargetId = null;
+  viewStartedAt = null;
 }

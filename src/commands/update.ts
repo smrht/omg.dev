@@ -34,6 +34,37 @@ function defaultDependencies(): UpdateDependencies {
   };
 }
 
+/**
+ * Fork-gate (27-08-2026). Een kale bundleswap verving deze install van 0.6.14
+ * naar 0.6.16, gooide de lokale patchlaag eraf en niemand merkte het: apply.sh
+ * weigerde op zijn versiepoort en alleen de `-` in de systemd-drop-in hield de
+ * control plane overeind. Een uur lang draaide de box zonder
+ * roster-classificatie en zonder de eigen MCP-tools.
+ *
+ * Een echte update loopt daarom via `omg-safe-update --apply`: dat maakt eerst
+ * een geverifieerde snapshot, draait deze CLI mét OMG_SAFE_UPDATE=1, laat
+ * apply.sh los op de nieuwe bundel (ExecStartPre) en rolt terug zodra de
+ * health-gate rood is.
+ *
+ * `--check` blijft vrij — alleen lezen kan niets slopen — en de env-sleutel
+ * blijft een bewuste ontsnapping voor wie weet wat hij doet.
+ *
+ * Geëxporteerd omdat de regressietest deze beslissing wil kunnen stellen
+ * zonder een release te downloaden.
+ */
+export function safeUpdateGateError(
+  env: Record<string, string | undefined>,
+  checkOnly: boolean,
+): string | null {
+  if (checkOnly || env.OMG_SAFE_UPDATE === "1") return null;
+  return [
+    "Release-updates lopen op deze box via de veilige route, niet via `omg update`.",
+    "  Gebruik:  omg-safe-update --check    (wat zou er gebeuren)",
+    "            omg-safe-update --apply    (snapshot, update, fork, health, rollback)",
+    "Bewust omzeilen kan met OMG_SAFE_UPDATE=1, maar dan is er geen vangnet.",
+  ].join("\n");
+}
+
 export async function cmdUpdate(
   args: string[],
   overrides: Partial<UpdateDependencies> = {},
@@ -59,6 +90,9 @@ export async function cmdUpdate(
       `This is a ${channel} install. Update it through the deployment that owns it.`,
     );
   }
+
+  const gate = safeUpdateGateError(process.env, checkOnly);
+  if (gate) throw new Error(gate);
 
   if (checkOnly) {
     const status = channel === "source"

@@ -41,6 +41,14 @@ describe("omg model display", () => {
     expect(parseOmgModel("omg/newvendor/thing-1")!.providerLabel).toBe("Newvendor");
   });
 
+  test("claude family aliases show the release they resolve to", () => {
+    expect(omgModelLabel("opus")).toBe("Opus 5.5");
+    expect(omgModelLabel("fable")).toBe("Fable 5.1");
+    expect(omgModelLabel("sonnet")).toBe("Sonnet 5");
+    expect(omgModelLabel("haiku")).toBe("Haiku 4.5");
+    expect(omgModelSearchText("opus")).toBe("opus opus 5.5");
+  });
+
   test("ids from other agents pass through unchanged", () => {
     expect(parseOmgModel("claude-opus-4-8")).toBeNull();
     expect(parseOmgModel("gpt-5.6")).toBeNull();

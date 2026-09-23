@@ -1,3 +1,4 @@
+// Agentbox isolation v1 (issue 1003)
 import { ensureOmgProvider } from "./omg-provider.ts";
 // Map a live process to its tmux pane and inject input. Claude Code sessions
 // run inside tmux panes; we discover the `claude` pid via pgrep/proc, walk up
@@ -145,8 +146,8 @@ function addSessionEnv(
   // chain isn't resolvable at create time (headless/cron callers).
   if (user) env.push("-e", `LFG_USER=${user}`);
   // Parent and subagent managed sessions both need a named browser session +
-  // idle timeout. systemd containment (containInAgentSlice) is still subagent-
-  // only for cgroup/OOM reasons; these env vars are universal.
+  // idle timeout. Since issue 521 systemd containment covers parents too;
+  // these env vars stay universal.
   if (managedName) {
     const browser = agentBrowserEnv(managedName);
     env.push("-e", `AGENT_BROWSER_SESSION=${browser.AGENT_BROWSER_SESSION}`);
@@ -168,7 +169,8 @@ type AgentContainment = {
 };
 
 /**
- * Run a subagent as a transient user service in the aggregate agent slice.
+ * Run a managed agent (parent or subagent, issue 521) as a transient user
+ * service in the aggregate agent slice.
  * A service (rather than a scope) gives systemd a main process: when it exits,
  * KillMode=control-group reaps helper daemons such as agent-browser. Blocking
  * the service's session bus also prevents Chromium from moving itself into an
@@ -195,12 +197,27 @@ export function containedAgentCommand(
     "--property=Type=exec",
     "--property=KillMode=control-group",
     "--property=OOMScoreAdjust=200",
+    "--property=MemoryHigh=6G",
+    "--property=MemoryMax=8G",
+    "--property=MemorySwapMax=1G",
+    "--property=TasksMax=1024",
+    ...Object.keys(process.env).filter(k => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k)).map(k => `--setenv=${k}`),
     `--setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/lfg-agent-no-session-bus`,
     ...Object.entries(agentBrowserEnv(opts.name)).flatMap(([k, v]) => [`--setenv=${k}=${v}`]),
   ];
   if (process.env.PATH) argv.push(`--setenv=PATH=${process.env.PATH}`);
   if (opts.omgSessionId) argv.push(`--setenv=LFG_SESSION_ID=${opts.omgSessionId}`);
   argv.push(`--setenv=OMG_CAPABILITY_VERSION=${OMG_CAPABILITY_VERSION}`);
+  // The muse harness reaches muse-spark-1.3 only through the Meta egress proxy
+  // (Meta gates the catalog by request origin). systemd-run scrubs the
+  // environment to this allowlist, so OMG_MUSE_PROXY has to be passed through
+  // explicitly or `muse serve` calls Meta directly and gets "lack access".
+  if (process.env.OMG_MUSE_PROXY) argv.push(`--setenv=OMG_MUSE_PROXY=${process.env.OMG_MUSE_PROXY}`);
+  // Executor MCP (Sams connectie-hub op netcup-vps8000): every harness config
+  // references `Bearer ${EXECUTOR_MCP_TOKEN}`, so without this pass-through the
+  // header expands to an empty bearer and the server answers 401
+  // (AUTH_HEADER_REJECTED, measured 2026-09-05 on a Claude session).
+  if (process.env.EXECUTOR_MCP_TOKEN) argv.push(`--setenv=EXECUTOR_MCP_TOKEN=${process.env.EXECUTOR_MCP_TOKEN}`);
   if (opts.omgUser) argv.push(`--setenv=LFG_USER=${opts.omgUser}`);
   for (const [key, value] of Object.entries(agentTmpEnv())) {
     argv.push(`--setenv=${key}=${value}`);
@@ -214,7 +231,7 @@ function containTmuxCommand(
   enabled: boolean | undefined,
   opts: AgentContainment,
 ): void {
-  if (!enabled) return;
+  if (process.platform !== "linux" && !enabled) return;
   const commandIndex = argv.indexOf(executable);
   if (commandIndex < 0) throw new Error(`agent executable not found in tmux argv: ${executable}`);
   argv.splice(commandIndex, argv.length - commandIndex, ...containedAgentCommand(argv.slice(commandIndex), opts));
@@ -223,9 +240,10 @@ function containTmuxCommand(
 export type ManagedHarnessSpawnResult = { ok: boolean; error?: string; pid?: number };
 
 // Headless SDK harnesses have their own durable command-file control plane, so
-// tmux adds no transport value. Launch them as ordinary detached children. The
-// lfg systemd unit uses KillMode=process, which lets these children survive a
-// serve restart exactly as the old tmux wrapper did; a host reboot is handled
+// tmux adds no transport value. Launch them as transient user services in the
+// agent slice (issue 521): KillMode=control-group reaps helper daemons when
+// the harness exits, and the units survive a serve restart as siblings of
+// omg.service rather than piling up as its children; a host reboot is handled
 // separately by the boot reconciliation journal in session-recovery.ts.
 function spawnManagedHarness(
   command: string[],
@@ -237,8 +255,12 @@ function spawnManagedHarness(
   env.OMG_CAPABILITY_VERSION = OMG_CAPABILITY_VERSION;
   if (opts.omgUser) env.LFG_USER = opts.omgUser;
   else delete env.LFG_USER;
-  // Always name + idle-timeout the browser, including parent (non-slice) harness
-  // spawns. containInAgentSlice still only wraps subagents in systemd-run.
+  // Always name + idle-timeout the browser, including contained harness
+  // spawns. Since issue 521 parents run contained too: their own transient
+  // lfg-agent-*.service reaps the whole group (agent-browser included) when
+  // the harness exits, and survives an omg.service restart as a sibling
+  // unit. Browser profile/login state lives on disk under the
+  // session-named profile, so containment does not cost it.
   Object.assign(env, agentBrowserEnv(opts.name));
   Object.assign(env, agentTmpEnv());
   // Outbound network allowlist for a restricted role: point the harness at the
@@ -267,7 +289,7 @@ function spawnManagedHarness(
     console.error(`[sandbox] session ${opts.name} requested bwrap but ${sandboxed.reason}; running unsandboxed`);
   }
   const base = sandboxed.command;
-  const cmd = opts.containInAgentSlice
+  const cmd = process.platform === "linux" || opts.containInAgentSlice
     ? containedAgentCommand(base, opts, { pty: false })
     : base;
 

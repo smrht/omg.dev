@@ -93,13 +93,29 @@ export function parseOmgModel(id: string | null | undefined): OmgModelInfo | nul
   };
 }
 
+/**
+ * Claude CLI family aliases and the release each one lands on today. The
+ * alias stays the wire value (the CLI, the Agent SDK and `/model` all speak
+ * it); the picker shows the release so a reader can tell WHICH opus they get.
+ * Measured on claude 2.1.280 (2026-09-22). Bump when Anthropic moves an alias.
+ */
+export const CLAUDE_ALIAS_LABELS: Record<string, string> = {
+  opus: "Opus 5.5",
+  fable: "Fable 5.1",
+  sonnet: "Sonnet 5",
+  haiku: "Haiku 4.5",
+};
+
 /** The short name for a picker row or pill; other agents' ids pass through. */
 export function omgModelLabel(id: string | null | undefined): string {
-  return parseOmgModel(id)?.label ?? (id ?? "");
+  if (!id) return "";
+  return parseOmgModel(id)?.label ?? CLAUDE_ALIAS_LABELS[id] ?? id;
 }
 
 /** Lower-case text a filter box should match: the id and the short name. */
 export function omgModelSearchText(id: string): string {
   const info = parseOmgModel(id);
-  return (info ? `${id} ${info.providerLabel} ${info.label}` : id).toLowerCase();
+  if (info) return `${id} ${info.providerLabel} ${info.label}`.toLowerCase();
+  const alias = CLAUDE_ALIAS_LABELS[id];
+  return (alias ? `${id} ${alias}` : id).toLowerCase();
 }

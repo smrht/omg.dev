@@ -107,6 +107,7 @@ export function omgRuntimeContract(): string {
     "- Delegate only when explicitly requested, using `omg_create_subagent` or `omg_delegate_*` so children remain linked and visible.",
     "- Recurring/scheduled work is an auto agent, not a long-lived session: compose it with `omg_compose_auto_agent`, save it with `omg_save_auto_agent`, and read results with `omg_list_findings`.",
     `- Session ids use an ${SHORT_SESSION_ID_LENGTH}-character prefix. Pass them back exactly as shown. If an omg.dev tool is missing, call \`omg_capabilities\`; report a refresh only when it returns \`stale: true\`, otherwise report the feature as unsupported.`,
+    "- Agentbox build storage: never put checkouts, node_modules, package installs or build output in literal /tmp or /dev/shm (RAM-backed). Use a unique directory under $TMPDIR or $HOME/.cache/agent-tmp, preserve active work, and remove your own disposable build directory after completion. Run heavy builds via agentbox-run-heavy.",
     "=== END omg.dev RUNTIME CONTRACT ===",
   ].join("\n");
 }
@@ -343,8 +344,10 @@ export function sessionTitleFromPrompt(prompt: string | null | undefined, max = 
 export function omgCapabilityAccess(agent: CodingAgentKind): "mcp" | "contract-only" {
   // pi is an RPC backend with no MCP registration surface (its harness drives
   // the bundled pi CLI directly), so it never gets the omg.dev MCP toolset.
-  // Same for muse: MSP has no client-supplied MCP servers.
-  return agent === "hermes" || agent === "copilot" || agent === "pi" || agent === "deepseek" || agent === "devin" || agent === "muse"
+  // muse takes MCP servers from its global settings.json (no per-session wire
+  // registration), where the fork points it at the omg stdio MCP server, so it
+  // reaches the same omg toolset as the http-configured agents.
+  return agent === "hermes" || agent === "copilot" || agent === "pi" || agent === "deepseek" || agent === "devin"
     ? "contract-only"
     : "mcp";
 }

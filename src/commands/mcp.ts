@@ -17,6 +17,7 @@ import {
 } from "../omg-capabilities.ts";
 import { BOT_COLORWAYS, BOT_SHAPES } from "../bots/store.ts";
 import { BOT_PEER_MESSAGE_MAX_CHARS } from "../bots/messaging.ts";
+import { registerSamTools } from "../sam-tools.ts";
 
 type Repo = { name: string; cwd: string; project?: string };
 type SessionRow = {
@@ -1029,6 +1030,7 @@ export function buildOmgMcpServer(): McpServer {
         "Post a verified result in the omg.dev Shipped feed. Publishing is not a lifecycle event: the source session stays live for chat or follow-up. A Shipped post does not itself prove production deployment; when deployment was requested, verify it before you claim it. Never use this for planning, partial, blocked, or still-unverified work. Write it like a launch tweet: a punchy headline + at most 1-2 short sentences on the outcome and why it matters. To update an earlier post, pass its id.",
       inputSchema: {
         title: z.string().min(1).describe("Short headline for what shipped (e.g. 'WhatsApp reconnect loop fixed')."),
+        commitRefs: z.array(z.string().regex(/^[a-f0-9]{7,40}$/i)).min(1).max(100).optional().describe("All commits backing this result. In shared checkouts, verifies these reached main and checks their files for unfinished edits; unrelated workspace changes do not block."),
         id: z.string().optional().describe("Existing ship post id to update in place (returned when the post was created)."),
         summary: z
           .string()
@@ -1045,7 +1047,7 @@ export function buildOmgMcpServer(): McpServer {
         sessionId: z.string().optional().describe("Source omg.dev session id. Defaults to OMG_SESSION_ID."),
       },
     },
-    async ({ title, id, summary, mediaPaths, artifactIds, project, sessionId }) => {
+    async ({ title, id, summary, mediaPaths, artifactIds, project, sessionId, commitRefs }) => {
       const sid = await activeSessionId(sessionId);
       const data = await api<{
         ok: boolean;
@@ -1060,6 +1062,7 @@ export function buildOmgMcpServer(): McpServer {
           mediaPaths,
           artifactIds,
           project,
+          commitRefs,
           sessionId: sid,
         }),
       });
@@ -1555,10 +1558,13 @@ export function buildOmgMcpServer(): McpServer {
       },
     },
     async (input) => {
+      const { cwd, ...rest } = input;
       const data = await api<{ agent: { id?: string } }>("/api/auto/agents", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(input),
+        // Browser cwd is the logical Repo picker. Preserve the MCP contract:
+        // cwd here remains the directory the run executes in.
+        body: JSON.stringify({ ...rest, executionCwd: cwd }),
       });
       return result({ agent: data.agent, updated: !!input.id });
     },
@@ -1728,6 +1734,10 @@ export function buildOmgMcpServer(): McpServer {
       return result({ finding: data.finding });
     },
   );
+
+  // Sam's own portfolio tools live in their own module so upstream merges of
+  // this file stay clean.
+  registerSamTools(server);
 
   return server;
 }

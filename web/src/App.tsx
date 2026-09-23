@@ -1,3 +1,4 @@
+import { SessionUsageControls } from "./components/session-usage-controls";
 import { OMG_MODELS } from "../../src/omg-models";
 import { omgModelLabel, omgModelSearchText, parseOmgModel } from "../../packages/protocol/src/omg-model-display";
 import { ModelProviderIcon } from "./lib/model-provider-icons";
@@ -219,6 +220,7 @@ import {
   useNumberedClaudeAccounts,
   agentIconAlt,
   agentIconSrc,
+  sessionIconAlt,
   timeAgo,
   type ViewerArtifact,
 } from "./lib/session-ui";
@@ -321,12 +323,21 @@ import {
   type AgentReport,
 } from "./lib/finding-groups";
 import { resolveComposerRepo } from "./lib/composer-repo";
+import type { ComputerInspectionSession } from "./views/computer-inspection-control";
+import { SessionComputerInspectionAction } from "./views/session-computer-inspection-action";
+import {
+  fetchSessionInspectionUrl,
+  readSessionInspectionTarget,
+  resolveSessionInspectionUrl,
+  stashSessionInspectionTarget,
+} from "./lib/session-inspection-target";
 import {
   browseFolderWithRecovery,
   folderRecoveryNotice,
 } from "./lib/folder-browser-recovery";
 import { setThemePreference, THEME_CHANGE_EVENT } from "./lib/theme";
 import { startsInBottomSystemGestureZone } from "./lib/touch-gestures";
+import { recentSessionRoster } from "./lib/recent-session-roster";
 import {
   clearLegacyPinnedSessions,
   readLegacyPinnedSessions,
@@ -437,6 +448,7 @@ import { feedback } from "@/lib/feedback";
 import { waitForRefine, type AutoAgentRefine } from "@/lib/auto-refine";
 import { useUiFeedbackPrefs, setUiFeedbackPrefs } from "@/lib/ui-feedback-prefs";
 import { useNavigationPrefs, setNavigationPrefs } from "@/lib/navigation-prefs";
+import { useFilmMode, setFilmMode } from "@/lib/film-mode";
 import { subscribeSelectionChange } from "./lib/selection-change";
 import { useProjectListPrefs, setProjectListPrefs } from "@/lib/project-list-prefs";
 import { useSendMorph } from "@/lib/use-send-morph";
@@ -1261,6 +1273,7 @@ type SessionUsageProc = {
 };
 
 type SessionUsageRow = {
+  historySessionId?: string;
   key: string;
   sessionId: string | null;
   managedName: string | null;
@@ -1332,7 +1345,7 @@ type SlashSkillState = {
   query: string;
 };
 
-const CLAUDE_MODELS = ["sonnet", "opus", "haiku", "fable", "claude-fable-5-1"];
+const CLAUDE_MODELS = ["opus", "fable", "sonnet", "haiku"];
 const CODEX_MODELS = [
   "gpt-6-astra",
   "gpt-5.6-sol",
@@ -1345,7 +1358,7 @@ const CODEX_MODELS = [
 ];
 // Models the one-shot AI-SDK test option supports (the provider maps these
 // aliases). Kept in sync with the AISDK_MODELS allowlist in serve.ts.
-const AISDK_MODELS = ["fable", "claude-fable-5-1", "opus", "sonnet", "haiku"];
+const AISDK_MODELS = ["opus", "fable", "sonnet", "haiku"];
 const CODEX_AISDK_MODELS = [
   "gpt-6-astra",
   "gpt-5.6-sol",
@@ -1424,7 +1437,8 @@ function agentSupportsThinking(agent: AgentKind): boolean {
     agent === "opencode" ||
     agent === "jcode" ||
     agent === "pi" ||
-    agent === "muse"
+    agent === "muse" ||
+    agent === "devin"
   );
 }
 
@@ -1482,7 +1496,7 @@ const AGENT_THINKING_LEVELS: Record<AgentKind, string[]> = {
   deepseek: [],
   // Devin exposes reasoning levels only inside a running session (Alt+T), not
   // as a launch flag, so the selector stays hidden.
-  devin: [],
+  devin: ["none", "low", "medium", "high", "xhigh", "max"],
   opencode: [],
   omg: [],
   jcode: ["low", "medium", "high", "xhigh", "max"],
@@ -6030,6 +6044,12 @@ export function App() {
   // ours — leaves the session instead of the app, and so the transcript can be
   // linked to. `pathnameToTab` keeps Live selected underneath it.
   const openSessionId = pathnameToSessionId(pathname);
+  // Design Mode is launched by one session composer. The URL keeps that
+  // session as the immutable target across the Computer page and gives mobile
+  // browser back a real route to leave. A generic /computer visit has no
+  // inspection target and therefore no ambiguous fleet-wide picker.
+  const computerInspectSessionId =
+    tab === "computer" ? routeSearch.inspectSession ?? null : null;
   // Carry the host-mode contract across the navigation, the same as setTab
   // does: the router clears search when none is supplied, and dropping `embed`
   // brings LFG back up as a standalone app inside omg.
@@ -6848,6 +6868,56 @@ export function App() {
     };
   }, [loadCore]);
 
+  // Recent finished sessions (the same resume cache the picker lists), merged
+  // into the Live workspace below so history is browsable without opening a
+  // sheet. Fetched once after the initial load and again when a session is
+  // archived — never on the 5s poll: the roster changes rarely and each fetch
+  // is a throttled cache read on the box, not a cheap list.
+  const [recentResumable, setRecentResumable] = useState<ResumableSession[]>([]);
+  const refreshRecentResumable = useCallback(async () => {
+    try {
+      const payload = await api<{ sessions: ResumableSession[] }>(
+        "/api/sessions/resumable?limit=50&roster=1",
+      );
+      // Same malformed-body guard as the resume picker: never store a
+      // non-array, or the roster below renders garbage instead of nothing.
+      setRecentResumable(Array.isArray(payload.sessions) ? payload.sessions : []);
+    } catch {
+      /* keep the previous roster — stale history beats an error banner */
+    }
+  }, []);
+  const didLoadRecent = useRef(false);
+  useEffect(() => {
+    if (loading || didLoadRecent.current) return;
+    didLoadRecent.current = true;
+    void refreshRecentResumable();
+  }, [loading, refreshRecentResumable]);
+  // Archive reshuffles both sides of the merge: the live list loses the row
+  // and the recent list gains it, so the post-archive refresh reconciles both.
+  const refreshSessionsWithRecent = useCallback(async () => {
+    await Promise.all([refreshSessions(), refreshRecentResumable()]);
+  }, [refreshSessions, refreshRecentResumable]);
+  // This is deliberately a roster operation, not archival. The durable
+  // transcript remains in Resume, while the completed row disappears from the
+  // everyday Live list immediately and after the next reload.
+  const hideFromLiveRoster = useCallback(
+    async (sid: string) => {
+      if (!sid) return;
+      setRecentResumable((rows) => rows.filter((row) => row.sessionId !== sid));
+      try {
+        await api(`/api/sessions/${encodeURIComponent(sid)}/roster-hide`, {
+          method: "POST",
+        });
+      } catch (error) {
+        // Re-read the cache after a failed write so the optimistic removal
+        // cannot accidentally hide a row the server refused to change.
+        await refreshRecentResumable().catch(() => {});
+        toast.error(error instanceof Error ? error.message : "Couldn’t remove the chat from this list");
+      }
+    },
+    [refreshRecentResumable],
+  );
+
   useEffect(() => {
     // These checks boot each installed agent CLI. They belong exclusively to
     // the Coding agents page; probing them after every app load made a normal
@@ -7034,16 +7104,29 @@ export function App() {
     [allLiveSessions, userFilter],
   );
 
+  // The Live workspace's merged roster: live rows plus deduped finished rows
+  // from the resume cache (see recentSessionRoster). Live-only derivatives
+  // above (allLiveSessions, userScopedSessions) stay untouched — streams,
+  // status ids and deep-link resolution must keep seeing only real processes.
+  const rosterSessions = useMemo(
+    () => recentSessionRoster(allLiveSessions, recentResumable),
+    [allLiveSessions, recentResumable],
+  );
+  const userScopedRoster = useMemo(
+    () => rosterSessions.filter((session) => sessionMatchesUserFilter(session, userFilter)),
+    [rosterSessions, userFilter],
+  );
+
   const projectOptions = useMemo(
     () =>
       Array.from(
         new Set([
           ...repos.map((repo) => repoProject(repo)),
           ...autoAgents.map((agent) => autoAgentProject(agent, repos)),
-          ...userScopedSessions.map((s) => s.project).filter((p): p is string => !!p),
+          ...userScopedRoster.map((s) => s.project).filter((p): p is string => !!p),
         ]),
       ).sort((a, b) => shortProject(a).localeCompare(shortProject(b))),
-    [autoAgents, repos, userScopedSessions],
+    [autoAgents, repos, userScopedRoster],
   );
   const mobileProjectOptions = useMemo(
     () => projectOptions,
@@ -7063,6 +7146,14 @@ export function App() {
     if (projectFilter === "__all") return userScopedSessions;
     return userScopedSessions.filter((session) => session.project === projectFilter);
   }, [userScopedSessions, projectFilter]);
+
+  // Same scope as liveSessions, but over the merged roster — this is what the
+  // Live workspace renders. History rows join the list without joining the
+  // fleet: streams and expanded-id tracking below still key on liveSessions.
+  const roster = useMemo(() => {
+    if (projectFilter === "__all") return userScopedRoster;
+    return userScopedRoster.filter((session) => session.project === projectFilter);
+  }, [userScopedRoster, projectFilter]);
 
   // Resolve a pending `/?session=<id>` deep link. This lives at the app level
   // (it used to be buried in the wide rail, so mobile ignored deep links
@@ -7098,6 +7189,44 @@ export function App() {
   const liveStatusIds = useMemo(
     () => allLiveSessions.map((s) => s.sessionId).filter((id): id is string => !!id),
     [allLiveSessions],
+  );
+  // Retention set for LiveView's open-page guard: live ids plus the historical
+  // roster, so a `/sessions/<id>` route onto a finished session is not bounced
+  // back to the list. The /api/live/status stream above still keys on
+  // liveStatusIds only — a dead id has no status to ask for.
+  const rosterStatusIds = useMemo(
+    () => rosterSessions.map((s) => s.sessionId).filter((id): id is string => !!id),
+    [rosterSessions],
+  );
+  const computerInspectionSessions = useMemo<ComputerInspectionSession[]>(
+    () =>
+      allLiveSessions.flatMap((session) =>
+        session.sessionId
+          ? [
+              {
+                sessionId: session.sessionId,
+                title: session.title || session.project || session.agent || "Agent session",
+                project: session.project || "Unknown project",
+              },
+            ]
+          : [],
+      ),
+    [allLiveSessions],
+  );
+  const computerInspectionTarget = useMemo(
+    () => {
+      if (!computerInspectSessionId) return null;
+      const session = computerInspectionSessions.find(
+        (candidate) => candidate.sessionId === computerInspectSessionId,
+      );
+      return session
+        ? {
+            ...session,
+            pageUrl: readSessionInspectionTarget(session.sessionId),
+          }
+        : null;
+    },
+    [computerInspectSessionId, computerInspectionSessions],
   );
   const openHistoricalSession = useCallback(
     (source: {
@@ -9068,6 +9197,20 @@ export function App() {
                 </span>
               </button>
             )}
+            {/* Settings sub-pages (Usage, Storage, More, …) sit two taps from
+                the chats: back to Settings, back to Live. The Pages menu now
+                opens them directly, so the way home should be direct too — a
+                second pill in the same island jumps straight to Live. */}
+            {!embedded && !isPrimarySurfaceTab(tab) && tab !== "settings" && tab !== "notifications" && tab !== "artifacts" && tab !== "board" ? (
+              <button
+                type="button"
+                onClick={() => setTab("live")}
+                aria-label="Back to Live"
+                className="flex h-8 items-center rounded-full border-l border-border/60 pl-3 pr-3 text-[13px] font-medium tracking-[-0.01em] text-muted-foreground transition-colors duration-200 ease-out hover:text-foreground active:scale-[0.96]"
+              >
+                Live
+              </button>
+            ) : null}
           </div>
         </NavIsland>
 
@@ -9189,9 +9332,9 @@ export function App() {
               openSessionId={openSessionId}
               onOpenSessionPage={openSessionPage}
               onCloseSessionPage={closeSessionPage}
-              sessions={liveSessions}
+              sessions={roster}
               shippedReview={shippedReview}
-              liveSessionIds={liveStatusIds}
+              liveSessionIds={rosterStatusIds}
               topPinned={topPinned}
               onToggleTopPin={toggleTopPin}
               users={users}
@@ -9248,7 +9391,8 @@ export function App() {
               typingBySid={othersTypingBySid}
               onTyping={liveStream.sendTyping}
               onSubscribeTranscript={useWsLive ? wsLiveStream.subscribeTranscript : undefined}
-              onRefresh={refreshSessions}
+              onRefresh={refreshSessionsWithRecent}
+              onHideFromRoster={hideFromLiveRoster}
               onRenameSession={renameSession}
               onRemove={removeSession}
               onNew={() =>
@@ -9445,7 +9589,19 @@ export function App() {
           <Suspense
             fallback={<div className="py-10 text-center text-sm text-muted-foreground">Loading…</div>}
           >
-            <ComputerPage active onClose={() => setTab("live")} />
+            <ComputerPage
+              active
+              inspectionSession={computerInspectionTarget}
+              autoStartInspection={!!computerInspectionTarget}
+              onInspectionReady={openSessionPage}
+              onInspectionCancelled={openSessionPage}
+              onClose={() => {
+                if (computerInspectionTarget) {
+                  openSessionPage(computerInspectionTarget.sessionId);
+                }
+                else setTab("live");
+              }}
+            />
           </Suspense>
         ) : null}
         {tab === "board" && !boardInWorkspace ? (
@@ -9939,6 +10095,27 @@ function UsageRingsLoadingIndicator() {
   );
 }
 
+// Shared by new, fork and continue composers: keep account selection and
+// loading/unavailable states consistent instead of omitting quota in one form.
+function ComposerUsageIndicator({ agent, accountId, enabled = true }: {
+  agent: AgentKind;
+  accountId?: string | null;
+  enabled?: boolean;
+}) {
+  const { usage, loading } = useProviderUsage({
+    agent,
+    accountId: agent === "aisdk" ? accountId || null : null,
+    combineAccounts: agent === "aisdk" && !accountId,
+    enabled,
+  });
+  if (!enabled) return null;
+  if (loading) return <UsageRingsLoadingIndicator />;
+  return <UsageRingsButton provider={usage ?? {
+    id: agent, kind: agent, label: "Agent", available: false,
+    note: "Usage is currently unavailable. Reopen this dialog to retry.",
+  }} />;
+}
+
 // The composer's usage indicator: compact rings that expand into an animated
 // popover breaking down each limit window (label, %, reset time). Works for any
 // provider that reports windows; falls back to the provider note otherwise.
@@ -10093,7 +10270,7 @@ function PagesMenu({
     tab === "artifacts" ||
     tab === "computer" ||
     tab === "board" ||
-    (showSettings && tab === "settings");
+    (showSettings && (tab === "settings" || tab === "usage" || tab === "storage"));
   const value = known || extraTabs.some((t) => t.id === tab) ? tab : "live";
   // Controlled so a selection dismisses the menu. Radio items don't close on
   // their own — correct for a filter, wrong here: the selection navigates, and
@@ -10167,6 +10344,16 @@ function PagesMenu({
                 <Settings className="size-5 shrink-0 text-muted-foreground" />
                 Settings
               </DropdownMenuRadioItem>
+              {/* Two Settings sub-pages Sam opens often enough that the
+                  detour through Settings cost more than it was worth. */}
+              <DropdownMenuRadioItem value="usage">
+                <Gauge className="size-5 shrink-0 text-muted-foreground" />
+                Usage limits
+              </DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="storage">
+                <HardDrive className="size-5 shrink-0 text-muted-foreground" />
+                Storage & performance
+              </DropdownMenuRadioItem>
             </>
           ) : null}
           {!showSettings && onOpenHostSettings ? (
@@ -10193,8 +10380,61 @@ function PagesMenu({
             </DropdownMenuRadioItem>
           ))}
         </DropdownMenuRadioGroup>
+        {/* Film mode lives here as well as under More: it is the switch you
+            flip right before you start recording the screen, so it has to be
+            one tap from anywhere. A toggle, not a page — the menu stays open
+            so the blur is visible behind it. */}
+        <DropdownMenuSeparator />
+        <PagesMenuDarkModeItem />
+        <PagesMenuFilmModeItem />
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+function PagesMenuDarkModeItem() {
+  // Same source of truth as the App-level `dark` state: the class on <html>,
+  // re-read on the theme change event so a toggle elsewhere updates this row.
+  const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
+  useEffect(() => {
+    const sync = () => setDark(document.documentElement.classList.contains("dark"));
+    window.addEventListener(THEME_CHANGE_EVENT, sync);
+    return () => window.removeEventListener(THEME_CHANGE_EVENT, sync);
+  }, []);
+  return (
+    <DropdownMenuItem
+      closeOnClick={false}
+      onClick={() => setThemePreference(!document.documentElement.classList.contains("dark"))}
+      aria-label="Toggle dark mode"
+    >
+      {dark ? (
+        <Moon className="size-5 shrink-0 text-muted-foreground" />
+      ) : (
+        <Sun className="size-5 shrink-0 text-muted-foreground" />
+      )}
+      <span className="flex-1">Dark mode</span>
+      <Switch checked={dark} tabIndex={-1} aria-hidden="true" className="pointer-events-none" />
+    </DropdownMenuItem>
+  );
+}
+
+function PagesMenuFilmModeItem() {
+  const filmMode = useFilmMode();
+  return (
+    <DropdownMenuItem
+      closeOnClick={false}
+      onClick={() => setFilmMode(!filmMode)}
+      aria-label="Toggle film mode"
+    >
+      <EyeOff className="size-5 shrink-0 text-muted-foreground" />
+      <span className="flex-1">Film mode</span>
+      <Switch
+        checked={filmMode}
+        tabIndex={-1}
+        aria-hidden="true"
+        className="pointer-events-none"
+      />
+    </DropdownMenuItem>
   );
 }
 
@@ -11338,6 +11578,7 @@ function LiveView({
   onRefresh,
   onRenameSession,
   onRemove,
+  onHideFromRoster,
   onNew,
   findings = [],
   autoAgents = [],
@@ -11415,6 +11656,8 @@ function LiveView({
   onRefresh: () => Promise<void>;
   onRenameSession: RenameSession;
   onRemove: (sid: string) => void;
+  /** Remove a completed session from the Live roster, keeping Resume intact. */
+  onHideFromRoster?: (sid: string) => void;
   onNew: () => void;
   findings: AutoFinding[];
   autoAgents: AutoAgent[];
@@ -11506,10 +11749,21 @@ function LiveView({
   // the refresh reconcile. A session that already ended 404s, which is not an
   // error the person swiping needs to hear about. Any other failure rolls the
   // row back, because the tombstone has no expiry of its own.
+  const appDialog = useAppDialog();
   const restoreSession = useContext(SessionRestoreContext);
+  // A swipe is not consent on its own: the stop-and-archive confirm runs here
+  // before the row disappears. The session menus confirm in-place instead
+  // (DoubleConfirmAction), so they never route through this callback.
   const archiveSession = useCallback(
     async (sid: string) => {
       if (!sid) return;
+      const confirmed = await appDialog.confirm({
+        title: "Stop and archive this chat?",
+        description: "This stops the agent and frees its slot. You can resume the chat later.",
+        confirmLabel: "Stop and archive",
+        destructive: true,
+      });
+      if (!confirmed) return;
       haptic("selection");
       onRemove(sid);
       try {
@@ -11527,7 +11781,7 @@ function LiveView({
         await onRefresh().catch(() => {});
       }
     },
-    [onRemove, onRefresh, restoreSession],
+    [appDialog, onRemove, onRefresh, restoreSession],
   );
 
   // Opening a session from the list navigates; the view below follows the URL.
@@ -11644,6 +11898,9 @@ function LiveView({
           onRefresh={onRefresh}
           onRenameSession={onRenameSession}
           onRemove={onRemove}
+          onHideFromRoster={
+            session.shippedReview ? () => onHideFromRoster?.(session.sessionId ?? "") : undefined
+          }
           onOpenSheet={(sid, origin) => {
             setSheetOrigin(origin);
             onOpenSessionPage?.(sid);
@@ -11724,6 +11981,7 @@ function LiveView({
         onRefresh={onRefresh}
         onRenameSession={onRenameSession}
         onRemove={onRemove}
+        onHideFromRoster={onHideFromRoster}
         findings={findings}
         nameFor={nameFor}
         onOpenReport={onOpenReport}
@@ -11776,6 +12034,9 @@ function LiveView({
         users={users}
         onRefresh={onRefresh}
         onRemove={onRemove}
+        onHideFromRoster={
+          session.shippedReview ? () => onHideFromRoster?.(sid) : undefined
+        }
         topPinned={pinnedSet.has(sid)}
         onToggleTopPin={toggleTopPin}
         // Stage pinning is a desktop idea: it means "keep this as a column".
@@ -11797,7 +12058,13 @@ function LiveView({
           collapsed={false}
           onActivate={() => openSessionPage(sid)}
           onTogglePin={() => toggleTopPin(sid)}
-          onArchive={() => void archiveSession(sid)}
+          onArchive={
+            !session.shippedReview &&
+            !isBotConversation(session) &&
+            session.spawnedBy !== "schedule"
+              ? () => void archiveSession(sid)
+              : undefined
+          }
         />
       </RailSessionContextMenu>
     );
@@ -11887,6 +12154,9 @@ function LiveView({
         onRefresh={onRefresh}
         onRenameSession={onRenameSession}
         onRemove={onRemove}
+        onHideFromRoster={
+          sheetSession.shippedReview ? () => onHideFromRoster?.(openSessionId) : undefined
+        }
         pinned={pinnedSet.has(openSessionId)}
         onTogglePin={sheetSession.shippedReview ? undefined : toggleTopPin}
         onClose={() => onCloseSessionPage?.()}
@@ -11915,6 +12185,7 @@ function RailStage({
   onRefresh,
   onRenameSession,
   onRemove,
+  onHideFromRoster,
   findings = [],
   nameFor,
   onOpenReport,
@@ -11990,6 +12261,7 @@ function RailStage({
   onRefresh: () => Promise<void>;
   onRenameSession: RenameSession;
   onRemove: (sid: string) => void;
+  onHideFromRoster?: (sid: string) => void;
   findings: AutoFinding[];
   nameFor: (id: string) => string;
   /** Open the report sheet for one agent's open findings. */
@@ -12860,6 +13132,9 @@ function RailStage({
         users={users}
         onRefresh={onRefresh}
         onRemove={onRemove}
+        onHideFromRoster={
+          session.shippedReview ? () => onHideFromRoster?.(sid) : undefined
+        }
         topPinned={topPinnedSet.has(sid)}
         onToggleTopPin={onToggleTopPin}
         stagePinned={validPinned.includes(sid)}
@@ -12884,6 +13159,13 @@ function RailStage({
           collapsed={railCollapsed}
           onActivate={(shift) => activate(sid, shift)}
           onTogglePin={() => togglePin(sid)}
+          onArchive={
+            !session.shippedReview &&
+            !isBotConversation(session) &&
+            session.spawnedBy !== "schedule"
+              ? () => void closeSession(sid)
+              : undefined
+          }
         />
       </RailSessionContextMenu>
     );
@@ -12951,6 +13233,9 @@ function RailStage({
             onRefresh={onRefresh}
             onRenameSession={onRenameSession}
             onRemove={onRemove}
+            onHideFromRoster={
+              session.shippedReview ? () => onHideFromRoster?.(sid) : undefined
+            }
             variant="stage"
             onClose={onCloseColumn}
             entering={recentlyCreatedSids.has(sid)}
@@ -13962,7 +14247,7 @@ const RailRow = memo(function RailRow({
           <>
             <span className="flex min-w-0 flex-1 flex-col gap-0.5">
               <span className="flex items-baseline gap-1.5">
-                <span className="min-w-0 flex-1 truncate text-base font-semibold leading-tight">
+                <span className="lfg-film-blur min-w-0 flex-1 truncate text-base font-semibold leading-tight">
                   {title}
                 </span>
                 {titleBadge}
@@ -14133,7 +14418,7 @@ const RailItem = memo(function RailItem({
           )}
           {!drivingBot && showFavicon && showAgentIcons ? (
             <span
-              title={session.agentLabel || agentIconAlt(session.agent)}
+              title={session.agentLabel || sessionIconAlt(session.agent, session.model)}
               className="absolute bottom-1 right-1 flex size-[18px] items-center justify-center rounded-md bg-card ring-2 ring-card"
             >
               <AgentMark
@@ -14211,6 +14496,9 @@ const RailItem = memo(function RailItem({
       trailingHover={
         // A committed pin becomes a small corner badge. The timestamp remains
         // readable because it is identity, not hover UI.
+        // Stop-and-archive deliberately does NOT live here: a visible
+        // control in this slot overlaps the row content; the action is a
+        // guarded DoubleConfirm entry in RailSessionContextMenu instead.
         <button
           type="button"
           onClick={(e) => {
@@ -15590,6 +15878,7 @@ function SessionChatBody({
   beforeComposer,
 }: SessionChatProps) {
   const sid = session.sessionId;
+  const chatNavigate = useNavigate();
   const reviewingShipped = !!session.shippedReview;
   // Open ask-user questions raised BY this session. The conversation shows them
   // above the composer (SessionQuestionPanel) and the composer is their reply
@@ -15647,11 +15936,16 @@ function SessionChatBody({
   const chat = useOmgChat();
   const { messages: uiMessages, setMessages, sendMessage: sendChatMessage, status: chatStatus } = chat;
   const chatMessages = useMemo(() => omgUIMessagesToMessages(uiMessages), [uiMessages]);
+  const inspectionPageUrl = useMemo(
+    () => resolveSessionInspectionUrl(chatMessages),
+    [chatMessages],
+  );
   // Busy straight from the transcript subscription: the harness flips it the
   // moment it starts a turn, ahead of the ~1s status-poll row that feeds the
   // `busy` prop, so the working indicator tracks the session even for turns
   // driven from another device (where chatStatus never leaves "ready").
   const [liveBusy, setLiveBusy] = useState(false);
+  const [inspectionOpening, setInspectionOpening] = useState(false);
   const chatBusy = busy || liveBusy || chatStatus === "submitted" || chatStatus === "streaming";
   const { composerSendMode } = useContext(ViewPrefsContext);
   const alternateSendMode: ComposerSendMode = composerSendMode === "queue" ? "steer" : "queue";
@@ -15711,6 +16005,38 @@ function SessionChatBody({
     },
     [onTyping, session.project, session.title, sid, stashContext],
   );
+  const openComputerInspection = useCallback(
+    async (sessionId: string, pageUrl: string | null) => {
+      if (!sessionId || sessionId !== sid) return;
+      setInspectionOpening(true);
+      try {
+        // The browser cache can contain only the recent end of a long chat and
+        // session titles are display-clipped. Resolve against the server
+        // transcript at click time so `github.com/st` can never replace the
+        // complete user URL merely because it fits in the title.
+        const resolvedPageUrl = await fetchSessionInspectionUrl(
+          sessionId,
+          chatMessages,
+        ).catch(() => pageUrl);
+        // Keep the page target out of browser history: query strings can carry
+        // private state. The route only exposes the immutable return session.
+        stashSessionInspectionTarget(sessionId, resolvedPageUrl);
+        haptic("selection");
+        await chatNavigate({
+          to: "/$tab",
+          params: { tab: "computer" },
+          search: (previous) => ({
+            ...(previous.embed ? { embed: true } : {}),
+            ...(previous.embedOrigin ? { embedOrigin: previous.embedOrigin } : {}),
+            inspectSession: sessionId,
+          }),
+        });
+      } finally {
+        setInspectionOpening(false);
+      }
+    },
+    [chatMessages, chatNavigate, sid],
+  );
   // Faces and names for whoever is typing. An id with no roster row still
   // renders, as the existing "somebody else" placeholder: the id came from the
   // server, so dropping it would hide a real person rather than admit we
@@ -15734,7 +16060,26 @@ function SessionChatBody({
   // SessionChat can be reused as the focused card changes. Recover that
   // session's own draft instead of carrying text across cards.
   useEffect(() => {
-    setMessageTextState(readPromptDraft(stashContext)?.text ?? "");
+    const draft = readPromptDraft(stashContext)?.text ?? "";
+    setMessageTextState(draft);
+    if (draft.includes("<computer_inspection_context>")) {
+      setDictationScrollNonce((nonce) => nonce + 1);
+    }
+  }, [stashContext]);
+
+  // Design Mode can populate this session while the Computer page is visible.
+  // Prompt stash is the durable cross-page handoff; this event also updates an
+  // already-mounted composer immediately without sending anything to the agent.
+  useEffect(() => {
+    const refreshDraft = () => {
+      const draft = readPromptDraft(stashContext)?.text ?? "";
+      setMessageTextState(draft);
+      if (draft.includes("<computer_inspection_context>")) {
+        setDictationScrollNonce((nonce) => nonce + 1);
+      }
+    };
+    window.addEventListener(PROMPT_STASH_EVENT, refreshDraft);
+    return () => window.removeEventListener(PROMPT_STASH_EVENT, refreshDraft);
   }, [stashContext]);
 
   // Closing the card, or switching it to another session, ends any claim this
@@ -16206,6 +16551,15 @@ function SessionChatBody({
             >
               <Plus className="size-4" />
             </Button>
+            {sid ? (
+              <SessionComputerInspectionAction
+                sessionId={sid}
+                sessionTitle={session.title || session.project || "Current session"}
+                pageUrl={inspectionPageUrl}
+                disabled={sending || historyLoading || inspectionOpening}
+                onOpen={openComputerInspection}
+              />
+            ) : null}
             <ComposerTextarea
               textareaRef={messageInputRef}
               data-composer-sid={sid}
@@ -16430,7 +16784,7 @@ function SessionTitleLine({ title }: { title: string }) {
       <div
         ref={lineRef}
         className={cn(
-          "text-[17px] font-semibold leading-tight whitespace-nowrap",
+          "lfg-film-blur text-[17px] font-semibold leading-tight whitespace-nowrap",
           marquee ? "lfg-marquee inline-block" : "overflow-hidden text-ellipsis",
         )}
         style={
@@ -16583,6 +16937,7 @@ function SessionActionsMenu({
   onRemove,
   onError,
   onRename,
+  onHideFromRoster,
   onRegenerateTitle,
   triggerClassName,
   pinned,
@@ -16595,6 +16950,8 @@ function SessionActionsMenu({
   onRemove: (sid: string) => void;
   onError: (error: string | null) => void;
   onRename?: () => void;
+  /** List-only cleanup for a finished, resumable session. */
+  onHideFromRoster?: () => void;
   onRegenerateTitle?: () => void;
   triggerClassName?: string;
   pinned?: boolean;
@@ -16802,16 +17159,26 @@ function SessionActionsMenu({
                   Stop
                 </DropdownMenuItem>
               ) : null}
-              <DoubleConfirmAction
-                render={<DropdownMenuItem variant="destructive" />}
-                label="Archive session"
-                confirmLabel="Confirm archive"
-                pendingLabel="Archiving…"
-                icon={<Archive className="size-4" />}
-                onConfirm={close}
-                resetKey={sid}
-              />
             </>
+          ) : null}
+          {canDriveSession(session) &&
+          !isBotConversation(session) &&
+          session.spawnedBy !== "schedule" ? (
+            <DoubleConfirmAction
+              render={<DropdownMenuItem variant="destructive" />}
+              label="Stop and archive"
+              confirmLabel="Confirm stop and archive"
+              pendingLabel="Stopping…"
+              icon={<Archive className="size-4" />}
+              onConfirm={close}
+              resetKey={sid}
+            />
+          ) : null}
+          {session.shippedReview && onHideFromRoster ? (
+            <DropdownMenuItem disabled={!sid} onClick={onHideFromRoster}>
+              <EyeOff className="size-4" />
+              Remove from list
+            </DropdownMenuItem>
           ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
@@ -16833,6 +17200,7 @@ function RailSessionContextMenu({
   onToggleStagePin,
   onOpen,
   onCloseColumn,
+  onHideFromRoster,
   children,
 }: {
   session: Session;
@@ -16846,6 +17214,7 @@ function RailSessionContextMenu({
   onToggleStagePin: () => void;
   onOpen: () => void;
   onCloseColumn?: () => void;
+  onHideFromRoster?: () => void;
   children: ReactNode;
 }) {
   const {
@@ -17017,16 +17386,26 @@ function RailSessionContextMenu({
                   Stop
                 </ContextMenuItem>
               ) : null}
-              <DoubleConfirmAction
-                render={<ContextMenuItem variant="destructive" />}
-                label="Archive session"
-                confirmLabel="Confirm archive"
-                pendingLabel="Archiving…"
-                icon={<Archive className="size-4" />}
-                onConfirm={close}
-                resetKey={sid}
-              />
             </>
+          ) : null}
+          {canDriveSession(session) &&
+          !isBotConversation(session) &&
+          session.spawnedBy !== "schedule" ? (
+            <DoubleConfirmAction
+              render={<ContextMenuItem variant="destructive" />}
+              label="Stop and archive"
+              confirmLabel="Confirm stop and archive"
+              pendingLabel="Stopping…"
+              icon={<Archive className="size-4" />}
+              onConfirm={close}
+              resetKey={sid}
+            />
+          ) : null}
+          {session.shippedReview && onHideFromRoster ? (
+            <ContextMenuItem disabled={!sid} onClick={onHideFromRoster}>
+              <EyeOff className="size-4" />
+              Remove from list
+            </ContextMenuItem>
           ) : null}
         </ContextMenuContent>
       </ContextMenu>
@@ -17137,6 +17516,7 @@ function SessionTitleSheet({
   onRefresh,
   onRenameSession,
   onRemove,
+  onHideFromRoster,
   pinned,
   onTogglePin,
   onClose,
@@ -17159,6 +17539,7 @@ function SessionTitleSheet({
   onRefresh: () => Promise<void>;
   onRenameSession: RenameSession;
   onRemove: (sid: string) => void;
+  onHideFromRoster?: () => void;
   pinned: boolean;
   onTogglePin?: (sid: string) => void;
   onClose: () => void;
@@ -17445,130 +17826,6 @@ function SessionTitleSheet({
     });
   }, [flipTransform, onClose]);
 
-  // Full-details-only gesture: swipe up from the session composer to dismiss
-  // the zoomed-in sheet. This deliberately starts only from the input bar area,
-  // leaving transcript scroll and header touches alone.
-  useEffect(() => {
-    const panel = panelRef.current;
-    if (!panel) return;
-    const DISMISS_Y = 88;
-    const VELOCITY = 0.45; // px/ms
-    const st = { active: false, decided: false, dismissing: false, x0: 0, y0: 0, y: 0, t0: 0 };
-    const setY = (y: number, animate = false) => {
-      panel.style.transition = animate
-        ? "transform 180ms cubic-bezier(0.22,1,0.36,1), opacity 180ms ease"
-        : "none";
-      panel.style.transform = y ? `translate3d(0, ${y}px, 0)` : "";
-      panel.style.opacity = y ? `${1 - Math.min(0.16, Math.abs(y) / 1200)}` : "";
-    };
-    const finishDismiss = () => {
-      if (closingRef.current) return;
-      closingRef.current = true;
-      haptic("selection");
-      const backdrop = backdropRef.current;
-      const body = bodyRef.current;
-      let done = false;
-      const finish = () => {
-        if (done) return;
-        done = true;
-        onClose();
-      };
-      panel.getAnimations().forEach((animation) => animation.cancel());
-      panel.style.transition =
-        "transform 300ms cubic-bezier(0.32,0.72,0,1), opacity 220ms ease-out";
-      panel.style.transform = "translate3d(0, -105%, 0)";
-      panel.style.opacity = "0.92";
-      const onTransitionEnd = (event: TransitionEvent) => {
-        if (event.propertyName !== "transform") return;
-        panel.removeEventListener("transitionend", onTransitionEnd);
-        finish();
-      };
-      panel.addEventListener("transitionend", onTransitionEnd);
-      window.setTimeout(finish, 340);
-      if (backdrop) {
-        backdrop.style.transition = "opacity 240ms ease-out";
-        backdrop.style.opacity = "0";
-      }
-      if (body) {
-        body.style.transition = "transform 260ms cubic-bezier(0.32,0.72,0,1), opacity 180ms ease-out";
-        body.style.transform = "translate3d(0, -18px, 0)";
-        body.style.opacity = "0";
-      }
-    };
-    const onStart = (event: TouchEvent) => {
-      if (closingRef.current || event.touches.length !== 1) return;
-      const target = event.target as HTMLElement | null;
-      if (!target?.closest("form")) return;
-      const touch = event.touches[0];
-      st.active = true;
-      st.decided = false;
-      st.dismissing = false;
-      st.x0 = touch.clientX;
-      st.y0 = touch.clientY;
-      st.y = 0;
-      st.t0 = performance.now();
-      panel.getAnimations().forEach((animation) => {
-        if (animation.playState !== "finished") animation.cancel();
-      });
-      setY(0);
-    };
-    const onMove = (event: TouchEvent) => {
-      if (!st.active) return;
-      const touch = event.touches[0];
-      const dx = touch.clientX - st.x0;
-      const dy = touch.clientY - st.y0;
-      if (!st.decided) {
-        if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
-        st.decided = true;
-        st.dismissing = dy < 0 && Math.abs(dy) > Math.abs(dx) * 1.2;
-        if (!st.dismissing) {
-          st.active = false;
-          return;
-        }
-      }
-      if (!st.dismissing) return;
-      event.preventDefault();
-      st.y = -Math.min(Math.abs(dy), window.innerHeight * 0.6);
-      setY(st.y);
-      const backdrop = backdropRef.current;
-      if (backdrop) backdrop.style.opacity = `${1 - Math.min(0.35, Math.abs(st.y) / 520)}`;
-    };
-    const onEnd = () => {
-      if (!st.active) return;
-      st.active = false;
-      const dt = Math.max(1, performance.now() - st.t0);
-      const velocity = st.y / dt;
-      if (st.dismissing && (st.y <= -DISMISS_Y || velocity <= -VELOCITY)) {
-        finishDismiss();
-        return;
-      }
-      setY(0, true);
-      const backdrop = backdropRef.current;
-      if (backdrop) {
-        backdrop.style.transition = "opacity 180ms ease";
-        backdrop.style.opacity = "";
-        window.setTimeout(() => {
-          backdrop.style.transition = "";
-        }, 200);
-      }
-      window.setTimeout(() => {
-        panel.style.transition = "";
-        panel.style.transform = "";
-        panel.style.opacity = "";
-      }, 200);
-    };
-    panel.addEventListener("touchstart", onStart, { passive: true });
-    panel.addEventListener("touchmove", onMove, { passive: false });
-    panel.addEventListener("touchend", onEnd, { passive: true });
-    panel.addEventListener("touchcancel", onEnd, { passive: true });
-    return () => {
-      panel.removeEventListener("touchstart", onStart);
-      panel.removeEventListener("touchmove", onMove);
-      panel.removeEventListener("touchend", onEnd);
-      panel.removeEventListener("touchcancel", onEnd);
-    };
-  }, [onClose]);
-
   // Escape-to-close, arrow-keys-to-switch + lock background scroll while open.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -17682,6 +17939,7 @@ function SessionTitleSheet({
             onRename={
               session.shippedReview ? undefined : () => setRenamingInline(true)
             }
+            onHideFromRoster={onHideFromRoster}
             onRegenerateTitle={
               session.shippedReview ? undefined : (regenerateTitle ?? undefined)
             }
@@ -17953,6 +18211,7 @@ function ForkSessionDialog({
           </div>
 
           <div className="mt-4 flex items-center gap-2">
+            <ComposerUsageIndicator agent={agent} accountId={claudeAccountId} />
             <Button
               size="icon-sm"
               type="button"
@@ -18012,6 +18271,7 @@ const SessionCard = memo(function SessionCard({
   onRefresh,
   onRenameSession,
   onRemove,
+  onHideFromRoster,
   onOpenSheet,
   variant = "grid",
   onClose,
@@ -18034,6 +18294,7 @@ const SessionCard = memo(function SessionCard({
   onRefresh: () => Promise<void>;
   onRenameSession: RenameSession;
   onRemove: (sid: string) => void;
+  onHideFromRoster?: () => void;
   // Tapping the title asks the parent to open the full-height detail sheet
   // for this sid, anchored to the title's rect. The sheet lives at the parent so
   // it can switch between sessions; undefined → the gesture is disabled.
@@ -18431,7 +18692,7 @@ const onTouchStart = (e: ReactTouchEvent) => {
                   "cursor-text rounded-md hover:bg-muted/50",
               )}
             >
-              <div className="flex min-w-0 flex-1 flex-col">
+              <div className="lfg-film-blur flex min-w-0 flex-1 flex-col">
                 <div className="truncate text-[15px] font-semibold leading-tight">
                   {headerBot ? headerBot.name : titleForSession(session)}
                 </div>
@@ -18512,7 +18773,7 @@ const onTouchStart = (e: ReactTouchEvent) => {
                 />
               }
             >
-              {session.model || "model"}
+              {omgModelLabel(session.model) || "model"}
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="min-w-32">
               <DropdownMenuRadioGroup
@@ -18524,7 +18785,7 @@ const onTouchStart = (e: ReactTouchEvent) => {
                 <DropdownMenuLabel>Model</DropdownMenuLabel>
                 {((catalog.models[session.agent as AgentKind] ?? AGENT_MODELS[session.agent as AgentKind]) ?? CLAUDE_MODELS).map((item) => (
                   <DropdownMenuRadioItem key={item} value={item}>
-                    {item}
+                    {omgModelLabel(item)}
                   </DropdownMenuRadioItem>
                 ))}
               </DropdownMenuRadioGroup>
@@ -18532,7 +18793,7 @@ const onTouchStart = (e: ReactTouchEvent) => {
           </DropdownMenu>
         ) : session.model ? (
           <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-            {session.model}
+            {omgModelLabel(session.model)}
           </span>
         ) : null)}
         {session.fastMode === true || session.serviceTier === "fast" ? (
@@ -18582,6 +18843,7 @@ const onTouchStart = (e: ReactTouchEvent) => {
             onRemove={onRemove}
             onError={setError}
             onRename={session.shippedReview ? undefined : startRename}
+            onHideFromRoster={onHideFromRoster}
             onRegenerateTitle={
               session.shippedReview ? undefined : (regenerateTitle ?? undefined)
             }
@@ -21349,6 +21611,9 @@ export type ResumableSession = {
   lastUserText: string | null;
   agent: "omg" | "claude" | "codex" | "opencode" | "grok" | "cursor" | "fx" | "muse";
   model?: string | null;
+  // Roster email the session was attributed to (mirrors the server type), so
+  // historical rows can respect the owner filter like live ones do.
+  assignedUser?: string | null;
   // When the session was archived. The list is ordered on this, so the row
   // labels it too; null for rows that predate the field, which fall back to
   // lastActivityAt exactly as the server's ORDER BY does.
@@ -22541,7 +22806,7 @@ function NewSessionDialog({
     });
     const resumeModel =
       session.agent === "claude"
-        ? ["fable", "claude-fable-5-1", "opus", "sonnet", "haiku"].includes(model)
+        ? CLAUDE_MODELS.includes(model)
           ? model
           : undefined
         : session.agent === "opencode" || session.agent === "omg"
@@ -22687,14 +22952,6 @@ function NewSessionDialog({
     setProjectSheetOpen(false);
   }
 
-  // A pinned account shows its own limits. Claude Auto has no pinned account,
-  // so it folds every connected Claude profile into one combined-capacity ring.
-  const { usage, loading: usageLoading } = useProviderUsage({
-    agent,
-    accountId: agent === "aisdk" ? claudeAccountId || null : null,
-    combineAccounts: agent === "aisdk" && !claudeAccountId,
-    enabled: open,
-  });
 
   useEffect(() => {
     if (!models.includes(model)) setModel(models[0]);
@@ -23352,11 +23609,7 @@ function NewSessionDialog({
         )}
       >
         {/* Left: Apple-Watch-style usage rings; tap to expand the breakdown. */}
-        {usageLoading ? (
-          <UsageRingsLoadingIndicator />
-        ) : usage ? (
-          <UsageRingsButton provider={usage} />
-        ) : null}
+        <ComposerUsageIndicator agent={agent} accountId={claudeAccountId} enabled={open} />
         <span
           className={cn(
             "min-w-0 flex-1 truncate text-xs",
@@ -24375,6 +24628,7 @@ function ComposerThinkingControl({
   onChange: (value: ThinkingLevel) => void;
   flat: boolean;
 }) {
+  const automatic = levels.length === 0;
   const scrub = useThinkingScrub({
     value,
     levels,
@@ -24390,14 +24644,19 @@ function ComposerThinkingControl({
     <>
       <button
         type="button"
+        disabled={automatic}
         role="slider"
-        aria-label="Thinking effort"
+        aria-label={automatic ? "Thinking effort: Auto" : "Thinking effort selector"}
         aria-valuemin={0}
         aria-valuemax={Math.max(0, levels.length - 1)}
         aria-valuenow={currentIndex}
-        aria-valuetext={value}
+        aria-valuetext={automatic ? "auto" : value}
         aria-expanded={scrub.sticky}
-        title="Click for the slider — or hold and slide, or use the arrow keys"
+        title={
+          automatic
+            ? "This model chooses thinking effort automatically"
+            : "Click for the slider — or hold and slide, or use the arrow keys"
+        }
         {...scrub.pointerProps}
         onClick={(event) => {
           // A press that opened the scrubber ends in a click of its own; that
@@ -24435,15 +24694,14 @@ function ComposerThinkingControl({
           (scrub.scrubbing || scrub.sticky) && "scale-[1.02] bg-foreground/10",
         )}
       >
-        {/* The signal bars say "thinking"; the word was redundant next to
-            them. The pill reads as signal + level (e.g. "Medium"), and the
-            aria-label above keeps the full name for screen readers. */}
+        {/* Name the setting visibly. The signal alone was too easy to miss,
+            especially beside a model name and on narrow screens. */}
         <ThinkingSignal value={shown} levels={levels} />
         <span
-          className="max-w-16 truncate text-xs font-medium capitalize transition-colors duration-150"
+          className="max-w-28 truncate text-xs font-medium transition-colors duration-150"
           style={scrub.scrubbing ? { color: scrub.previewAccent } : undefined}
         >
-          {thinkingLevelLabel(shown)}
+          {automatic ? "Thinking: Auto" : `Thinking: ${thinkingLevelLabel(shown)}`}
         </span>
       </button>
 
@@ -24820,7 +25078,7 @@ export function ModelOptionList({
                 key={item}
                 type="button"
                 onClick={() => onChoose(item)}
-                title={hosted ? `${hosted.providerLabel} · ${item}` : undefined}
+                title={hosted ? `${hosted.providerLabel} · ${item}` : omgModelLabel(item) !== item ? item : undefined}
                 className={cn(
                   "flex w-full min-w-0 items-center gap-3 rounded-xl px-3 text-left text-sm outline-none transition-colors",
                   large ? "h-12" : "h-10",
@@ -24836,7 +25094,7 @@ export function ModelOptionList({
                     className={cn("size-4 shrink-0", selected ? "text-foreground" : "text-muted-foreground")}
                   />
                 ) : null}
-                <span className="min-w-0 flex-1 truncate">{hosted ? hosted.label : item}</span>
+                <span className="min-w-0 flex-1 truncate">{hosted ? hosted.label : omgModelLabel(item)}</span>
               </button>
             );
           })
@@ -26824,7 +27082,7 @@ function useServerStats(active: boolean, intervalMs = 3000): ServerStats | null 
 // snapshot above. It is fetched on expand and refreshed slowly: the panel's job
 // is deciding which session to close, and that answer does not change in 3s.
 // Polling it hard would make the memory-pressure tool a memory-pressure source.
-function useSessionUsage(active: boolean, intervalMs = 15000): SessionUsage | null {
+function useSessionUsage(active: boolean, intervalMs = 15000, revision = 0): SessionUsage | null {
   const [usage, setUsage] = useState<SessionUsage | null>(null);
   useEffect(() => {
     if (!active) return;
@@ -26843,7 +27101,7 @@ function useSessionUsage(active: boolean, intervalMs = 15000): SessionUsage | nu
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [active, intervalMs]);
+  }, [active, intervalMs, revision]);
   return usage;
 }
 
@@ -27287,7 +27545,7 @@ function MetricCard({
 }
 
 function ServerPerformancePanel({ stats }: { stats: ServerStats | null }) {
-  const cpuPct = stats ? Math.min(100, Math.round((stats.cpu.load1 / Math.max(1, stats.cpu.cores)) * 100)) : 0;
+  const cpuPct = stats?.history?.at(-1)?.cpuPct ?? 0;
   const hostUsed = stats ? stats.memory.hostTotalBytes - stats.memory.hostFreeBytes : 0;
   const hostPct = stats && stats.memory.hostTotalBytes > 0
     ? Math.round((hostUsed / stats.memory.hostTotalBytes) * 100)
@@ -27311,7 +27569,7 @@ function ServerPerformancePanel({ stats }: { stats: ServerStats | null }) {
         <div className="overflow-hidden rounded-2xl border border-border bg-card/40 divide-y divide-border">
           <MetricCard
             icon={<Cpu className="size-4" />}
-            label="CPU load"
+            label="CPU"
             value={stats ? `${cpuPct}%` : "—"}
             sub={stats ? `load ${stats.cpu.load1.toFixed(2)} · ${stats.cpu.cores} cores` : undefined}
             values={hist.map((h) => h.cpuPct)}
@@ -27446,14 +27704,14 @@ function SessionUsageComponentBar({ row }: { row: SessionUsageRow }) {
   );
 }
 
-function SessionUsageRowView({ row, hostTotal }: { row: SessionUsageRow; hostTotal: number }) {
+function SessionUsageRowView({ row, hostTotal, onChanged }: { row: SessionUsageRow; hostTotal: number; onChanged: (message: string) => void }) {
   const [open, setOpen] = useState(false);
   const share = hostTotal > 0 ? Math.round((row.memBytes / hostTotal) * 100) : 0;
   const parts = USAGE_COMPONENT_ORDER.filter((c) => (row.byComponent[c] ?? 0) > 0);
   const name = row.managedName ?? row.sessionId?.slice(0, 8) ?? "unknown";
 
   return (
-    <div className="px-4 py-3">
+    <div className="px-4 py-3" data-session-usage-key={row.key}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -27462,7 +27720,7 @@ function SessionUsageRowView({ row, hostTotal }: { row: SessionUsageRow; hostTot
       >
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
-            <span className="truncate text-sm font-medium tabular-nums">{name}</span>
+            <span className="break-words text-sm font-medium">{row.title || name}</span>
             {row.orphan ? (
               <span className="shrink-0 rounded bg-amber-500/15 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-amber-600 dark:text-amber-500">
                 orphaned
@@ -27470,7 +27728,7 @@ function SessionUsageRowView({ row, hostTotal }: { row: SessionUsageRow; hostTot
             ) : null}
           </div>
           {row.title ? (
-            <div className="truncate text-xs text-muted-foreground">{row.title}</div>
+            <div className="text-xs text-muted-foreground">{name} · {row.live ? "Open" : "Gesloten"}</div>
           ) : null}
           <div className="text-xs text-muted-foreground tabular-nums">
             {row.procCount} {row.procCount === 1 ? "process" : "processes"}
@@ -27533,6 +27791,7 @@ function SessionUsageRowView({ row, hostTotal }: { row: SessionUsageRow; hostTot
           ) : null}
         </div>
       ) : null}
+      <SessionUsageControls row={row} request={(path, body) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })} onChanged={onChanged} />
     </div>
   );
 }
@@ -27541,8 +27800,11 @@ function SessionUsageRowView({ row, hostTotal }: { row: SessionUsageRow; hostTot
 // under pressure; this says what to close, which is the only actionable form of
 // that information short of SSHing in and reading `ps`.
 function SessionUsagePanel() {
+  const [revision, setRevision] = useState(0);
+  const [result, setResult] = useState("");
+  const onChanged = (message: string) => { setResult(message); toast(message); setRevision(n => n + 1); };
   const [open, setOpen] = useState(false);
-  const usage = useSessionUsage(open);
+  const usage = useSessionUsage(open, 15000, revision);
   const host = usage?.host;
   const rows = usage?.sessions ?? [];
   const orphanRows = rows.filter((row) => row.orphan);
@@ -27555,6 +27817,7 @@ function SessionUsagePanel() {
       <h2 className="px-4 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
         Per-session breakdown
       </h2>
+      {result && <p role="status" className="px-4 text-sm">{result}</p>}
       <div className="overflow-hidden rounded-2xl border border-border bg-card/40">
         <button
           type="button"
@@ -27612,8 +27875,7 @@ function SessionUsagePanel() {
                     {orphanRows.length === 1 ? "session" : "sessions"}
                   </div>
                   <div className="mt-0.5 text-[11px] text-muted-foreground">
-                    Closing a session stops its agent, tmux and browser, but not the dev
-                    servers it started — those keep running until something reclaims them.
+                    Gesloten sessies kunnen nog processen hebben. Gebruik per sessie Restprocessen stoppen om ze handmatig te controleren.
                   </div>
                 </div>
               ) : null}
@@ -27625,6 +27887,7 @@ function SessionUsagePanel() {
                       key={row.key}
                       row={row}
                       hostTotal={host.memTotalBytes}
+                      onChanged={onChanged}
                     />
                   ))
                 ) : (
@@ -27945,11 +28208,15 @@ function UsageLimitsSection() {
   const useBankedReset = useCallback(async (
     credit: import("./lib/usage").RateLimitResetCredit,
     availableCount: number,
+    source: { kind: string; id: string } = { kind: "codex", id: "codex" },
   ) => {
     if (!credit.id || usingCreditId) return;
+    const name = source.kind === "claude" ? "Claude" : "Codex";
     const confirmed = await appDialog.confirm({
       title: `Use 1 of ${availableCount} banked ${availableCount === 1 ? "reset" : "resets"}?`,
-      description: "This immediately resets your current Codex rate-limit window and cannot be undone.",
+      description: source.kind === "claude"
+        ? "This immediately resets your Claude 5-hour and weekly limits (via claude.ai in the Computer browser) and cannot be undone."
+        : "This immediately resets your current Codex rate-limit window and cannot be undone.",
       confirmLabel: "Use reset",
       destructive: true,
     });
@@ -27957,10 +28224,12 @@ function UsageLimitsSection() {
 
     setUsingCreditId(credit.id);
     try {
-      const { outcome } = await consumeBankedReset(credit.id, crypto.randomUUID());
-      if (outcome === "reset") toast.success("Codex limit reset. One banked reset was used.");
-      else if (outcome === "nothingToReset") toast("Your Codex limit does not need a reset yet.");
+      const { outcome } = await consumeBankedReset(credit.id, crypto.randomUUID(), source);
+      if (outcome === "reset") toast.success(`${name} limit reset. One banked reset was used.`);
+      else if (outcome === "nothingToReset") toast(`Your ${name} limit does not need a reset yet.`);
       else if (outcome === "alreadyRedeemed") toast("That reset was already used.");
+      else if (outcome === "cooldown") toast(`${name} resets are cooling down; try again later.`);
+      else if (outcome === "unavailable") toast.error(`${name} could not confirm the reset; refresh and check before trying again.`);
       else toast.error("No banked reset is available.");
       refresh();
     } catch (cause) {
@@ -28031,7 +28300,12 @@ function UsageLimitsSection() {
                       <BankedResetCredits
                         value={p.resetCredits}
                         usingCreditId={usingCreditId}
-                        onUse={(credit) => void useBankedReset(credit, p.resetCredits!.availableCount)}
+                        providerLabel={p.kind === "claude" ? "Claude" : "Codex"}
+                        onUse={(credit) =>
+                          void useBankedReset(credit, p.resetCredits!.availableCount, {
+                            kind: p.kind,
+                            id: p.id,
+                          })}
                       />
                     ) : null}
                     {p.note ? (
@@ -28723,6 +28997,7 @@ function MoreView({
 }) {
   const uiFeedback = useUiFeedbackPrefs();
   const navigationPrefs = useNavigationPrefs();
+  const filmMode = useFilmMode();
 
   return (
     <div className="mx-auto max-w-xl space-y-8 pb-10" data-lfg-page-column>
@@ -28866,6 +29141,26 @@ function MoreView({
               checked={navigationPrefs.swipeBetweenChats}
               onCheckedChange={(v) => setNavigationPrefs({ swipeBetweenChats: v })}
               aria-label="Toggle swipe between chats"
+            />
+          </div>
+          {/* Film mode: blur titles, previews, messages and terminals on this
+              browser only, so the screen can be recorded without leaking what
+              the agents are doing. A presentation switch, never a setting the
+              server knows about. */}
+          <div className="flex items-center justify-between gap-4 px-4 py-2.5">
+            <div className="flex items-center gap-3">
+              <span className="flex size-7 items-center justify-center rounded-[7px] bg-primary text-white">
+                <EyeOff className="size-4" />
+              </span>
+              <span className="flex min-w-0 flex-col">
+                <span className="text-sm font-medium">Film mode</span>
+                <span className="text-xs text-muted-foreground">Blur titles and output for recording</span>
+              </span>
+            </div>
+            <Switch
+              checked={filmMode}
+              onCheckedChange={(v) => setFilmMode(v)}
+              aria-label="Toggle film mode"
             />
           </div>
         </div>

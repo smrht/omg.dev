@@ -441,3 +441,14 @@ describe("dismissAllFindings — clearing the feed", () => {
     expect(await store.dismissAllFindings()).toBe(0);
   });
 });
+
+test("quiet survives a save that does not mention it, and can be switched", async () => {
+  const { saveAutoAgent, getAutoAgent } = await import("./store.ts");
+  const a = await saveAutoAgent({ name: "quiet-probe", prompt: "p", schedule: "0 9 * * *", enabled: false, quiet: true });
+  expect(a.quiet).toBe(true);
+  const b = await saveAutoAgent({ id: a.id, name: "quiet-probe", prompt: "p2", schedule: "0 9 * * *", enabled: false });
+  expect(b.quiet).toBe(true);
+  const c = await saveAutoAgent({ id: a.id, name: "quiet-probe", prompt: "p2", schedule: "0 9 * * *", enabled: false, quiet: false });
+  expect(c.quiet).toBe(false);
+  expect((await getAutoAgent(a.id))?.quiet).toBe(false);
+});

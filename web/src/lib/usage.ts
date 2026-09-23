@@ -40,7 +40,7 @@ export type RateLimitResetCredit = {
 
 export type RateLimitResetCredits = {
   availableCount: number;
-  /** null means Codex supplied a count but no per-credit expiry rows. */
+  /** null means the provider supplied a count but no per-credit expiry rows. */
   credits: RateLimitResetCredit[] | null;
 };
 
@@ -140,16 +140,27 @@ export async function fetchProviderUsage(
   return payload.provider;
 }
 
-export type ResetConsumeOutcome = "reset" | "nothingToReset" | "noCredit" | "alreadyRedeemed";
+export type ResetConsumeOutcome =
+  | "reset"
+  | "nothingToReset"
+  | "noCredit"
+  | "alreadyRedeemed"
+  | "cooldown"
+  | "unavailable";
 
+/** Redeem one banked reset. Claude sources go through claude.ai; the rest is Codex. */
 export async function consumeBankedReset(
   creditId: string,
   idempotencyKey: string,
+  source: { kind: string; id: string } = { kind: "codex", id: "codex" },
 ): Promise<{ outcome: ResetConsumeOutcome; provider: ProviderUsage }> {
-  return api("/api/usage/codex/reset-credit", {
+  const claude = source.kind === "claude";
+  return api(claude ? "/api/usage/claude/reset-credit" : "/api/usage/codex/reset-credit", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ creditId, idempotencyKey }),
+    body: JSON.stringify(
+      claude ? { providerId: source.id, creditId, idempotencyKey } : { creditId, idempotencyKey },
+    ),
   });
 }
 

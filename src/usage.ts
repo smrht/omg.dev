@@ -20,7 +20,7 @@
 // refresh — pays for that source alone instead of waiting on a Grok round-trip
 // and a walk of the Codex sessions tree.
 
-import { chmodSync, renameSync } from "node:fs";
+import { chmodSync, readFileSync, renameSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -32,6 +32,13 @@ import {
   type CodexRateLimitResetCredits,
 } from "./codex-rate-limits.ts";
 import { defaultModelForAgent } from "./agent-catalog.ts";
+import {
+  claudeOrgIdForToken,
+  claudeResetCredits,
+  claudeWebResetsPossible,
+  readClaudeWebResets,
+} from "./claude-web-resets.ts";
+import { readModelDiscoveryCacheSync, type ModelPricing } from "./model-discovery.ts";
 import { PATHS } from "./config.ts";
 import { museFetchInit } from "./muse-proxy.ts";
 import { cloudApiBaseUrl, createCloudAccount } from "./cloud-account.ts";
@@ -68,7 +75,7 @@ export type ProviderUsage = UsageProviderRef & {
   /** Human-readable explanation when `available` is false. */
   note?: string;
   windows?: UsageWindow[];
-  /** Earned Codex resets. Read-only: no redemption action exists in omg.dev. */
+  /** Banked resets: Codex earned resets, or Claude's claude.ai "Reset for free" grants. */
   resetCredits?: CodexRateLimitResetCredits;
 };
 
@@ -111,7 +118,27 @@ function decodeJwt(token: unknown): Record<string, unknown> | null {
 
 // ---------------------------------------------------------------- Claude ----
 
-async function claudeUsage(ref: UsageProviderRef): Promise<ProviderUsage> {
+// claude.ai-only "Reset for free" grants. Best effort: a failure here never
+// hides the 5h/7d windows, it only adds a note.
+async function claudeWebResetsFor(
+  token: string,
+  force: boolean,
+): Promise<Pick<ProviderUsage, "resetCredits" | "note">> {
+  try {
+    if (!claudeWebResetsPossible()) return {};
+    const orgId = await claudeOrgIdForToken(token);
+    if (!orgId) return {};
+    const read = await readClaudeWebResets(orgId, { force });
+    if (!read.ok) return { note: read.note };
+    const credits = claudeResetCredits(read.state);
+    if (!credits.credits.length) return read.note ? { note: read.note } : {};
+    return { resetCredits: credits, ...(read.note ? { note: read.note } : {}) };
+  } catch {
+    return {};
+  }
+}
+
+async function claudeUsage(ref: UsageProviderRef, force = false): Promise<ProviderUsage> {
   const base = { ...ref, plan: null as string | null };
   try {
     // Each numbered account keeps its own credentials under its own config dir,
@@ -134,6 +161,7 @@ async function claudeUsage(ref: UsageProviderRef): Promise<ProviderUsage> {
       five_hour?: { utilization?: number; resets_at?: string | null };
       seven_day?: { utilization?: number; resets_at?: string | null };
     };
+    const resets = await claudeWebResetsFor(token, force);
     return {
       ...base,
       available: true,
@@ -149,6 +177,7 @@ async function claudeUsage(ref: UsageProviderRef): Promise<ProviderUsage> {
           resetsAt: isoToMs(u.seven_day?.resets_at),
         },
       ],
+      ...resets,
     };
   } catch (e) {
     return { ...base, available: false, note: e instanceof Error ? e.message : String(e) };
@@ -1069,6 +1098,113 @@ async function museUsage(ref: UsageProviderRef, force = false): Promise<Provider
 
 const CACHE_TTL_MS = 60_000;
 
+
+// ---------------------------------------------------------------------------
+// Devin — no account-level usage API exists (probed 15-09-2026: api.devin.ai
+// v3/organizations/* answers 404, v1/enterprise/consumption 403 for a
+// non-enterprise org; the CLI itself only knows app.devin.ai/settings/usage).
+// The picker therefore shows what this box spent: the per-turn ledger that
+// devin-acp-session.ts appends from Devin's usage_update stream, priced with
+// the cost_summary discovery stored per variant uid. Percentages stay null —
+// there is no plan ceiling to measure against.
+
+export type DevinLedgerLine = {
+  at: number;
+  key?: string;
+  model?: string;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  cachedReadTokens?: number | null;
+  cachedWriteTokens?: number | null;
+};
+
+export function devinLedgerPath(): string {
+  return join(PATHS.data, "devin-usage", "ledger.jsonl");
+}
+
+export function readDevinLedger(path = devinLedgerPath()): DevinLedgerLine[] {
+  let raw = "";
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return [];
+  }
+  const lines: DevinLedgerLine[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line) as DevinLedgerLine;
+      if (typeof parsed?.at === "number") lines.push(parsed);
+    } catch {
+      /* a torn last line is not worth a broken picker */
+    }
+  }
+  return lines;
+}
+
+export function devinTurnCostUsd(line: DevinLedgerLine, pricing: ModelPricing | null): number | null {
+  if (!pricing) return null;
+  const input = line.inputTokens ?? 0;
+  const output = line.outputTokens ?? 0;
+  const cached = Math.min(line.cachedReadTokens ?? 0, input);
+  return ((input - cached) * pricing.input + cached * pricing.cached + output * pricing.output) / 1_000_000;
+}
+
+export function summarizeDevinLedger(
+  lines: DevinLedgerLine[],
+  pricingByUid: Record<string, ModelPricing>,
+  now = Date.now(),
+): { windows: UsageWindow[]; unpricedModels: string[]; turns: number } {
+  const startOfToday = new Date(now);
+  startOfToday.setHours(0, 0, 0, 0);
+  const spans: Array<{ label: string; since: number }> = [
+    { label: "Vandaag", since: startOfToday.getTime() },
+    { label: "7 dagen", since: now - 7 * 86_400_000 },
+    { label: "30 dagen", since: now - 30 * 86_400_000 },
+  ];
+  const unpriced = new Set<string>();
+  const windows = spans.map(({ label, since }) => {
+    let tokens = 0;
+    let usd = 0;
+    let priced = 0;
+    let turns = 0;
+    for (const line of lines) {
+      if (line.at < since || line.at > now) continue;
+      turns += 1;
+      tokens += (line.inputTokens ?? 0) + (line.outputTokens ?? 0);
+      const pricing = line.model ? pricingByUid[line.model] ?? null : null;
+      const cost = devinTurnCostUsd(line, pricing);
+      if (cost == null) {
+        if (line.model) unpriced.add(line.model);
+        continue;
+      }
+      usd += cost;
+      priced += 1;
+    }
+    const money = turns === 0 ? "$0" : priced === 0 ? "$?" : `≈ $${usd < 10 ? usd.toFixed(2) : usd.toFixed(0)}`;
+    return { label: `${label} ${money} · ${compactCount(tokens)} tokens`, pct: null, resetsAt: null };
+  });
+  return { windows, unpricedModels: [...unpriced], turns: lines.filter((line) => line.at >= spans[2]!.since).length };
+}
+
+export function devinUsage(ref: UsageProviderRef): ProviderUsage {
+  const base = { ...ref, plan: null as string | null };
+  const lines = readDevinLedger();
+  const pricingByUid = readModelDiscoveryCacheSync()?.providers?.devin?.pricing ?? {};
+  const summary = summarizeDevinLedger(lines, pricingByUid);
+  const unpriced = summary.unpricedModels.length
+    ? ` Geen prijs bekend voor: ${summary.unpricedModels.slice(0, 3).join(", ")}.`
+    : "";
+  return {
+    ...base,
+    available: true,
+    windows: summary.windows,
+    note:
+      "Devin geeft geen planlimiet via de API; dit is het verbruik van deze box (tokens × Devin-prijslijst). " +
+      "Planstand: app.devin.ai/settings/usage." + unpriced,
+  };
+}
+
 /** Sources that are always present, whatever is signed in. */
 const STATIC_PROVIDERS: UsageProviderRef[] = [
   { id: "codex", kind: "codex", label: "Codex" },
@@ -1077,6 +1213,7 @@ const STATIC_PROVIDERS: UsageProviderRef[] = [
   { id: "opencode", kind: "opencode", label: "OpenCode" },
   { id: "omg", kind: "omg", label: "omg agent" },
   { id: "muse", kind: "muse", label: "Muse" },
+  { id: "devin", kind: "devin", label: "Devin" },
 ];
 
 /**
@@ -1102,13 +1239,14 @@ export function listUsageProviders(): UsageProviderRef[] {
 }
 
 function collect(ref: UsageProviderRef, force = false): Promise<ProviderUsage> {
-  if (ref.kind === "claude") return claudeUsage(ref);
+  if (ref.kind === "claude") return claudeUsage(ref, force);
   if (ref.kind === "codex") return codexUsage(ref);
   if (ref.kind === "cursor") return cursorUsage(ref);
   if (ref.kind === "grok") return grokUsage(ref);
   if (ref.kind === "opencode") return opencodeUsage(ref);
   if (ref.kind === "omg") return omgUsage(ref);
   if (ref.kind === "muse") return museUsage(ref, force);
+  if (ref.kind === "devin") return Promise.resolve(devinUsage(ref));
   return Promise.resolve(staticProvider(ref, "Usage is unavailable for this provider"));
 }
 
@@ -1247,4 +1385,14 @@ export async function getUsageSummary(
   options: { force?: boolean } = {},
 ): Promise<UsageSummaryProvider[]> {
   return mergeUsageByKind(await getAllUsage(options));
+}
+
+/** The claude.ai organization behind one Claude usage source (for redeeming). */
+export async function claudeOrgIdForProvider(id: string): Promise<string | null> {
+  const ref = listUsageProviders().find((entry) => entry.id === id && entry.kind === "claude");
+  if (!ref) return null;
+  const configDir = ref.accountId ? claudeAccountConfigDir(ref.accountId) : null;
+  if (ref.accountId && !configDir) return null;
+  const token = await claudeAccessToken(configDir ?? undefined);
+  return token ? claudeOrgIdForToken(token) : null;
 }

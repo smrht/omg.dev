@@ -1,6 +1,7 @@
 import { mkdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
+import { TranscriptWriteQueue } from "./transcript-write-queue.ts";
 import { PATHS } from "./config.ts";
 import {
   isCursorTurnEndedLine,
@@ -374,10 +375,16 @@ function database(busyTimeoutMs = TRANSCRIPT_BUSY_TIMEOUT_MS): Database {
     initialized = false;
   }
   mkdirSync(dirname(path), { recursive: true });
-  db = new Database(path, { create: true });
+  // Configure before publishing the connection; failed setup must be retried.
+  const candidate = new Database(path, { create: true });
+  try {
+    candidate.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
+    candidate.exec("PRAGMA journal_mode = WAL");
+    candidate.exec("PRAGMA synchronous = NORMAL");
+  } catch (error) { candidate.close(); throw error; }
+  db = candidate;
   dbOpenedPath = path;
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA synchronous = NORMAL");
+  transcriptQueue().start();
   // The index has multiple process writers (serve plus managed harnesses).
   // Resuming a long thread can legitimately hold SQLite's single WAL writer
   // for several seconds, so short writes should wait rather than surface a
@@ -390,6 +397,8 @@ function database(busyTimeoutMs = TRANSCRIPT_BUSY_TIMEOUT_MS): Database {
 
 /** Test helper: drop the open connection so the next call rebinds to PATHS.data. */
 export function resetTranscriptIndexConnectionForTests(): void {
+  directQueue?.stop();
+  directQueue = undefined;
   if (db) {
     try {
       db.close();
@@ -414,7 +423,9 @@ function init(busyTimeoutMs = TRANSCRIPT_BUSY_TIMEOUT_MS) {
   // Cheap when already bound: database() returns immediately in that case.
   const d = database(busyTimeoutMs);
   if (initialized) return;
+  d.transaction(() => {
   d.exec(`
+    CREATE TABLE IF NOT EXISTS transcript_seed_state (path TEXT PRIMARY KEY, complete INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS transcript_index_cursors (
       path TEXT PRIMARY KEY,
       session_id TEXT NOT NULL,
@@ -683,6 +694,7 @@ function init(busyTimeoutMs = TRANSCRIPT_BUSY_TIMEOUT_MS) {
   d.exec(`CREATE UNIQUE INDEX IF NOT EXISTS transcript_artifact_message_unique
     ON transcript_messages(message_id)
     WHERE message_id LIKE 'artifact-%'`);
+  }).immediate();
   initialized = true;
 }
 
@@ -955,12 +967,33 @@ function nextOrderSeq(d: Database, path: string): number {
   return (max ?? -1) + 1;
 }
 
+let directQueue: TranscriptWriteQueue | undefined;
+function transcriptQueue(): TranscriptWriteQueue {
+  const directory = join(PATHS.data, "transcript-write-queue");
+  if (directQueue?.directory !== directory) { directQueue?.stop(); directQueue = undefined; }
+  return directQueue ??= new TranscriptWriteQueue(directory, (sessionId, messages) => {
+    // Bounded synchronous wait: the disk queue, not the SDK event loop, retries.
+    const d = database(100);
+    d.exec("PRAGMA busy_timeout = 100");
+    try { return indexSessionMessagesDirectRaw(sessionId, messages); }
+    finally { d.exec(`PRAGMA busy_timeout = ${TRANSCRIPT_BUSY_TIMEOUT_MS}`); }
+  });
+}
+export function flushTranscriptWrites(): number { return transcriptQueue().drain(); }
 export function indexSessionMessagesDirect(sessionId: string, messages: SessionMsg[]): number {
+  try { return transcriptQueue().enqueue(sessionId, messages); }
+  catch (cause) {
+    const error = new Error("Local storage error: transcript-index.sqlite could not retain or index a message. Check server storage; changing models will not repair this.", {cause});
+    error.name = "TranscriptPersistenceError";
+    throw error;
+  }
+}
+function indexSessionMessagesDirectRaw(sessionId: string, messages: SessionMsg[]): number {
   init();
   const key = sessionIndexKey(sessionId);
   const d = database();
   let seq = nextDirectOffset(d, key);
-  const rows: Array<{ id: string; msg: SessionMsg; text: string; offset: number }> = [];
+  const rows: Array<{ id: string; msg: SessionMsg; text: string; offset: number; author: string }> = [];
   messages
     .filter((message) => !!message.text.trim() && !!message.id)
     .forEach((msg, blockIndex) => {
@@ -969,6 +1002,7 @@ export function indexSessionMessagesDirect(sessionId: string, messages: SessionM
         msg,
         text: clippedText(msg),
         offset: seq++,
+        author: JSON.stringify(messageAuthorForSession(sessionId, msg)),
       });
     });
   directNextOffset.set(key, seq);
@@ -998,7 +1032,7 @@ export function indexSessionMessagesDirect(sessionId: string, messages: SessionM
       );
       insertedRows += Number(result.changes ?? 0);
       if (Number(result.changes ?? 0)) {
-        authorStmt.run(JSON.stringify(messageAuthorForSession(sessionId, row.msg)), row.id);
+        authorStmt.run(row.author, row.id);
       }
     }
     return insertedRows;
@@ -1149,7 +1183,10 @@ export function reindexFileHistoryUnderSessionKey(
   init();
   const key = sessionIndexKey(sessionId);
   const d = database();
-  if (d.query("SELECT 1 FROM transcript_messages WHERE path = ? LIMIT 1").get(key)) return 0;
+  const seed = d.query<{complete:number},[string]>("SELECT complete FROM transcript_seed_state WHERE path=?").get(key);
+  if (seed?.complete) return 0;
+  // Preserve already seeded legacy/live keys; only our incomplete marker may resume.
+  if (!seed && d.query("SELECT 1 FROM transcript_messages WHERE path=? LIMIT 1").get(key)) return 0;
   const src = d
     .query<
       { message_id: string | null; role: string; kind: string; ts: number; text: string; author_json: string },
@@ -1162,8 +1199,9 @@ export function reindexFileHistoryUnderSessionKey(
     )
     .all(sourceSessionId);
   if (!src.length) return 0;
+  d.query("INSERT OR IGNORE INTO transcript_seed_state(path,complete) VALUES (?,0)").run(key);
   let seq = 0;
-  const inserted = d.transaction((rows: typeof src) => {
+  const insertChunk = d.transaction((rows: typeof src) => {
     const msgStmt = d.query(`
       INSERT OR IGNORE INTO transcript_messages
         (id, session_id, path, message_id, byte_offset, order_seq, ts, role, kind, text, author_json)
@@ -1177,8 +1215,11 @@ export function reindexFileHistoryUnderSessionKey(
       seq++;
     }
     return n;
-  }).immediate(src);
-  directNextOffset.set(key, seq);
+  });
+  let inserted = 0;
+  for (let i = 0; i < src.length; i += 250) inserted += insertChunk.immediate(src.slice(i, i + 250));
+  directNextOffset.set(key, Math.max(seq, nextDirectOffset(d, key)));
+  d.query("UPDATE transcript_seed_state SET complete=1 WHERE path=?").run(key);
   pageTotalCache.delete(key);
   return inserted;
 }

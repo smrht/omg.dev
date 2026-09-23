@@ -29,11 +29,12 @@ function captured(): { cmd: string[]; env: Record<string, string> } {
 }
 
 describe("harness sandbox wrapping", () => {
-  test("no sandbox: the command is the raw harness argv", () => {
+  test("no sandbox: the raw harness argv runs inside the default systemd containment", () => {
     const res = spawnManagedAisdkSession({ name: "n1", cwd: tmp, model: "opus", sessionId: "s1" });
     expect(res.ok).toBe(true);
     const { cmd } = captured();
-    expect(cmd[0]).toBe(process.execPath);
+    expect(cmd[0]).toBe("/usr/bin/systemd-run");
+    expect(cmd).toContain(process.execPath);
     expect(cmd.some((a) => a.endsWith("/bwrap") || a === "bwrap")).toBe(false);
   });
 

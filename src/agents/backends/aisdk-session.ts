@@ -781,12 +781,14 @@ export async function cmdAisdkSession(argv: string[]): Promise<void> {
         if (closing) break;
         if (!restartRequested) {
           console.error(`aisdk-session: query loop failed: ${error instanceof Error ? error.message : error}`);
+          if (error instanceof Error) console.error(error.stack?.split("\n").filter(line => /^\s*at /.test(line)).slice(0, 12).join("\n"));
           exitExplanation = describeAisdkStreamEnd({
             turns: sdkMessagesSeen,
             error,
             claudePath,
             accountConnected: !!account,
           });
+          if (error instanceof Error && error.name === "TranscriptPersistenceError") exitExplanation = error.message;
           unexpectedExit = true;
           break;
         }

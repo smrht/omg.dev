@@ -33,7 +33,8 @@ import type { SessionMsg } from "../../sessions.ts";
 import { sessionTitleFromPrompt } from "../../omg-capabilities.ts";
 import { indexSessionMessagesDirect, reindexFileHistoryUnderSessionKey } from "../../transcript-index.ts";
 import { makeDraftPublisher } from "./draft.ts";
-import { codexOmgMcpConfig, type CodexConfigValue } from "../../codex-mcp-config.ts";
+import { codexConfigPath, codexOmgMcpConfig, readCodexConfig, type CodexConfigValue } from "../../codex-mcp-config.ts";
+import { codexSdkOptionsForModel } from "./codex-muse.ts";
 import {
   withCodexServiceTierConfig,
   type CodexServiceTier,
@@ -52,19 +53,32 @@ function arg(argv: string[], name: string): string | undefined {
   return i >= 0 ? argv[i + 1] : undefined;
 }
 
-// Only an EXPLICIT override redirects the SDK away from its bundled codex
-// binary. The SDK pins a matching @openai/codex dependency (protocol-tested
-// pairing); pointing it at an older global CLI risks a protocol mismatch, so —
-// unlike the old provider — we no longer prefer the global binary by default.
-function resolveCodexPathOverride(): string | undefined {
-  const explicit = process.env.LFG_CODEX_PATH;
-  if (!explicit) return undefined;
+// Drive the installed Codex CLI, just like the Claude Agent SDK harness drives
+// the installed Claude CLI. Release bundles can lag the machine-wide agent by
+// several versions; that made a model visible in omg.dev while the bundled
+// binary still rejected it as too new. LFG_CODEX_PATH remains the explicit
+// escape hatch, otherwise PATH is the source of truth for the current agent.
+export function resolveCodexPathOverride(
+  env: Record<string, string | undefined> = process.env,
+  which: (name: string) => string | null = (name) => Bun.which(name),
+): string | undefined {
+  const candidate = env.LFG_CODEX_PATH?.trim() || which("codex");
+  if (!candidate) return undefined;
   try {
-    const real = realpathSync(explicit);
+    const real = realpathSync(candidate);
     return existsSync(real) ? real : undefined;
   } catch {
     return undefined;
   }
+}
+
+export function requireCodexPathOverride(
+  env: Record<string, string | undefined> = process.env,
+  which: (name: string) => string | null = (name) => Bun.which(name),
+): string {
+  const path = resolveCodexPathOverride(env, which);
+  if (!path) throw new Error("installed Codex CLI not found; refusing bundled SDK fallback");
+  return path;
 }
 
 /**
@@ -246,10 +260,12 @@ export async function pipeToCodexAiSdk(
   const model = opts.model ?? "gpt-5.5";
   const cwd = opts.cwd ?? process.cwd();
   const { Codex } = await import("@openai/codex-sdk");
-  const codexPathOverride = resolveCodexPathOverride();
+  const codexPathOverride = requireCodexPathOverride();
+  // A muse-spark model rides Meta's Responses API on the Muse subscription
+  // (see codex-muse.ts); every other model keeps the plain OMG MCP layer.
   const codex = new Codex({
-    ...(codexPathOverride ? { codexPathOverride } : {}),
-    ...omgMcpConfig(opts.serviceTier),
+    codexPathOverride,
+    ...codexSdkOptionsForModel(model, omgMcpConfig(opts.serviceTier), { codexConfig: readCodexConfig(codexConfigPath()) }),
   });
 
   log(`[runner] piping ${prompt.length} chars to codex via codex-sdk (${model})`);
@@ -327,11 +343,13 @@ export async function cmdCodexAisdkSession(argv: string[]): Promise<void> {
   }
 
   const { Codex } = await import("@openai/codex-sdk");
-  const codexPathOverride = resolveCodexPathOverride();
+  const codexPathOverride = requireCodexPathOverride();
   // Omitting `env` inherits process.env (HOME → ~/.codex auth, LFG_* for MCP).
+  // A muse-spark model adds Meta's provider block, the subscription key and the
+  // Muse egress proxy on top (codex-muse.ts); OpenAI models are untouched.
   const createCodex = () => new Codex({
-    ...(codexPathOverride ? { codexPathOverride } : {}),
-    ...omgMcpConfig(serviceTier),
+    codexPathOverride,
+    ...codexSdkOptionsForModel(model, omgMcpConfig(serviceTier), { codexConfig: readCodexConfig(codexConfigPath()) }),
   });
   let codex = createCodex();
   let threadThinkingLevel = thinkingLevel;

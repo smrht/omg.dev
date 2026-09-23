@@ -154,7 +154,10 @@ describe("coding agent adapter contract", () => {
       expect(option.defaultModel, agent).toBeTruthy();
       expect(item!.models.length, agent).toBeGreaterThan(0);
       expect(item!.defaultModel, agent).toBeTruthy();
-      expect(item!.thinkingLevels).toEqual([...(thinkingLevelsForAgent(agent) ?? [])]);
+      // Devin exposes fallback effort choices before its per-model discovery arrives.
+      expect(item!.thinkingLevels).toEqual(agent === "devin"
+        ? ["none", "low", "medium", "high", "xhigh", "max"]
+        : [...(thinkingLevelsForAgent(agent) ?? [])]);
     }
   });
 

@@ -48,6 +48,7 @@ function cache(
       opencode: provider("opencode"),
       jcode: provider("jcode"),
       muse: provider("muse"),
+      devin: provider("devin"),
       ...providers,
     },
   };
@@ -56,6 +57,14 @@ function cache(
 const MINUTE = 60_000;
 
 describe("model discovery retry policy", () => {
+  test("refreshes a successful OpenCode catalog within an hour after provider changes", () => {
+    const c = cache({ opencode: provider("opencode", { ok: true, refreshedAt: 0 }) });
+    expect(providersDueForRetry(c, 60 * MINUTE - 1)).toEqual([]);
+    expect(providersDueForRetry(c, 60 * MINUTE)).toEqual(["opencode"]);
+    c.providers.opencode!.refreshedAt = 60 * MINUTE;
+    expect(providersDueForRetry(c, 60 * MINUTE + 1)).toEqual([]);
+  });
+
   test("backs off further on each consecutive failure, then caps", () => {
     expect(retryDelayMs(1)).toBe(MINUTE);
     expect(retryDelayMs(2)).toBe(2 * MINUTE);
@@ -93,7 +102,7 @@ describe("model discovery retry policy", () => {
       claude: provider("claude", { ok: false, models: [], failedAttempts: 1, refreshedAt: 0 }),
       aisdk: provider("aisdk", { ok: false, models: [], failedAttempts: 1, refreshedAt: 0 }),
     });
-    expect(providersDueForRetry(c, 24 * 60 * MINUTE)).toEqual([]);
+    expect(providersDueForRetry(c, 24 * 60 * MINUTE)).toEqual(["opencode"]);
   });
 
   test("discovers a provider missing from an older cache", () => {
@@ -104,7 +113,7 @@ describe("model discovery retry policy", () => {
       timeZone: "UTC",
       providers: { codex: provider("codex") },
     };
-    expect(providersDueForRetry(older, 0)).toEqual(["grok", "cursor", "fx", "opencode", "jcode", "muse"]);
+    expect(providersDueForRetry(older, 0)).toEqual(["grok", "cursor", "fx", "opencode", "jcode", "devin", "muse"]);
   });
 
   test("no cache means the initial full refresh owns it, not the retry path", () => {

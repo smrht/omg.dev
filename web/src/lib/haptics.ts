@@ -121,5 +121,10 @@ export function haptic(type?: HapticInput) {
   }
 
   // Android / desktop-with-vibrate: library patterns via navigator.vibrate.
-  void getInstance().trigger(type);
+  // trigger() is async and opens an AudioContext internally, so it can reject
+  // ("Failed to start the audio device") when the OS won't hand out the audio
+  // device. A missed buzz is not worth an unhandled rejection.
+  void getInstance()
+    .trigger(type)
+    .catch(() => {});
 }

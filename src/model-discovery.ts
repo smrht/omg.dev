@@ -8,6 +8,8 @@ import { getGlobalSettingsSync } from "./settings.ts";
 
 type ProviderKey = CodingAgentKind;
 
+export type ModelPricing = { input: number; cached: number; output: number };
+
 export type DiscoveredModelProvider = {
   key: ProviderKey;
   ok: boolean;
@@ -16,6 +18,10 @@ export type DiscoveredModelProvider = {
   labels?: Record<string, string>;
   /** Per-model provider variants, such as OpenCode reasoning effort levels. */
   variants?: Record<string, string[]>;
+  /** Per-model thinking levels, such as Devin's variant suffixes. */
+  thinkingLevelsByModel?: Record<string, string[]>;
+  /** USD per 1M tokens per raw variant uid (Devin's cost_summary), for usage estimates. */
+  pricing?: Record<string, ModelPricing>;
   error?: string;
   refreshedAt: number;
   durationMs: number;
@@ -35,7 +41,7 @@ export type ModelDiscoveryCache = {
 const CACHE_PATH = join(PATHS.data, "model-catalog.json");
 const DEFAULT_REFRESH_CRON = "0 8 * * *";
 /** Every provider a full refresh probes. `codex-aisdk` is mirrored from `codex`. */
-const REFRESH_KEYS: ProviderKey[] = ["claude", "aisdk", "codex", "grok", "cursor", "fx", "opencode", "jcode", "muse"];
+const REFRESH_KEYS: ProviderKey[] = ["claude", "aisdk", "codex", "grok", "cursor", "fx", "opencode", "jcode", "devin", "muse"];
 /**
  * Providers whose failure is structural rather than transient: they expose no
  * model-list command at all, so every attempt returns the same error. Retrying
@@ -169,6 +175,12 @@ function jcodePath(): string | null {
   return which("jcode", [`${home}/.local/bin/jcode`, `${home}/.jcode/bin/jcode`, "/usr/local/bin/jcode"]);
 }
 
+function devinPath(): string | null {
+  if (process.env.LFG_DEVIN_PATH) return process.env.LFG_DEVIN_PATH;
+  const home = userHome();
+  return which("devin", [`${home}/.local/bin/devin`, `${home}/.bun/bin/devin`, "/usr/local/bin/devin"]);
+}
+
 function commandFor(key: ProviderKey): string[] | null {
   if (key === "codex" || key === "codex-aisdk") {
     const bin = codexPath();
@@ -195,6 +207,10 @@ function commandFor(key: ProviderKey): string[] | null {
   if (key === "jcode") {
     const bin = jcodePath();
     return bin ? [bin, "--no-update", "model", "list", "--json"] : null;
+  }
+  if (key === "devin") {
+    const bin = devinPath();
+    return bin ? [bin, "models", "list", "--format", "json"] : null;
   }
   return null;
 }
@@ -344,6 +360,8 @@ function parseModels(key: ProviderKey, text: string): {
   models: string[];
   labels: Record<string, string>;
   variants?: Record<string, string[]>;
+  thinkingLevelsByModel?: Record<string, string[]>;
+  pricing?: Record<string, ModelPricing>;
 } {
   if (key === "codex" || key === "codex-aisdk") return parseCodexModels(text);
   if (key === "grok") return parseBulletModels(text);
@@ -351,6 +369,7 @@ function parseModels(key: ProviderKey, text: string): {
   if (key === "opencode") return parseOpenCodeModels(text);
   if (key === "fx") return parseFxModels(text);
   if (key === "jcode") return parseJcodeModels(text);
+  if (key === "devin") return parseDevinModels(text);
   return { models: [], labels: {} };
 }
 
@@ -469,6 +488,206 @@ async function discoverMuseProvider(started: number, refreshedAt: number): Promi
   }
 }
 
+/**
+ * Devin answers `devin models list --format json` with every family and
+ * variant the account may run. The picker wants model names, not reasoning
+ * variants: one clickable entry per family (the slug itself, which Devin
+ * resolves like any fuzzy name), the family label as the human-readable
+ * label, and the family's variant suffixes as that model's thinking levels.
+ * The adaptive router always leads; private slugs fall back to their alias.
+ */
+/**
+ * Devin's cost_summary reads "$10 / 1M Input · $0.25 / 1M Cached input · $50 / 1M Output"
+ * (or "Free"). Parsed once at discovery so usage estimates never shell out.
+ */
+export function parseDevinCostSummary(text: unknown): ModelPricing | null {
+  if (typeof text !== "string") return null;
+  if (/free/i.test(text) && !/\$/.test(text)) return { input: 0, cached: 0, output: 0 };
+  const pick = (re: RegExp): number | null => {
+    const m = text.match(re);
+    return m ? Number.parseFloat(m[1]!) : null;
+  };
+  const input = pick(/\$([\d.]+)\s*\/\s*1M\s*Input/i);
+  const cached = pick(/\$([\d.]+)\s*\/\s*1M\s*Cached/i);
+  const output = pick(/\$([\d.]+)\s*\/\s*1M\s*Output/i);
+  if (input == null || output == null) return null;
+  return { input, cached: cached ?? input, output };
+}
+
+/** Raw Fusion uid: fusion-<lead>-<level>[-fast|-priority]-sidekick-<sidekick>. */
+export const DEVIN_FUSION_UID_RE =
+  /^fusion-(.+?)-(none|minimal|low|medium|high|xhigh|max)(-fast|-priority)?-sidekick-(.+)$/;
+
+/**
+ * Picker id for one Fusion combo (lead family + sidekick), thinking level left
+ * open. Short on purpose: the picker truncates around 30 characters, and the
+ * raw uids (fusion-gpt-6-astra-sidekick-gpt-5-6-luna-high) all cut off at the
+ * same place. "fusion:astra-6+luna-high" reads whole. The exact lead/sidekick
+ * come back from the combo's discovered variants, not from parsing this id.
+ */
+export function devinFusionComboId(lead: string, sidekick: string): string {
+  const short = (slug: string): string =>
+    slug
+      .replace(/^claude-/, "")
+      .replace(/^gpt-(\d+(?:-\d+)*)-([a-z]+)$/, "$2-$1")
+      .replace(/^gpt-\d+(?:-\d+)*-/, "")
+      .replace(/-medium$/, "-med");
+  return `fusion:${short(lead)}+${short(sidekick)}`;
+}
+
+/** Sidekicks Sam does not want offered (15-09-2026: GLM 5.2 never, only 5.3 — which Fusion lacks). */
+export const DEVIN_FUSION_HIDDEN_SIDEKICKS = new Set(["glm-5-2"]);
+
+export function parseDevinModels(text: string): {
+  models: string[];
+  labels: Record<string, string>;
+  thinkingLevelsByModel?: Record<string, string[]>;
+  variants?: Record<string, string[]>;
+  pricing?: Record<string, ModelPricing>;
+} {
+  type DevinVariant = { uid: string; label: string; pricing: ModelPricing | null };
+  type DevinFamily = {
+    slug: string;
+    model: string;
+    label: string;
+    variants: DevinVariant[];
+    version: number[];
+  };
+  let parsed: {
+    families?: Array<{
+      slug?: unknown;
+      family_label?: unknown;
+      aliases?: unknown;
+      variants?: Array<{ model_uid?: unknown; label?: unknown; cost_summary?: unknown; cost_tier?: unknown }>;
+    }>;
+  };
+  try {
+    parsed = JSON.parse(cleanText(text));
+  } catch {
+    return { models: [], labels: {} };
+  }
+  const versionTokens = (slug: string): number[] =>
+    (slug.match(/\d+(?:\.\d+)?/g) ?? []).map((token) => Number.parseFloat(token));
+  const levelOrder = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+  const families: DevinFamily[] = [];
+  for (const family of parsed.families ?? []) {
+    const slug = typeof family.slug === "string" ? family.slug : "";
+    if (!slug) continue;
+    const aliases = Array.isArray(family.aliases)
+      ? family.aliases.filter((alias): alias is string => typeof alias === "string")
+      : [];
+    const label = typeof family.family_label === "string" ? family.family_label : slug;
+    const model = slug.startsWith("MODEL_PRIVATE") && aliases.length ? aliases[0]! : slug;
+    const variants = (family.variants ?? []).flatMap((variant) => {
+      const uid = typeof variant.model_uid === "string" ? cleanId(variant.model_uid) : null;
+      return uid
+        ? [{
+            uid,
+            label: typeof variant.label === "string" ? variant.label : uid,
+            pricing: parseDevinCostSummary(variant.cost_summary ?? variant.cost_tier),
+          }]
+        : [];
+    });
+    if (!variants.length) continue;
+    families.push({
+      slug,
+      model,
+      label,
+      variants,
+      version: versionTokens(slug),
+    });
+  }
+  const models: string[] = [];
+  const labels: Record<string, string> = {};
+  const thinkingLevelsByModel: Record<string, string[]> = {};
+  const variantsByModel: Record<string, string[]> = {};
+  const pricing: Record<string, ModelPricing> = {};
+  for (const family of families) {
+    for (const variant of family.variants) if (variant.pricing) pricing[variant.uid] = variant.pricing;
+  }
+  const adaptive = families.find((family) => family.slug === "adaptive");
+  if (adaptive) {
+    models.push(adaptive.model);
+    labels[adaptive.model] = adaptive.label;
+    thinkingLevelsByModel[adaptive.model] = [];
+    variantsByModel[adaptive.model] = adaptive.variants.map((variant) => variant.uid);
+  }
+  const newestFirst = [...families]
+    .filter((family) => family.slug !== "adaptive" && family.slug !== "fusion")
+    .sort((a, b) => {
+      const depth = Math.max(a.version.length, b.version.length);
+      for (let index = 0; index < depth; index += 1) {
+        const left = a.version[index] ?? 0;
+        const right = b.version[index] ?? 0;
+        if (left !== right) return right - left;
+      }
+      return a.label.localeCompare(b.label);
+    });
+  for (const family of newestFirst) {
+    if (models.includes(family.model)) continue;
+    models.push(family.model);
+    labels[family.model] = family.label;
+    // Variant uids normalise dots to dashes (gpt-5.6-sol -> gpt-5-6-sol-high),
+    // so match against the normalised slug prefix.
+    const uidPrefix = `${family.slug.replace(/\./g, "-")}-`;
+    const levels = family.variants
+      .flatMap((variant) => {
+        if (!variant.uid.startsWith(uidPrefix)) return [];
+        const level = variant.uid.slice(uidPrefix.length);
+        return levelOrder.includes(level) ? [level] : [];
+      })
+      .sort((a, b) => levelOrder.indexOf(a) - levelOrder.indexOf(b));
+    thinkingLevelsByModel[family.model] = levels;
+    variantsByModel[family.model] = family.variants.map((variant) => variant.uid);
+  }
+  // Fusion is one family with ~175 uids (lead × level × fast × sidekick). One
+  // picker entry per lead+sidekick combo; the level (and fast) stay pickable
+  // through the normal thinking/fast controls, composeDevinModel rebuilds the
+  // exact uid. Lead order follows the plain families above (newest first).
+  const fusion = families.find((family) => family.slug === "fusion");
+  if (fusion) {
+    type Combo = { id: string; lead: string; sidekick: string; levels: Set<string>; uids: string[] };
+    const combos = new Map<string, Combo>();
+    for (const variant of fusion.variants) {
+      const match = variant.uid.match(DEVIN_FUSION_UID_RE);
+      if (!match) continue;
+      const [, lead, level, , rawSidekick] = match;
+      // A fast lead pairs with the sidekick's own fast uid (…-high-priority);
+      // that is the same combo, fast mode re-adds the suffix when composing.
+      const sidekick = rawSidekick!.replace(/-priority$/, "");
+      if (DEVIN_FUSION_HIDDEN_SIDEKICKS.has(sidekick)) continue;
+      const id = devinFusionComboId(lead!, sidekick);
+      const combo = combos.get(id) ?? { id, lead: lead!, sidekick: sidekick!, levels: new Set(), uids: [] };
+      combo.levels.add(level!);
+      combo.uids.push(variant.uid);
+      combos.set(id, combo);
+    }
+    const leadRank = (lead: string): number => {
+      const index = models.findIndex((model) => model.replace(/\./g, "-") === lead);
+      return index < 0 ? Number.MAX_SAFE_INTEGER : index;
+    };
+    const ordered = [...combos.values()].sort(
+      (a, b) => leadRank(a.lead) - leadRank(b.lead) || a.sidekick.localeCompare(b.sidekick),
+    );
+    for (const combo of ordered) {
+      if (models.includes(combo.id)) continue;
+      models.push(combo.id);
+      labels[combo.id] = `Fusion: ${combo.lead} + ${combo.sidekick}`;
+      thinkingLevelsByModel[combo.id] = [...combo.levels].sort(
+        (a, b) => levelOrder.indexOf(a) - levelOrder.indexOf(b),
+      );
+      variantsByModel[combo.id] = combo.uids;
+    }
+  }
+  return {
+    models,
+    labels,
+    thinkingLevelsByModel: Object.keys(thinkingLevelsByModel).length ? thinkingLevelsByModel : undefined,
+    variants: Object.keys(variantsByModel).length ? variantsByModel : undefined,
+    pricing: Object.keys(pricing).length ? pricing : undefined,
+  };
+}
+
 async function discoverProvider(key: ProviderKey): Promise<DiscoveredModelProvider> {
   const started = performance.now();
   const refreshedAt = Date.now();
@@ -528,6 +747,11 @@ async function discoverProvider(key: ProviderKey): Promise<DiscoveredModelProvid
       models: parsed.models,
       labels: Object.keys(parsed.labels).length ? parsed.labels : undefined,
       variants: parsed.variants && Object.keys(parsed.variants).length ? parsed.variants : undefined,
+      thinkingLevelsByModel:
+        parsed.thinkingLevelsByModel && Object.keys(parsed.thinkingLevelsByModel).length
+          ? parsed.thinkingLevelsByModel
+          : undefined,
+      pricing: parsed.pricing && Object.keys(parsed.pricing).length ? parsed.pricing : undefined,
       refreshedAt,
       durationMs: Math.round((performance.now() - started) * 1000) / 1000,
     };
@@ -586,7 +810,12 @@ export function providersDueForRetry(
       due.push(key);
       continue;
     }
-    if (provider.ok) continue;
+    if (provider.ok) {
+      // OpenCode's catalog changes when local provider credentials/config change.
+      // A successful pre-login cache must not hide subscribed models all day.
+      if (key === "opencode" && now - provider.refreshedAt >= 60 * 60_000) due.push(key);
+      continue;
+    }
     if (now - provider.refreshedAt >= retryDelayMs(provider.failedAttempts ?? 1)) due.push(key);
   }
   return due;

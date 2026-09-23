@@ -218,6 +218,26 @@ export function scheduleResidentCount(sessions: readonly AgentActivity[]): numbe
 }
 
 /**
+ * The sessions a launch of `kind` counts against its cap (issue 521).
+ * Interactive and scheduled work occupy disjoint resident pools — on a
+ * hosted Computer by plan, on a self-hosted box by the same principle: a
+ * full interactive roster must not starve cron work, and cron runs must
+ * not eat the owner's interactive slots. Persistent bots hold no slot in
+ * either pool.
+ */
+export function admissionResidentPool<T extends AgentActivity>(
+  kind: "interactive" | "schedule",
+  sessions: readonly T[],
+): T[] {
+  return sessions
+    .filter((session) =>
+      kind === "schedule"
+        ? isScheduleSpawned(session.spawnedBy)
+        : !isScheduleSpawned(session.spawnedBy))
+    .filter((session) => !session.persistent);
+}
+
+/**
  * The count check, disabled — for a caller that has deliberately overruled its
  * own cap (see activationGate's `overLimit`).
  *
@@ -258,6 +278,7 @@ export class AgentAdmissionController {
       enforceMemory?: boolean;
     }>,
     reclaim?: () => Promise<number>,
+    options?: { reclaimOnLimit?: boolean },
   ): Promise<AgentAdmission> {
     let releaseTransition!: () => void;
     const previous = this.transition;
@@ -269,7 +290,15 @@ export class AgentAdmissionController {
       let snapshot = await inspect();
       const enforce = { enforceMemory: snapshot.enforceMemory };
       let admission = this.tryAcquire(limit, snapshot.sessions, snapshot.memory, enforce);
-      if (!admission.ok && admission.reason === "memory" && reclaim) {
+      // Issue 521: a self-hosted interactive launch may also trade a
+      // reclaimable idle session for a slot at the COUNT cap, not only
+      // under memory pressure. The callback still decides what is safe.
+      if (
+        !admission.ok &&
+        reclaim &&
+        (admission.reason === "memory" ||
+          (options?.reclaimOnLimit && admission.reason === "limit"))
+      ) {
         const reclaimed = await reclaim();
         if (reclaimed > 0) {
           snapshot = await inspect();

@@ -1,3 +1,5 @@
+import { stopIsolationScopes, persistIsolationDesktop, recoverIsolationDesktop } from "../omg-isolation-computer.ts";
+// Agentbox isolation v1 (issue 1003)
 // The Computer: one shared desktop this box owns, and the browser that runs on
 // it.
 //
@@ -31,7 +33,13 @@
 // what is missing and the command that fixes it, and the desktop only starts
 // when someone asks for it.
 
-import { spawn } from "node:child_process";
+import { spawn as rawSpawn } from "node:child_process";
+function spawn(...args: Parameters<typeof rawSpawn>): ReturnType<typeof rawSpawn> {
+  if (process.platform !== "linux") return rawSpawn(...args);
+  const command = args[0];
+  const kind = command === "Xvfb" ? "xvfb" : command === "x11vnc" ? "vnc" : /chrom(e|ium)/.test(command) ? "chrome" : "desktop";
+  return rawSpawn("/home/agent/bin/computer-scope-exec", [kind, "--", command, ...(args[1] as string[])], args[2]);
+}
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
@@ -70,6 +78,10 @@ export const DEFAULT_DESKTOP: DesktopConfig = {
   height: 800,
   rfbPort: envPort("OMG_COMPUTER_RFB_PORT", 5900),
   cdpPort: envPort("OMG_COMPUTER_CDP_PORT", 9222),
+  // Issue 692: a proxy set once in the environment survives restarts and
+  // `omg update` without re-typing it into computer_start. An explicit
+  // proxy=... still wins: startDesktop spreads `partial` over this default.
+  proxy: process.env.OMG_COMPUTER_PROXY || undefined,
   profileDir: `${process.env.HOME ?? "/tmp"}/.omg/computer/chrome-profile`,
 };
 
@@ -125,7 +137,7 @@ function writeStateFile(next: DesktopState): void {
       },
       startedAt: next.startedAt ?? Date.now(),
     };
-    writeFileSync(STATE_FILE, JSON.stringify(record));
+    persistIsolationDesktop(record, STATE_FILE);
   } catch {
     // Losing the record only costs us adoption on the next boot; never fail a
     // working start because the file could not be written.
@@ -140,7 +152,7 @@ function clearStateFile(): void {
 
 function readStateFile(): PersistedDesktop | null {
   try {
-    if (!existsSync(STATE_FILE)) return null;
+    if (!existsSync(STATE_FILE)) return recoverIsolationDesktop(STATE_FILE);
     return JSON.parse(readFileSync(STATE_FILE, "utf8")) as PersistedDesktop;
   } catch {
     return null;
@@ -158,11 +170,130 @@ function alive(pid: number | undefined): boolean {
   }
 }
 
+/**
+ * The pid of the Chrome the agent drives, however this desktop came to be.
+ *
+ * A desktop we spawned keeps a child handle; one we adopted after a server
+ * restart only has pids on disk. Both are the same browser to a caller.
+ */
+function chromePid(s: DesktopState): number | undefined {
+  return s.adoptedPids?.chrome ?? s.chrome?.pid;
+}
+
 function killPid(pid: number | undefined, signal: NodeJS.Signals = "SIGTERM"): void {
   if (!pid) return;
   try {
     process.kill(pid, signal);
   } catch {}
+}
+
+/**
+ * The Computer's children run inside systemd user scopes on computer.slice,
+ * so a runaway Chrome is capped by the slice and a stopped scope reaps the
+ * whole process group instead of stranding grandchildren.
+ */
+type ScopeKind = "xvfb" | "desktop" | "vnc" | "chrome";
+
+// The helper execs in place, so the pid we spawn is the pid that ends up in
+// the scope name (omg-computer-KIND-<pid>.scope) and the pid Xvfb, x11vnc and
+// Chrome actually run as. Every child handle, state-file pid and adopted pid
+// below therefore keeps its existing meaning.
+const SCOPE_EXEC = "/home/agent/bin/computer-scope-exec";
+
+/** How long stopDesktopScopes waits on its own systemctl client. */
+const SCOPE_STOP_TIMEOUT_MS = 5000;
+
+/**
+ * Spawn one desktop component inside its own scope.
+ *
+ * Linux is the only platform with the helper and a user manager, and there the
+ * helper is MANDATORY: without it the stack would run unscoped and unbounded,
+ * which is exactly what computer.slice exists to prevent, so the start is
+ * refused instead of quietly degraded. Anywhere else there is nothing to scope
+ * into and this stays the plain spawn the file always had.
+ */
+function spawnScoped(
+  kind: ScopeKind,
+  cmd: string,
+  args: string[],
+  opts: { stdio: "ignore"; env?: NodeJS.ProcessEnv; detached?: boolean },
+): Proc {
+  if (process.platform !== "linux") return spawn(cmd, args, opts);
+  if (!existsSync(SCOPE_EXEC)) {
+    // Sanitized on purpose: the kind and the helper path say what is wrong;
+    // no command line, arguments or environment end up in the message.
+    throw new Error(
+      `computer-scope-exec ontbreekt op ${SCOPE_EXEC}; weiger ${kind} zonder scope te starten`,
+    );
+  }
+  return spawn(SCOPE_EXEC, [kind, "--", cmd, ...args], opts);
+}
+
+/**
+ * Stop exactly the derived scopes of one desktop, and nothing else.
+ *
+ * Scope names embed the child pid, so the only units we may name are the ones
+ * built from pids this desktop actually recorded. No patterns: a glob like
+ * omg-computer-* would also stop the scopes of a stack another server
+ * instance owns. A missing scope (an unscoped, pre-fork desktop) makes
+ * systemctl exit non-zero, which is fine: the pid kills around every call
+ * site remain the behavior that handles those.
+ */
+async function stopDesktopScopes(
+  pids: { xvfb?: number; wm?: number; vnc?: number; chrome?: number },
+): Promise<void> {
+  if (process.platform !== "linux") return;
+  const kindPid: [ScopeKind, number | undefined][] = [
+    ["xvfb", pids.xvfb],
+    ["desktop", pids.wm],
+    ["vnc", pids.vnc],
+    ["chrome", pids.chrome],
+  ];
+  // Pids come from a JSON state file, so 0, -1, 3.5 and 2**63 are all inputs a
+  // corrupt or hand-edited record can produce; scope names built from those
+  // would be nonsense at best.
+  const names: string[] = [];
+  for (const [kind, pid] of kindPid) {
+    if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) continue;
+    names.push(`omg-computer-${kind}-${pid}.scope`);
+  }
+  if (names.length === 0) return;
+  let proc: ReturnType<typeof Bun.spawn>;
+  try {
+    proc = Bun.spawn(["systemctl", "--user", "stop", "--quiet", ...names], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+  } catch {
+    // No systemctl on PATH (stripped or non-systemd box): the pid kills at
+    // every call site remain the behavior that handles the children.
+    return;
+  }
+  // Bounded wait: a systemctl that never returns -- hung D-Bus, a scope stuck
+  // in D-state -- must not wedge stopDesktop forever. On timeout ONLY the
+  // client dies; the stop job it already handed to the user manager remains
+  // responsible for the scope, and nothing here kills by name or pattern.
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      reject(new Error("systemctl stop timeout"));
+    }, SCOPE_STOP_TIMEOUT_MS);
+  });
+  try {
+    await Promise.race([proc.exited, bound]);
+  } catch {
+    // Only the bound rejects; systemctl's own exit resolves through .exited.
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+  if (timedOut) {
+    try {
+      proc.kill();
+    } catch {}
+  }
 }
 
 /**
@@ -176,13 +307,20 @@ async function adoptOrReap(): Promise<boolean> {
   const record = readStateFile();
   if (!record) return false;
 
-  const { xvfb, vnc } = record.pids;
-  // Xvfb and x11vnc are the two that matter: without them there is no screen
-  // and nothing to stream, whatever else survived.
+  const { xvfb, vnc, chrome } = record.pids;
+  // A screen nobody can drive is not a Computer. Chrome belongs in this test:
+  // adopting a stack whose browser died is what made `running: true` lie while
+  // the CDP port answered nothing.
   const healthy =
-    alive(xvfb) && alive(vnc) && (await waitForPort(record.config.rfbPort, 1500));
+    alive(xvfb) &&
+    alive(vnc) &&
+    alive(chrome) &&
+    (await waitForPort(record.config.rfbPort, 1500)) &&
+    (await waitForPort(record.config.cdpPort, 1500));
 
   if (!healthy) {
+    await stopDesktopScopes(record.pids);
+    await stopIsolationScopes(record.pids);
     for (const pid of Object.values(record.pids)) killPid(pid);
     await Bun.sleep(500);
     for (const pid of Object.values(record.pids)) killPid(pid, "SIGKILL");
@@ -295,7 +433,10 @@ export interface DesktopStatus {
 
 export function desktopStatus(): DesktopStatus {
   const deps = ensureDeps();
-  if (!state) {
+  // `state` proves we started something once, not that it is still up. Report
+  // on the browser, so a caller that reads `running` gets an answer it can act
+  // on instead of one it has to verify with a curl.
+  if (!state || !alive(chromePid(state))) {
     return {
       running: false,
       display: null,
@@ -410,12 +551,38 @@ export async function ensureDesktopAdopted(): Promise<void> {
 }
 
 /**
+ * Chrome flags for a proxied browser: the proxy carries the traffic, and
+ * nothing else does.
+ *
+ * A SOCKS proxy only handles TCP, so three paths around it each get their own
+ * flag. QUIC is HTTP/3 over UDP and bypasses the tunnel entirely -- switched
+ * off rather than proxied. WebRTC can share the real address over a
+ * non-proxied UDP path -- the handling policy forbids exactly that. And DNS:
+ * left alone, Chrome resolves hostnames with the local resolver, so the
+ * resolver rules answer NOTFOUND for everything except loopback; names then
+ * travel to the proxy unresolved (SOCKS5 forwards hostnames), and the
+ * EXCLUDEs keep a proxy bound to 127.0.0.1 and localhost pages reachable.
+ */
+export function chromeProxyFlags(proxy: string): string[] {
+  return [
+    `--proxy-server=${proxy}`,
+    "--disable-quic",
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost",
+  ];
+}
+
+/**
  * Start the desktop. Idempotent: a second call while it is up is a no-op and
  * returns the current status, so two sessions racing to open the Computer tab
  * cannot start two stacks.
  */
 export async function startDesktop(partial: Partial<DesktopConfig> = {}): Promise<DesktopStatus> {
-  if (state) return desktopStatus();
+  if (state && alive(chromePid(state))) return desktopStatus();
+  // Chrome died under a live server. Drop the stale handle and fall through to
+  // adoptOrReap(), which reads the pids off disk and reaps the whole stack --
+  // otherwise Xvfb and x11vnc stay behind and the new Xvfb cannot take :99.
+  state = null;
 
   // A desktop this box left running survives a server restart. Reattach to it
   // rather than starting a second stack on the same display and ports.
@@ -444,7 +611,7 @@ export async function startDesktop(partial: Partial<DesktopConfig> = {}): Promis
   const next: DesktopState = { config };
 
   // Xvfb first: everything below needs a display to attach to.
-  next.xvfb = spawn(
+  next.xvfb = spawnScoped("xvfb",
     "Xvfb",
     [display, "-screen", "0", `${config.width}x${config.height}x24`, "-nolisten", "tcp"],
     { stdio: "ignore", detached: false },
@@ -456,7 +623,7 @@ export async function startDesktop(partial: Partial<DesktopConfig> = {}): Promis
   // streaming a computer.
   const session = desktopSessionCommand();
   if (!session) throw new Error("no desktop session found (install xfce4 or openbox)");
-  next.wm = spawn(session.cmd, session.args, { stdio: "ignore", env, detached: false });
+  next.wm = spawnScoped("desktop", session.cmd, session.args, { stdio: "ignore", env, detached: false });
   // xfce4 has a panel, a settings daemon and a desktop to bring up, so it needs
   // longer than a bare window manager before anything else should appear.
   await Bun.sleep(3500);
@@ -464,7 +631,7 @@ export async function startDesktop(partial: Partial<DesktopConfig> = {}): Promis
   // -localhost is the security boundary: the RFB port never leaves this box.
   // The browser reaches it through our own websocket bridge in serve.ts, which
   // is already authenticated, so x11vnc itself needs no password of its own.
-  next.vnc = spawn(
+  next.vnc = spawnScoped("vnc",
     "x11vnc",
     [
       "-display", display,
@@ -487,6 +654,9 @@ export async function startDesktop(partial: Partial<DesktopConfig> = {}): Promis
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-gpu",
+    // 06-09-2026: WebUI omnibox-popups uit (Puppeteer-upstreamles #15278).
+    // De AI-popup is via CDP niet blijvend te sluiten en vervuilt /json/list.
+    "--disable-features=WebUIOmniboxPopup,WebUIOmniboxAimPopup",
     // Deliberately NOT full screen. A maximised Chrome hides the desktop and
     // makes the stream look like a browser again; leaving the edges visible is
     // what makes it read as a computer you could open something else on.
@@ -494,8 +664,10 @@ export async function startDesktop(partial: Partial<DesktopConfig> = {}): Promis
     `--window-size=${Math.round(config.width * 0.82)},${Math.round(config.height * 0.78)}`,
   ];
   // Guus's setup runs each browser behind a webshare proxy; this is that knob.
-  if (config.proxy) chromeArgs.push(`--proxy-server=${config.proxy}`);
-  next.chrome = spawn(chrome, chromeArgs, { stdio: "ignore", env, detached: false });
+  // Issue 692: with a proxy set, Chrome must not leak around the tunnel
+  // (QUIC over UDP, WebRTC, local DNS) -- see chromeProxyFlags above.
+  if (config.proxy) chromeArgs.push(...chromeProxyFlags(config.proxy));
+  next.chrome = spawnScoped("chrome", chrome, chromeArgs, { stdio: "ignore", env, detached: false });
 
   // Publish the state BEFORE waiting on ports. If a wait fails or throws, the
   // processes we just spawned must still be reachable by stopDesktop -- an
@@ -528,13 +700,22 @@ export async function startDesktop(partial: Partial<DesktopConfig> = {}): Promis
 /** Stop the whole stack, top down. Safe to call when nothing is running. */
 export async function stopDesktop(): Promise<void> {
   const s = state;
+  // Read the persisted pids BEFORE clearStateFile(): with s null that record
+  // is the only handle on a desktop a previous process left running, and
+  // clearing first made readStateFile() return null every time -- the orphan
+  // cleanup below could never run.
+  const orphan = s ? null : readStateFile();
+  await stopIsolationScopes(s?.adoptedPids ?? (s ? {
+    xvfb: s.xvfb?.pid, wm: s.wm?.pid, vnc: s.vnc?.pid, chrome: s.chrome?.pid,
+  } : orphan?.pids ?? {}));
   state = null;
   clearStateFile();
   if (!s) {
     // Nothing in memory, but a previous process may have left a desktop
     // running. Reap it so "stop" means stopped regardless of who started it.
-    const record = readStateFile();
+    const record = orphan;
     if (record) {
+      await stopDesktopScopes(record.pids);
       for (const pid of Object.values(record.pids)) killPid(pid);
       await Bun.sleep(500);
       for (const pid of Object.values(record.pids)) killPid(pid, "SIGKILL");
@@ -545,12 +726,19 @@ export async function stopDesktop(): Promise<void> {
   // An adopted desktop has pids but no child handles.
   if (s.adoptedPids) {
     const pids = Object.values(s.adoptedPids);
+    await stopDesktopScopes(s.adoptedPids);
     for (const pid of pids) killPid(pid);
     await Bun.sleep(600);
     for (const pid of pids) killPid(pid, "SIGKILL");
     return;
   }
 
+  await stopDesktopScopes({
+    xvfb: s.xvfb?.pid,
+    wm: s.wm?.pid,
+    vnc: s.vnc?.pid,
+    chrome: s.chrome?.pid,
+  });
   for (const p of [s.chrome, s.vnc, s.wm, s.xvfb]) {
     try {
       p?.kill("SIGTERM");

@@ -143,12 +143,11 @@ export async function autoSchedulerTickNow(
       const due = mostRecentDue(a.schedule, now, tz);
       if (due === null) continue;
       if (a.lastRunAt && a.lastRunAt >= due) continue; // already ran for this instant
-      // Stamp first so a crash mid-run doesn't loop-retry the same instant.
-      // This must also cover the bot-delivery branch below (missing bot,
-      // disabled bot, cold-start gate refusal) or an orphaned routine retries
-      // every tick for the ~25h catch-up lookback window.
-      await setLastRun(a.id, now.getTime()).catch(() => {});
+      // Bot delivery is fire-and-forget and therefore stamps before dispatch.
+      // Headless runs stamp only after completion: if serve is stopped mid-run,
+      // the unchanged lastRunAt lets the startup catch-up retry that due instant.
       if (a.owner.kind === "bot") {
+        await setLastRun(a.id, now.getTime()).catch(() => {});
         // Fire-and-forget, deliberately NOT awaited in this sequential loop.
         // ensureBotSession may cold-start a session (multi-second, through
         // activationGate), and serializing that behind it would delay every
@@ -167,6 +166,10 @@ export async function autoSchedulerTickNow(
         if (filed.length > 1) onLog(`[auto-sched] ${a.id} filed ${filed.length} findings`);
       } catch (e) {
         onLog(`[auto-sched] ${a.id} failed: ${e}`);
+      } finally {
+        // Normal success and handled failures count as one completed attempt.
+        // A process stop never reaches this block, so startup catch-up retries.
+        await setLastRun(a.id, Date.now()).catch(() => {});
       }
     }
     return true;

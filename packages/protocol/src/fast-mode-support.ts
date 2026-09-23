@@ -5,10 +5,10 @@ export function codexModelSupportsFast(model: string | null | undefined): boolea
 }
 
 export function agentSupportsFastMode(agent: string): boolean {
-  return ["codex", "codex-aisdk", "claude", "aisdk"].includes(agent);
+  return ["codex", "codex-aisdk", "claude", "aisdk", "devin"].includes(agent);
 }
 
 export function supportsFastMode(agent: string, model?: string | null): boolean {
   return agentSupportsFastMode(agent) &&
-    (agent === "claude" || agent === "aisdk" || codexModelSupportsFast(model));
+    (agent === "claude" || agent === "aisdk" || agent === "devin" || codexModelSupportsFast(model));
 }
