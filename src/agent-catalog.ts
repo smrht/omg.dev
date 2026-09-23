@@ -24,6 +24,8 @@ export type SkillCatalogItem = {
 
 export const CLAUDE_MODELS: string[] = ["fable", "opus", "sonnet", "haiku"];
 export const CODEX_MODELS: string[] = [
+  "gpt-6-sol",
+  "gpt-6-luna",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
@@ -34,6 +36,8 @@ export const CODEX_MODELS: string[] = [
 ];
 export const AISDK_MODELS: string[] = ["fable", "opus", "sonnet", "haiku"];
 export const CODEX_AISDK_MODELS: string[] = [
+  "gpt-6-sol",
+  "gpt-6-luna",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
@@ -420,7 +424,7 @@ export function curateOpenCodeModels(models: string[]): string[] {
   return out.length ? out : models.slice(0, 16);
 }
 
-function curateCodexModels(models: string[]): string[] {
+export function curateCodexModels(models: string[]): string[] {
   const out: string[] = [];
   const add = (model: string) => {
     if (models.includes(model) && !out.includes(model)) out.push(model);
