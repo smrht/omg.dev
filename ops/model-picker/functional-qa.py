@@ -68,7 +68,7 @@ try:
  if profiles:
   profiles[0].click();assert 'Claude-profielen' in root().text;btn('Back to picker').click()
  else:vis('button[aria-label^="Agent:"][aria-controls]')[0].click()
- assert vis('[role="switch"]'),'Claude extra modes missing' 
+ assert vis('[role="switch"]'),'Claude extra modes missing'
  vis('button[aria-label^="Agent:"][aria-controls]')[0].click();btn('OpenCode agent').click()
  assert 'GLM 5.3 Flash' in root().text
  close_picker();reload();open_picker()
