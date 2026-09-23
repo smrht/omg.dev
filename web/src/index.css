@@ -2903,3 +2903,19 @@ html.lfg-film .xterm {
   user-select: none;
   -webkit-user-select: none;
 }
+
+/* Private overview: density affects session rows only, never chat bodies/bots. */
+.session-overview[data-overview-density] [data-overview-row] {
+  height: 60px; padding: 6px 8px; gap: 10px; border-radius: 8px;
+}
+.session-overview[data-overview-density="comfortable"] [data-overview-row] { height: 76px; }
+.session-overview[data-overview-density] .overview-row-title { font-size: 15px; letter-spacing: -.1px; }
+.session-overview[data-overview-density] .rail-preview { font-size: 13px; height: 18px; }
+.session-overview[data-overview-density] [data-overview-mark] { width: 32px; height: 36px; }
+.session-overview[data-overview-density] [data-overview-mark] > img { width: 28px; height: 28px; }
+.session-overview[data-overview-density] [data-overview-mark] > :not(img) { max-width: 32px; max-height: 36px; }
+.session-overview[data-overview-density] [data-overview-row]:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.session-overview[data-overview-density] > div > div > button[aria-expanded] { min-height: 36px; }
+@media (prefers-reduced-motion: reduce) {
+  .session-overview *, .session-overview *::before, .session-overview *::after { transition-duration: 0s !important; animation-duration: 0s !important; }
+}

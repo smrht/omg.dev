@@ -108,9 +108,11 @@ export function resolveInitialProjectFilter(input: {
   /** Every selectable value, as the rail lists them. */
   options: readonly string[];
   preferred?: string | null;
+  /** Overview has a visible all-projects control, so retain that explicit scope. */
+  allowAll?: boolean;
 }): string {
   const { saved, options, preferred } = input;
-  if (!options.length) return saved;
+  if (!options.length || (input.allowAll && saved === "__all")) return saved;
   const has = (value: string | null | undefined): value is string =>
     !!value && value !== "__all" && options.includes(value);
   if (has(saved)) return saved;

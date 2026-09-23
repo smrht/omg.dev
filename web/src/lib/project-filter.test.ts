@@ -107,3 +107,5 @@ describe("resolveInitialProjectFilter", () => {
     expect(resolveInitialProjectFilter({ saved: "__all", options: [] })).toBe("__all");
   });
 });
+
+test("overview retains explicit all-projects scope across refreshes", () => { expect(resolveInitialProjectFilter({saved:"__all", options:["one","two"], preferred:"one", allowAll:true})).toBe("__all"); });

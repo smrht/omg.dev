@@ -1,3 +1,4 @@
+import { OverviewToolbar, useOverviewPreferences, buildOverviewGroups, flattenOverview } from "./components/session-overview";
 import { SessionUsageControls } from "./components/session-usage-controls";
 import { OMG_MODELS } from "../../src/omg-models";
 import { omgModelLabel, omgModelSearchText, parseOmgModel } from "../../packages/protocol/src/omg-model-display";
@@ -6314,6 +6315,7 @@ export function App() {
     });
   });
   const [projectFilter, setProjectFilter] = useState(readCachedProjectFilter);
+  const { view: overviewView } = useOverviewPreferences();
   // The mobile side navigation. One drawer now answers "where do I go",
   // replacing both the bottom surface bar and the overflow menu.
   const [navOpen, setNavOpen] = useState(false);
@@ -7230,15 +7232,13 @@ export function App() {
     [projectOptions],
   );
 
-  // Open on a folder. The rail has no "All" pill any more, so an unscoped
-  // filter — a first visit, or a saved folder that has since gone away —
-  // showed every folder with no pill lit and nothing saying why. Resolve it
-  // to a real folder instead, the way iOS always has. The browser's last
-  // session folder leads, because it is the best guess this surface holds.
+  // Keep the overview's explicit all-projects scope across roster polls.
+  // Resolve only a remembered folder that no longer exists.
   useEffect(() => {
     if (loading || !projectOptions.length) return;
     const resolved = resolveInitialProjectFilter({
       saved: projectFilter,
+      allowAll: true,
       options: projectOptions,
       preferred: repoProjectForCwd(repos, localStorage.getItem("lfg_v2_repo")),
     });
@@ -9445,7 +9445,7 @@ export function App() {
       {/* The folder rail under the header, as on iOS. It is the mobile
           composer's folder control: the chosen project is where a new
           session starts. */}
-      {isMobile && tab === "live" && projectOptions.length > 0 ? (
+      {isMobile && tab === "live" && overviewView === "projects" && projectOptions.length > 0 ? (
         <ProjectPillRail
           projects={projectPillsFor(projectOptions, shortProject)}
           value={projectFilter}
@@ -12031,7 +12031,7 @@ function LiveView({
 
   // Same grouping the rail uses, from the same helper, so the two lists cannot
   // drift apart again.
-  const projectGroups = useMemo(
+  const originalProjectGroups = useMemo(
     () =>
       groupNodesByProject(
         tree.roots.filter((item) => !nodeContainsPin(item) && !nodeIsBot(item)),
@@ -12063,11 +12063,20 @@ function LiveView({
   const working = tree.flatten(workingNodes);
   const idle = tree.flatten(idleNodes);
 
+  const overviewPrefs = useOverviewPreferences();
+  const { questions: overviewQuestions } = useAsk();
+  const { unread: overviewUnread } = useContext(SessionUnreadContext);
+  const overviewGroups = buildOverviewGroups({
+    nodes: [...pinnedNodes, ...originalProjectGroups.flatMap(g => g.nodes)],
+    pins: pinnedSet, view: overviewPrefs.view, query: overviewPrefs.query,
+    unreadOnly: overviewPrefs.unreadOnly, unread: overviewUnread, busy: busyBySid,
+    questions: new Set(overviewQuestions.flatMap(q => q.sessionId ? [q.sessionId] : [])), shortProject,
+  });
+  const overviewFolded = useFoldedRailGroups();
   // On-screen order: pinned, bots, then working, then idle. Mobile's bot list
   // is empty by design because Bots owns those persistent conversations.
-  const screenOrder = [...pinned, ...botSessions, ...working, ...idle]
-    .map((s) => s.sessionId)
-    .filter((id): id is string => !!id);
+  const screenOrder = overviewGroups.filter(g => !overviewFolded.includes(g.key)).flatMap(g => flattenOverview(g.nodes))
+    .map(s => s.sessionId).filter((id): id is string => !!id);
   const prefetchKey = screenOrder.slice(0, 8).join(",");
   useEffect(() => {
     if (!prefetchKey) return;
@@ -12311,7 +12320,7 @@ function LiveView({
 
   return (
     <>
-    <div className="flex flex-col gap-2 pb-[calc(var(--lfg-composer-clear)+3.5rem)]">
+    <div data-overview-density={overviewPrefs.density} className="session-overview flex flex-col gap-0 pb-[calc(var(--lfg-composer-clear)+3.5rem)]">
       {coach}
       {/* The same list the rail renders, at the same density, grouped the same
           way (SessionGroups). It used to be a grid of cards split by Working
@@ -12319,14 +12328,15 @@ function LiveView({
           depending on the window — and a card that carried a whole transcript
           could not be scanned, only read. The row is the unit now; the
           transcript lives on the session's own page. */}
+      <OverviewToolbar prefs={overviewPrefs} count={overviewGroups.reduce((n,g) => n+g.count,0)} project={projectFilter !== "__all" ? shortProject(projectFilter) : undefined} onClearProject={() => onProjectChange?.("__all")} />
+      {!overviewGroups.length && <p role="status" className="px-4 py-6 text-sm text-muted-foreground">Geen gesprekken gevonden. Pas je zoekopdracht of filters aan.</p>}
       <SessionGroups
-        groups={projectGroups}
-        pinnedNodes={pinnedNodes}
-        pinnedCount={pinned.length}
+        groups={overviewGroups}
+        pinnedNodes={[]}
+        pinnedCount={0}
         projectFilter={projectFilter}
         onProjectChange={onProjectChange}
         renderItem={renderMobileItem}
-        headerless
       />
     </div>
     {/* Open findings live behind a pill, not at the end of the list. A group
@@ -12985,6 +12995,16 @@ function RailStage({
     [railTree, topPinned],
   );
 
+  const overviewPrefs = useOverviewPreferences();
+  const { questions: overviewQuestions } = useAsk();
+  const { unread: overviewUnread } = useContext(SessionUnreadContext);
+  const overviewGroups = buildOverviewGroups({
+    nodes: [...topPinnedNodes, ...projectRailGroups.flatMap(g => g.nodes)],
+    pins: topPinnedSet, view: overviewPrefs.view, query: overviewPrefs.query,
+    unreadOnly: overviewPrefs.unreadOnly, unread: overviewUnread, busy: busyBySid,
+    questions: new Set(overviewQuestions.flatMap(q => q.sessionId ? [q.sessionId] : [])), shortProject,
+  });
+
   // A folded group takes its rows out of the DOM, so they must leave the
   // keyboard order too. Otherwise j/k walks an invisible cursor and Enter
   // opens a row the reader put away. The icon rail draws no headers and so
@@ -12992,13 +13012,9 @@ function RailStage({
   const foldedRailGroups = useFoldedRailGroups();
   const isRailGroupFolded = (key: string) =>
     !railCollapsed && foldedRailGroups.includes(key);
-  const railOrderedSessions = [
-    ...(isRailGroupFolded("__pinned") ? [] : topPinnedSessions),
-    ...botSessions,
-    ...projectRailGroups.flatMap((group) =>
-      isRailGroupFolded(group.key) ? [] : railTree.flatten(group.nodes),
-    ),
-  ];
+  const railOrderedSessions = overviewGroups.flatMap(group =>
+    isRailGroupFolded(group.key) ? [] : railTree.flatten(group.nodes),
+  );
 
   // Flat rail order the keyboard cursor walks (matching the visible rail;
   // findings are not navigable). Keep the cursor pointing at a live session.
@@ -13764,14 +13780,14 @@ function RailStage({
             <SurfaceToggle active={railSurface} onOpenSessions={onOpenSessions} onOpenBots={onOpenBots} onOpenAuto={onOpenAuto} />
           </div>
         )}
-        {!railCollapsed && railSurface !== "chat" && onProjectChange && projectOptions.length > 0 ? (
+        {!railCollapsed && railSurface !== "chat" && overviewPrefs.view === "projects" && onProjectChange && projectOptions.length > 0 ? (
           <ProjectPillRail
             projects={projectPillsFor(projectOptions, shortProject)}
             value={projectFilter}
             onChange={(next) => onProjectChange(projectFilterAfterPress(next, projectFilter))}
           />
         ) : null}
-        <div className="session-list-scroll min-h-0 flex-1 overflow-y-auto px-1.5 py-2">
+        <div data-overview-density={railSurface !== "chat" ? overviewPrefs.density : undefined} className="session-overview session-list-scroll min-h-0 flex-1 overflow-y-auto px-1.5 py-2">
           {railSurface === "chat" ? botRailList : <>
           {/* Leads the list, the way New bot leads the roster: it belongs to
               the thing it adds to, under the switch bar that says which list
@@ -13794,10 +13810,12 @@ function RailStage({
               </kbd>
             </button>
           ) : null}
+          {!railCollapsed && <OverviewToolbar prefs={overviewPrefs} count={overviewGroups.reduce((n,g) => n+g.count,0)} project={projectFilter !== "__all" ? shortProject(projectFilter) : undefined} onClearProject={() => onProjectChange?.("__all")} />}
+          {!overviewGroups.length && !railCollapsed && <p role="status" className="px-3 py-6 text-sm text-muted-foreground">Geen gesprekken gevonden. Pas je zoekopdracht of filters aan.</p>}
           <SessionGroups
-            groups={projectRailGroups}
-            pinnedNodes={topPinnedNodes}
-            pinnedCount={topPinnedSessions.length}
+            groups={overviewGroups}
+            pinnedNodes={[]}
+            pinnedCount={0}
             collapsed={railCollapsed}
             projectFilter={projectFilter}
             onProjectChange={onProjectChange}
@@ -14478,6 +14496,7 @@ const RailRow = memo(function RailRow({
       ) : null}
       <div
         ref={fgRef}
+        data-overview-row={collapsed ? undefined : "true"}
         role="button"
         tabIndex={0}
         aria-label={ariaLabel}
@@ -14525,7 +14544,7 @@ const RailRow = memo(function RailRow({
         {/* A row may opt out of the mark entirely (agent icons off): then
             there is no box and no gap, the text column starts at the edge. */}
         {mark === null ? null : (
-          <span className={cn("relative flex shrink-0 items-center justify-center", markBoxClassName)}>
+          <span data-overview-mark className={cn("relative flex shrink-0 items-center justify-center", markBoxClassName)}>
             {mark}
           </span>
         )}
@@ -14535,7 +14554,7 @@ const RailRow = memo(function RailRow({
               <span className="flex items-baseline gap-1.5">
                 <span
                 className={cn(
-                  "lfg-film-blur min-w-0 flex-1 truncate text-[17px] leading-tight tracking-[-0.2px]",
+                  "overview-row-title lfg-film-blur min-w-0 flex-1 truncate text-[17px] leading-tight tracking-[-0.2px]",
                   // Unread is not the dot's job alone: the title carries full
                   // weight until it is read, then settles back. Same rule as
                   // the iOS row.
@@ -14636,6 +14655,10 @@ const RailItem = memo(function RailItem({
 }) {
   const { showSidebarAgentIcons: showAgentIcons, showSidebarFavicons: showFavicons } =
     useContext(ViewPrefsContext);
+  const questions = useSessionQuestions([session.sessionId, session.nativeSessionId]);
+  const overviewPreview = questions[0]?.question || (session.status === "blocked"
+    ? ({ model_unavailable: "Model niet beschikbaar", out_of_credits: "Gebruikslimiet bereikt", provider_auth: "Opnieuw inloggen nodig", provider_error: "Providerfout · open om te hervatten", restart_recovered: "Onderbroken · open om te hervatten" }[session.statusReason || "provider_error"])
+    : busy ? "Bezig · " + (latest || "Agent werkt aan je opdracht") : latest);
   const botDirectory = useContext(BotDirectoryContext);
   const drivingBotId = productBotId(session);
   const drivingBot = drivingBotId ? botDirectory.get(drivingBotId) : undefined;
@@ -14785,7 +14808,7 @@ const RailItem = memo(function RailItem({
           <Pin aria-label="Pinned to top" className="size-3 shrink-0 text-primary" fill="currentColor" />
         ) : null
       }
-      preview={latest}
+      preview={<span className={questions.length || session.status === "blocked" ? "text-amber-700 dark:text-amber-400" : undefined}>{overviewPreview}</span>}
       indicator={
         unread ? (
           unreadDot
