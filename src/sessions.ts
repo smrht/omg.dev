@@ -2442,9 +2442,8 @@ async function lastUserText(path: string): Promise<string | null> {
 export function modelAlias(id: string | null | undefined): string | null {
   if (!id) return null;
   const m = id.toLowerCase();
-  // Opus 5.5 is pinned the same way (see CLAUDE_MODELS). Collapsing it to the
-  // floating "opus" alias hides the version and would resume on the alias.
-  if (/opus-5[-.]5/.test(m)) return "claude-opus-5-5";
+  // Agentbox: one row per family (see CLAUDE_MODELS). `opus` lands on 5.5 and
+  // the picker labels it so, so a pinned 5.5 id folds to the alias too.
   if (m.includes("opus")) return "opus";
   if (m.includes("sonnet")) return "sonnet";
   if (m.includes("haiku")) return "haiku";

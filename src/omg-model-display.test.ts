@@ -75,12 +75,13 @@ describe("claude model display", () => {
   test("Claude CLI ids and aliases get a short family name", () => {
     const ids = ["opus", "claude-opus-5-5", "claude-fable-5-1", "fable", "sonnet", "haiku", "claude-opus-4-8-20260101"];
     expect(ids.map((id) => omgModelLabel(id))).toEqual([
-      "Opus",
+      // Agentbox: bare aliases carry the release they land on (CLAUDE_ALIAS_LABELS).
+      "Opus 5.5",
       "Opus 5.5",
       "Fable 5.1",
-      "Fable",
-      "Sonnet",
-      "Haiku",
+      "Fable 5.1",
+      "Sonnet 5",
+      "Haiku 4.5",
       "Opus 4.8",
     ]);
   });

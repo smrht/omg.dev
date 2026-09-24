@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import { CLAUDE_MODELS, AISDK_MODELS, sortClaudeModelsByRelease } from "./agent-catalog.ts";
 
 test("Claude pickers list the newest release first", () => {
-  expect(CLAUDE_MODELS).toEqual(["claude-opus-5-5", "opus", "claude-fable-5-1", "fable", "sonnet", "haiku"]);
+  // Agentbox: aliases only, one row per family, newest family first.
+  expect(CLAUDE_MODELS).toEqual(["opus", "fable", "sonnet", "haiku"]);
   expect(AISDK_MODELS).toEqual(CLAUDE_MODELS);
 });
 
