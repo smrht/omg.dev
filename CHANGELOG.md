@@ -2,6 +2,53 @@
 
 Recent product updates and deployment notes.
 
+## September 24, 2026 - Faster return connections (v0.6.124)
+
+- Returning to a screen can reuse a valid connection grant. Network failures and explicit reconnects still refresh the relay route.
+- Mobile clients can request a small readiness response without downloading the full web bootstrap payload.
+- iOS connection startup runs readiness and live updates in parallel. Connection latency and timing details are available in Settings under Debug.
+
+## September 24, 2026 - Connectors that just work (v0.6.123)
+
+- Connectors now list only apps omg has tested: Gmail, Google Drive, Google Calendar and Google Sheets. Each runs on omg's own tools, and the untested catalog is gone.
+- Pick who a connection is for with tabs (you, a role, or the whole team). A connection given to a role works for that role's agents with no tool rules, and open sessions pick up new tools without a restart.
+- The iPhone app has Settings › Connectors: connect an app for the whole team from your phone.
+- On a hosted Computer, Google apps connect with no setup: omg.dev's own Google sign-in is built in.
+- Google asks for fewer permissions: Calendar asks for 2 instead of 12, and Gmail asks for 1.
+
+## September 24, 2026 - Nearby Bridge relays (v0.6.122)
+
+- Bridges can choose the fastest healthy relay region and reconnect through another region without pairing again.
+- Hosted clients use the Bridge region for live updates, requests, uploads, and media when the server supplies a regional route.
+
+## September 24, 2026 - Long videos keep playing (v0.6.121)
+
+- A video from a hosted computer no longer stops after a few minutes. When its access link expires, the player gets a new one and continues from the same point. This works on the web and in the iPhone app.
+
+## September 24, 2026 - Faster file downloads on iPhone (v0.6.120)
+
+- On iPhone, Download on a file page is much faster for large files. The file goes straight to disk.
+- The file page shows download progress: bytes done, total size, and percent.
+- On a phone browser, a file, image or video opened from a session now shows on top of the session, not behind it.
+
+## September 24, 2026 - One menu for the desktop sidebar (v0.6.119)
+
+- The desktop sidebar has one menu button. It opens Chat, Bots, Schedules, Notifications, Artifacts, Computer, Board, Settings and your machine over the list, with Back to return. The Chat / Bots / Schedules tabs and the three-dot menu are gone.
+- The top of the sidebar shows your welcome, what your agents are building, or who needs you. The omg.dev mark moves to the bottom.
+- The folder picker sits next to New session and lists each folder's session count. Manage folders reorders, hides, removes or adds folders.
+- Session and bot rows are shorter, so more of the list fits.
+- Hover the edge of the sidebar to collapse or expand it.
+- Open updates show as a list inside the sidebar.
+- A Get the apps card at the bottom of the sidebar installs omg on your computer or opens the iPhone app with a QR code. It now shows on omg.dev too.
+- The input bar no longer has a Stop button. Stop is in the session menu, and Esc still stops the agent.
+- The machine switcher no longer shows an online dot.
+
+## September 24, 2026 - Expo apps load real data in Expo Go (v0.6.118)
+
+- An Expo app's agent now deploys the backend before the preview, makes it public, and points the app at it, so Expo Go shows real data from the first open. The agent tells you the backend is public until you add sign-in.
+- The preview card now says when an Expo Go link has expired, and Restart preview asks the agent for a new one.
+- An agent's `omg_deploy` now counts the upload inside its 45 second wait, so the call always answers before the tool times out.
+
 ## September 23, 2026 - Google Drive, and Upgrade in the phone menu (v0.6.117)
 
 - Google Drive now works through omg's own connector, on the same Google sign-in as Gmail. Agents can search, read, create and trash files. Docs and Slides read as text, and Sheets read as CSV.

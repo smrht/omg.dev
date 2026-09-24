@@ -11,8 +11,8 @@
     "@expo/metro-runtime": "~58.0.4",
     "@expo/ui": "~58.0.4",
     "@novnc/novnc": "^1.7.0",
-    "@omg-dev/client": "^0.6.67",
-    "@omg-dev/protocol": "^0.6.67",
+    "@omg-dev/client": "0.6.122",
+    "@omg-dev/protocol": "0.6.122",
     "@react-native-async-storage/async-storage": "2.2.0",
     "@react-native-google-signin/google-signin": "^16.1.4",
     "@shopify/react-native-skia": "2.11.2",
@@ -70,12 +70,14 @@
     "typecheck": "tsc --noEmit",
     "test:native": "bun run scripts/native-checks.ts",
     "doctor": "expo-doctor",
-    "test:e2e": "bun run scripts/maestro.ts"
+    "test:e2e": "bun run scripts/maestro.ts",
+    "build:mac": "bun run scripts/mac-build.ts"
   },
   "private": true,
   "patchedDependencies": {
     "@novnc/novnc@1.7.0": "patches/@novnc%2Fnovnc@1.7.0.patch",
     "@expo/ui@58.0.4": "patches/@expo%2Fui@58.0.4.patch",
-    "react-native-key-command@1.0.16": "patches/react-native-key-command@1.0.16.patch"
+    "react-native-key-command@1.0.16": "patches/react-native-key-command@1.0.16.patch",
+    "expo-modules-jsi@58.0.3": "patches/expo-modules-jsi@58.0.3.patch"
   }
 }

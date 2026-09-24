@@ -94,18 +94,20 @@ describe("bots page roster chrome", () => {
     expect(ROSTER).not.toContain("size={56}");
     // The rail roster used to run at 24/28px — the session rows' density,
     // which turned the creature into a bullet point and clipped the preview
-    // after a few words. A bot row is the same component on both surfaces,
-    // so it is the same row: the page's 44px face, and 32px when the rail
-    // collapses to 56px and the face IS the row.
+    // after a few words. A bot row is the same component on both surfaces.
+    // The desktop rail uses the desktop session row's density, where a bot
+    // face is 36px (see RailItem), and 32px when the rail collapses to 56px
+    // and the face IS the row.
     expect(BOT_RAIL).toContain("<BotRosterRow");
-    expect(BOT_RAIL).toContain("avatarSize={railCollapsed ? 32 : 44}");
+    expect(BOT_RAIL).toContain("avatarSize={railCollapsed ? 32 : 36}");
     expect(BOT_RAIL).not.toContain("avatarSize={railCollapsed ? 24 : 28}");
     expect(BOT_RAIL).not.toContain("size={56}");
     // The type scale itself now lives once, on the shared shell, rather than
     // being copied by eye at each call site (see RailRow's docstring). It is
     // the iOS session row's scale: a 17px title, and the same 14px preview.
-    expect(RAIL_ROW).toContain('"min-w-0 flex-1 truncate text-[17px] leading-tight tracking-[-0.2px]"');
-    expect(RAIL_ROW).toContain("text-sm leading-tight text-muted-foreground");
+    // The desktop session rail opts into a denser scale on the same shell.
+    expect(RAIL_ROW).toContain('"text-[17px] tracking-[-0.2px]"');
+    expect(RAIL_ROW).toContain('"h-5 text-sm"');
     expect(BOT_ROSTER_ROW).not.toContain("text-sm font-medium");
     expect(BOT_ROSTER_ROW).not.toContain("text-xs leading-tight text-muted-foreground");
   });
@@ -126,8 +128,10 @@ describe("bots page roster chrome", () => {
     // 5rem, matching SESSION_ROW.height in mobile/src/components.tsx. The web
     // row ran at 3.75rem, so the same fleet read denser on the web than in
     // the app.
+    // The desktop rail's denser row is fixed too, and bot rows use it.
     expect(RAIL_ROW).toContain("h-20");
-    expect(BOT_RAIL).toContain("h-20");
+    expect(RAIL_ROW).toContain("h-[3.75rem]");
+    expect(BOT_RAIL).toContain("dense");
     expect(BOT_RAIL).not.toContain("py-1.5");
   });
 

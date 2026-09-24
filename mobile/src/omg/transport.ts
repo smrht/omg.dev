@@ -20,6 +20,8 @@ import {
 
 import { SESSION_AUTH_PATH, SESSION_ORIGIN } from "./config";
 import { getAuthToken } from "./auth";
+import { createGrantOwner } from "./grant-owner";
+import { tracedFetch, timeConnection, readConnectionJson, traceConnectionTransport } from "./connection-trace";
 import { getDemoTransport } from "./demo-data";
 import { isDemoMode } from "./demo";
 import {
@@ -61,14 +63,19 @@ export class ComputerGrantError extends Error {
  * route.
  */
 export async function mintSessionGrant(bindingId: string): Promise<OmgGrant> {
-  const authToken = await getAuthToken();
+  const authToken = await timeConnection("account-token", getAuthToken);
   if (!authToken) throw new ComputerGrantError("Please sign in again.");
 
+  return requestSessionGrant(bindingId, authToken);
+}
+
+/** Also used by the simulator with a short-lived, authorized test JWT. */
+export async function requestSessionGrant(bindingId: string, authToken: string): Promise<OmgGrant> {
   const target = mintTargetForBinding(bindingId);
 
   let response: Response;
   try {
-    response = await fetch(`${SESSION_ORIGIN}${SESSION_AUTH_PATH}`, {
+    response = await tracedFetch(`${SESSION_ORIGIN}${SESSION_AUTH_PATH}`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${authToken}`,
@@ -104,10 +111,11 @@ export async function mintSessionGrant(bindingId: string): Promise<OmgGrant> {
     );
   }
 
-  const body = (await response.json().catch(() => null)) as {
+  const body = (await readConnectionJson(response, "grant").catch(() => null)) as {
     cookie?: string;
     exp?: number;
     expiresInMs?: number;
+    sessionOrigin?: string;
   } | null;
   if (!body?.cookie) {
     throw new ComputerGrantError("Your Computer is updating. Try again in a moment.");
@@ -124,7 +132,11 @@ export async function mintSessionGrant(bindingId: string): Promise<OmgGrant> {
         ? body.exp
         : Date.now();
 
-  return { token: body.cookie, expiresAt };
+  return {
+    token: body.cookie,
+    expiresAt,
+    ...(body.sessionOrigin ? { sessionOrigin: body.sessionOrigin } : {}),
+  };
 }
 
 /**
@@ -135,39 +147,7 @@ export async function mintSessionGrant(bindingId: string): Promise<OmgGrant> {
  * exact bug shipped on the web and cost five /token + five /__omg/session-auth
  * calls on every cold open.
  */
-type GrantOwner = {
-  get: (input: { forceRefresh: boolean }) => Promise<OmgGrant>;
-  reset: () => void;
-};
-
-function createGrantOwner(bindingId: string): GrantOwner {
-  let cached: OmgGrant | null = null;
-  let pending: Promise<OmgGrant> | null = null;
-
-  return {
-    async get({ forceRefresh }) {
-      // 30s of slack so a grant that is about to die isn't handed to a request
-      // that will outlive it.
-      if (!forceRefresh && cached && cached.expiresAt - Date.now() > 30_000) {
-        return cached;
-      }
-      if (!forceRefresh && pending) return pending;
-      pending = mintSessionGrant(bindingId)
-        .then((grant) => {
-          cached = grant;
-          return grant;
-        })
-        .finally(() => {
-          pending = null;
-        });
-      return pending;
-    },
-    reset() {
-      cached = null;
-      pending = null;
-    },
-  };
-}
+type GrantOwner = ReturnType<typeof createGrantOwner>;
 
 const transports = new Map<string, { transport: OmgTransport; owner: GrantOwner }>();
 
@@ -186,7 +166,7 @@ export async function getComputerSocketAccess(bindingId: string): Promise<Comput
   if (!entry) throw new ComputerGrantError("Couldn't open your Computer. Try again in a moment.");
   const current = await entry.owner.get({ forceRefresh: false });
   return {
-    url: computerSocketUrl(SESSION_ORIGIN),
+    url: computerSocketUrl(current.sessionOrigin ?? SESSION_ORIGIN),
     protocol: `lfg-bearer.${current.token}`,
   };
 }
@@ -205,11 +185,13 @@ export function getHostedTransport(bindingId: string): OmgTransport {
   const existing = transports.get(bindingId);
   if (existing) return existing.transport;
 
-  const owner = createGrantOwner(bindingId);
+  const owner = createGrantOwner(() => mintSessionGrant(bindingId));
   const transport = createGrantTransport({
     baseUrl: SESSION_ORIGIN,
     getGrant: owner.get,
+    fetch: tracedFetch,
   });
+  traceConnectionTransport(transport);
   transports.set(bindingId, { transport, owner });
   return transport;
 }
@@ -289,7 +271,7 @@ export async function signedRequestFor(
   if (!entry) return null;
   const grant = await entry.owner.get({ forceRefresh: options.forceRefresh ?? false });
   return {
-    url: signedArtifactUrl(SESSION_ORIGIN, path, grant.token),
+    url: signedArtifactUrl(grant.sessionOrigin ?? SESSION_ORIGIN, path, grant.token),
     headers: {},
   };
 }

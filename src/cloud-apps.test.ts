@@ -113,6 +113,31 @@ test("a deploy that outlasts the wait budget returns pending instead of failing"
   expect(clock).toBeLessThanOrEqual(50_000);
 });
 
+test("the wait budget includes the upload, so a slow upload leaves less wait", async () => {
+  writeFileSync(join(dir, "index.html"), "<h1>hi</h1>");
+  let clock = 0;
+  let statusCalls = 0;
+  const client = createCloudAppsClient({
+    getAuthToken: async () => "tok",
+    fetch: async (input) => {
+      if (String(input).includes("/deploy-source")) {
+        clock += 40_000; // the upload itself took 40 seconds
+        return json({ slug: "hi", url: "https://hi.omgs.app", status: "accepted", projectId: "proj-1", runId: "run-1" });
+      }
+      statusCalls += 1;
+      return json({ slug: "hi", phase: "building", status: "building" });
+    },
+    endpoints: { controlPlaneOrigin: "https://backend.example" },
+  });
+  const result = await deployFolder(client, {
+    cwd: dir, wait: true, waitBudgetMs: 45_000, intervalMs: 1,
+    now: () => clock, sleep: async () => { clock += 2_000; },
+  });
+  expect(result.pending).toBe(true);
+  expect(clock).toBeLessThanOrEqual(47_000);
+  expect(statusCalls).toBeLessThanOrEqual(4);
+});
+
 test("a failed build within the budget still reports the build error", async () => {
   writeFileSync(join(dir, "index.html"), "<h1>hi</h1>");
   const client = createCloudAppsClient({
@@ -160,4 +185,71 @@ test("handleCloudAppsRequest deploys through the local /api/cloud/apps/deploy ro
 test("handleCloudAppsRequest returns null for unrelated paths", async () => {
   const req = new Request("http://127.0.0.1/api/cloud/session");
   expect(await handleCloudAppsRequest(req, new URL(req.url), { getAccessToken: async () => null })).toBeNull();
+});
+
+function identityRequest(body: unknown) {
+  return new Request("http://127.0.0.1/api/cloud/apps/identity", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+test("omg_app_identity sends name, tagline and the icon file to Cloud", async () => {
+  const iconPath = join(dir, "icon.svg");
+  writeFileSync(iconPath, '<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+  let sent: any = null;
+  const req = identityRequest({ slug: "hi", name: "Hi There", tagline: "Say hi", iconPath });
+  const response = await handleCloudAppsRequest(req, new URL(req.url), {
+    getAccessToken: async () => "tok",
+    controlPlaneUrl: "https://backend.example",
+    fetch: async (input, init) => {
+      expect(String(input)).toBe("https://backend.example/api/cli/apps/identity");
+      sent = JSON.parse(String(init?.body));
+      return json({ ok: true, slug: "hi", name: "Hi There", tagline: "Say hi", iconUrl: "https://cdn/x.svg" });
+    },
+  });
+  expect(response?.status).toBe(200);
+  expect(sent).toEqual({
+    slug: "hi",
+    name: "Hi There",
+    tagline: "Say hi",
+    icon: {
+      contentType: "image/svg+xml",
+      dataBase64: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>').toString("base64"),
+    },
+  });
+});
+
+test("omg_app_identity with only a slug sends no fields", async () => {
+  let sent: any = null;
+  const req = identityRequest({ slug: "hi" });
+  await handleCloudAppsRequest(req, new URL(req.url), {
+    getAccessToken: async () => "tok",
+    controlPlaneUrl: "https://backend.example",
+    fetch: async (_input, init) => {
+      sent = JSON.parse(String(init?.body));
+      return json({ ok: true, slug: "hi", name: "Hi", tagline: null, iconUrl: null });
+    },
+  });
+  expect(sent).toEqual({ slug: "hi" });
+});
+
+test("omg_app_identity refuses a bad icon before any upload", async () => {
+  writeFileSync(join(dir, "icon.webp"), "RIFF");
+  writeFileSync(join(dir, "big.png"), Buffer.alloc(512 * 1024 + 1));
+  for (const iconPath of [join(dir, "icon.webp"), join(dir, "big.png"), join(dir, "missing.png")]) {
+    let called = false;
+    const req = identityRequest({ slug: "hi", iconPath });
+    const response = await handleCloudAppsRequest(req, new URL(req.url), {
+      getAccessToken: async () => "tok",
+      controlPlaneUrl: "https://backend.example",
+      fetch: async () => {
+        called = true;
+        return json({});
+      },
+    });
+    expect(response?.status).toBe(400);
+    expect(called).toBe(false);
+  }
 });

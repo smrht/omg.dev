@@ -49,7 +49,7 @@ import Reanimated, {
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { StatusDot } from "../components";
+import { Icon } from "../components";
 import { LucideIcon, type LucideName } from "./lucide";
 import { BrandWordmark } from "./brand-mark";
 import { GlassSurface } from "./glass";
@@ -99,7 +99,6 @@ export type SideNavProps = {
   /** Built by computer-picker.ts — the one definition of switching machines. */
   computerOptions: MenuOption[];
   machineName: string;
-  online: boolean;
   /** Pushes on the phone, swaps the pane on the iPad. The caller decides. */
   navigate: (href: string) => void;
   /** Opens the shortcuts card. Omitted when the binary cannot deliver key commands. */
@@ -114,6 +113,8 @@ export type SideNavProps = {
    * the route would stack a second copy of the screen you can see.
    */
   onDismiss?: () => void;
+  /** The wordmark above the rows. Defaults to on in the drawer, off inline. */
+  showBrand?: boolean;
 };
 
 function NavRow({
@@ -184,16 +185,16 @@ export function SideNavPanel({
   pathname,
   computerOptions,
   machineName,
-  online,
   navigate,
   onShortcuts,
   onDismiss,
+  showBrand = !!onDismiss,
 }: SideNavProps) {
   const { colors, radius, type, space } = useTheme();
   const rows = sideNavRows({ pathname, keyboardShortcuts: !!onShortcuts });
   return (
     <View style={{ gap: space.xs }}>
-      {onDismiss ? (
+      {showBrand ? (
         <View style={{ paddingHorizontal: 12, paddingTop: 8, paddingBottom: 20 }}>
           <BrandWordmark size={28} holeColor={colors.bg} />
         </View>
@@ -226,7 +227,6 @@ export function SideNavPanel({
               {machineName}
             </Text>
           </View>
-          <StatusDot busy={online} size={7} />
           <LucideIcon name="chevrons-up-down" size={12} color={colors.textMuted} />
         </View>
       </DropdownMenu>
@@ -456,22 +456,107 @@ export function SideNavDrawer({ progress, controller, ...panel }: SideNavProps &
   );
 }
 
+/** The rail menu's slide, the web rail's 380ms on its softer curve. */
+export const RAIL_NAV_DURATION = 380;
+// A function, not a constant: built when the slide runs, not at import.
+export const railNavEasing = () => Easing.bezier(0.25, 0.8, 0.25, 1);
+
+/**
+ * THE IPAD RAIL'S MENU, ported from the web's desktop rail (SideNavPanel in
+ * web/src/components/side-nav.tsx). The same rows as the phone drawer, drawn
+ * over the rail's own list with Back to return, instead of a drawer that
+ * pushes the whole window sideways.
+ *
+ * It covers the rail and nothing else. The pane beside it does not move: the
+ * menu changes what the rail shows, never what is open. This is not the old
+ * rail footer either, which stacked six rows UNDER the list and cramped it;
+ * here the list steps back while the menu is up and returns on Back.
+ *
+ * Mounted at all times and slid off to the left when closed, so opening it is
+ * a transform and not a mount. Hidden from touch and VoiceOver while closed.
+ */
+export function SideNavRailPanel({
+  open,
+  progress,
+  width,
+  topInset,
+  onBack,
+  ...panel
+}: Omit<SideNavProps, "onDismiss" | "showBrand"> & {
+  open: boolean;
+  /** 0 closed, 1 open. The caller also steps the list back with it. */
+  progress: SharedValue<number>;
+  /** The rail's width, which is how far the panel travels. */
+  width: number;
+  /** The rail's own top padding, so Back sits on the header's line. */
+  topInset: number;
+  onBack: () => void;
+}) {
+  const { colors, type, space, radius } = useTheme();
+  const insets = useSafeAreaInsets();
+  const style = useAnimatedStyle(() => ({
+    opacity: progress.value,
+    transform: [{ translateX: (progress.value - 1) * width }],
+  }));
+  return (
+    <Reanimated.View
+      pointerEvents={open ? "auto" : "none"}
+      accessibilityElementsHidden={!open}
+      importantForAccessibility={open ? "auto" : "no-hide-descendants"}
+      accessibilityLabel="Navigation"
+      style={[
+        StyleSheet.absoluteFill,
+        { zIndex: 30, backgroundColor: colors.bg, paddingTop: topInset },
+        style,
+      ]}
+    >
+      <View style={{ height: 40, flexDirection: "row", alignItems: "center", paddingHorizontal: space.sm }}>
+        <Pressable
+          onPress={onBack}
+          hitSlop={8}
+          accessibilityRole="button"
+          accessibilityLabel="Back"
+          style={({ pressed }) => ({
+            height: 36,
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 4,
+            paddingLeft: 6,
+            paddingRight: 10,
+            borderRadius: radius.md,
+            backgroundColor: pressed ? colors.cardPressed : "transparent",
+          })}
+        >
+          <Icon ios="chevron.left" android="chevron_left" size={15} color={colors.textSecondary} />
+          <Text style={{ ...type.subhead, fontWeight: "500", color: colors.textSecondary }}>Back</Text>
+        </Pressable>
+      </View>
+      <ScrollView
+        contentContainerStyle={{
+          paddingTop: space.sm,
+          paddingBottom: insets.bottom + space.lg,
+          paddingHorizontal: 12,
+        }}
+      >
+        <SideNavPanel {...panel} showBrand={false} onDismiss={onBack} />
+      </ScrollView>
+    </Reanimated.View>
+  );
+}
+
 /**
  * The control that opens the drawer, for the leading edge of the header.
  *
- * It wears the machine's online dot. The computer chip used to lead the bar
- * and that dot was the only always-visible word on whether the box is up;
- * moving the switcher into the nav must not cost that, so the button that now
- * stands in its place carries it.
+ * No online dot. It used to wear the machine's dot, but that read gray for a
+ * cloud Computer that was live (the cloud has no row in `bindings`, so the
+ * online flag fell back to false), and Benny asked for it gone on 2026-09-24.
  */
 export function SideNavButton({
   onPress,
-  online,
   machineName,
   floating = false,
 }: {
   onPress: () => void;
-  online: boolean;
   machineName: string;
   floating?: boolean;
 }) {
@@ -487,9 +572,6 @@ export function SideNavButton({
       <View accessible={false} style={{ width: 20, height: 16, justifyContent: "center", gap: 5 }}>
         <View style={{ width: 20, height: 2, borderRadius: 1, backgroundColor: colors.textSecondary }} />
         <View style={{ width: 13, height: 2, borderRadius: 1, backgroundColor: colors.textSecondary }} />
-      </View>
-      <View style={{ position: "absolute", right: floating ? 9 : 5, bottom: floating ? 10 : 6 }}>
-        <StatusDot busy={online} size={7} />
       </View>
     </Pressable>
   );

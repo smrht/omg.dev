@@ -1,4 +1,5 @@
 import { createNoProjectWorkspace, NO_PROJECT } from "../no-project-chat.ts";
+import { readinessBootstrap } from "../bootstrap-readiness.ts";
 import { mkdir, open, readdir, realpath, stat } from "node:fs/promises";
 import { appendFileSync, existsSync, statfsSync, statSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir, homedir, loadavg, cpus, totalmem, freemem } from "node:os";
@@ -90,6 +91,9 @@ import {
   connectorsForMember,
   listConnectorsForAdmin,
   emitConnectorsChanged,
+  appRelayRedirectUrl,
+  APP_RETURN_URL,
+  oauthAppSource,
 } from "@omg-dev/connectors";
 import { enforceRole } from "../policy/mcp-filter.ts";
 import { withConnectorGrants } from "../policy/connector-grants.ts";
@@ -835,6 +839,20 @@ function oauthRedirectBase(req: Request, explicit?: string): string {
     return `${proto}://${host}`;
   }
   return localServeBaseUrl();
+}
+
+/**
+ * The return address for a connector on a pre-registered client (Google).
+ * Such a client accepts only the addresses its owner listed, so the box uses
+ * ONE: its public HTTPS address (LFG_PUBLIC_URL, the Tailscale name) when it
+ * has one, whatever address the page was opened on. Without this, the same
+ * box sent 127.0.0.1 from one browser and the .ts.net name from another, and
+ * Google refused whichever was not registered (redirect_uri_mismatch).
+ * Connectors that register themselves (DCR) keep the request's own origin.
+ */
+function connectorRedirectBase(req: Request, preRegistered: boolean, explicit?: string): string {
+  if (!explicit && preRegistered && PUBLIC_URL.startsWith("https://") && !oauthRelayConfig()) return PUBLIC_URL;
+  return oauthRedirectBase(req, explicit);
 }
 
 // A box that cannot receive the provider redirect directly (a hosted sandbox,
@@ -4499,19 +4517,32 @@ export async function cmdServe() {
         if (m && req.method === "POST") {
           const connector = getConnector(m[1]!);
           if (!connector) return err(404, "connector not found");
-          const body = (await req.json().catch(() => null)) as { redirectBase?: string; state?: string } | null;
-          const base = oauthRedirectBase(req, body?.redirectBase);
+          const body = (await req.json().catch(() => null)) as { redirectBase?: string; state?: string; via?: string } | null;
+          const base = connectorRedirectBase(req, !!connector.oauthApp, body?.redirectBase);
+          // The phone app signs in through the fixed relay on auth.omg.dev and
+          // then hands the code back itself (POST /api/connectors/oauth/callback).
+          // Only a pre-registered client has that relay on its redirect list.
+          const viaApp = body?.via === "app";
+          if (viaApp && !connector.oauthApp) return err(400, "Connect this one from the web page.");
+          // omg.dev's own client (a managed Computer) lists only the relay as a
+          // return address, so the web page signs in through it too and gets
+          // the code back from the relay page (it posts to the page that opened it).
+          const platform = !!connector.oauthApp && oauthAppSource(connector.oauthApp) === "platform";
+          const viaRelay = viaApp || platform;
+          const appRedirect = viaRelay
+            ? appRelayRedirectUrl(connector.oauthApp!, process.env.OMG_CONNECTOR_APP_RELAY?.trim() || undefined)
+            : undefined;
           // State that routes the redirect back to this box through a relay: a
           // caller may supply it, else the box mints one from its relay env.
           const state =
             (typeof body?.state === "string" && body.state.length >= 16 ? body.state : undefined) ??
             oauthRelayState();
-          const result = await startConnectorOAuth(connector, base, state);
+          const result = await startConnectorOAuth(connector, base, state, appRedirect);
           // A connector on a pre-registered app that the box has no client
           // for yet: the client shows the setup form instead of an error.
           if (!result.ok && result.needsOAuthApp) return json({ error: result.error, needsOAuthApp: result.needsOAuthApp }, { status: 409 });
           if (!result.ok) return err(502, result.error);
-          return json(result);
+          return json(viaRelay ? { ...result, returnUrl: APP_RETURN_URL, viaRelay: true } : result);
         }
       }
       // Pre-registered OAuth clients (Google has no dynamic registration).
@@ -4519,7 +4550,7 @@ export async function cmdServe() {
       // value the owner registers with the client, the same base
       // oauth/start uses for this request.
       if (path === "/api/connectors/oauth-apps" && req.method === "GET") {
-        return json({ apps: oauthAppStatuses(getOAuthApp), redirectUri: connectorCallbackUrl(oauthRedirectBase(req)) });
+        return json({ apps: oauthAppStatuses(getOAuthApp), redirectUri: connectorCallbackUrl(connectorRedirectBase(req, true)) });
       }
       {
         const m = path.match(/^\/api\/connectors\/oauth-apps\/([a-z0-9-]+)$/);
@@ -4608,6 +4639,11 @@ export async function cmdServe() {
         return json({ connector: publicView(connector) });
       }
       if (path === "/api/connectors/catalog" && req.method === "GET") {
+        // The page asks only for omg's tested connectors. Answer from memory
+        // rather than waiting on the remote index download after a restart.
+        if (url.searchParams.get("recommended") === "1") {
+          return json({ total: RECOMMENDED_CATALOG.length, results: RECOMMENDED_CATALOG, recommended: RECOMMENDED_CATALOG });
+        }
         try {
           const q = url.searchParams.get("q") ?? "";
           const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 50, 1), 200);
@@ -5369,6 +5405,7 @@ a{color:#60a5fa}
         path === "/api/cloud/apps/deploy" ||
         path === "/api/cloud/apps/status" ||
         path === "/api/cloud/apps/visibility" ||
+        path === "/api/cloud/apps/identity" ||
         path === "/api/cloud/env" ||
         path === "/api/cloud/env/pull" ||
         path === "/api/cloud/env/rm" ||
@@ -5640,6 +5677,12 @@ a{color:#60a5fa}
       }
       if (path === "/api/bootstrap" && req.method === "GET") {
         noteListSessionsClientActivity();
+        if (url.searchParams.get("view") === "readiness") {
+          return readinessBootstrap(
+            { codingAgents: listCodingAgentsCached, repos: listRepos },
+            { version: appVersion(), bootId: SERVER_INSTANCE_ID },
+          );
+        }
         const sessionsTask = listSessionsCached().then((sessions) => {
           warmChatTranscripts(sessions);
           return sessions;

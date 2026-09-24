@@ -1,5 +1,6 @@
 /**
- * Shared, runtime-free display rules for hosted `omg/<provider>/<model>` ids.
+ * Shared, runtime-free display rules for model ids: hosted
+ * `omg/<provider>/<model>` ids, Claude CLI ids and Codex CLI ids.
  *
  * The router id is the wire format and stays the value everywhere. This file
  * owns how a picker SHOWS it: the provider it belongs to (for the mark) and a
@@ -98,6 +99,7 @@ export function parseOmgModel(id: string | null | undefined): OmgModelInfo | nul
  * alias stays the wire value (the CLI, the Agent SDK and `/model` all speak
  * it); the picker shows the release so a reader can tell WHICH opus they get.
  * Measured on claude 2.1.280 (2026-09-22). Bump when Anthropic moves an alias.
+ * Full ids fall through to claudeModelLabel.
  */
 export const CLAUDE_ALIAS_LABELS: Record<string, string> = {
   opus: "Opus 5.5",
@@ -106,16 +108,43 @@ export const CLAUDE_ALIAS_LABELS: Record<string, string> = {
   haiku: "Haiku 4.5",
 };
 
-/** The short name for a picker row or pill; other agents' ids pass through. */
+/**
+ * Claude CLI ids and aliases: "claude-opus-5-5" -> "Opus 5.5", "opus" ->
+ * "Opus". These only appear under a Claude agent, so the name drops "Claude".
+ * Hosted omg ids keep it, because the omg agent mixes providers. Null for
+ * anything else.
+ */
+export function claudeModelLabel(id: string | null | undefined): string | null {
+  if (!id) return null;
+  const match = /^(?:claude-)?(opus|sonnet|haiku|fable)(?:-(\d+)(?:[-.](\d{1,2}))?)?(?:-\d{8})?$/.exec(id.trim().toLowerCase());
+  if (!match) return null;
+  const family = caseToken(match[1]!);
+  const version = match[2] ? (match[3] ? `${match[2]}.${match[3]}` : match[2]) : "";
+  return version ? `${family} ${version}` : family;
+}
+
+/**
+ * Codex CLI ids: "gpt-6-astra" -> "GPT-6 Astra", "gpt-5.4-mini" -> "GPT-5.4
+ * Mini". The same rule the hosted "GPT-5.6 Sol" uses. Null for anything else.
+ */
+export function codexModelLabel(id: string | null | undefined): string | null {
+  if (!id || !/^gpt-\d/i.test(id.trim())) return null;
+  return humanizeOmgModelName(id.trim());
+}
+
+/**
+ * The one display name for a model id, for a picker row, pill, or badge.
+ * The id stays the value everywhere; only the text shown changes. Ids with no
+ * rule (codex, cursor, and other agents) pass through unchanged.
+ */
 export function omgModelLabel(id: string | null | undefined): string {
-  if (!id) return "";
-  return parseOmgModel(id)?.label ?? CLAUDE_ALIAS_LABELS[id] ?? id;
+  return parseOmgModel(id)?.label ?? (id ? CLAUDE_ALIAS_LABELS[id] : undefined) ?? claudeModelLabel(id) ?? codexModelLabel(id) ?? (id ?? "");
 }
 
 /** Lower-case text a filter box should match: the id and the short name. */
 export function omgModelSearchText(id: string): string {
   const info = parseOmgModel(id);
   if (info) return `${id} ${info.providerLabel} ${info.label}`.toLowerCase();
-  const alias = CLAUDE_ALIAS_LABELS[id];
-  return (alias ? `${id} ${alias}` : id).toLowerCase();
+  const label = CLAUDE_ALIAS_LABELS[id] ?? claudeModelLabel(id) ?? codexModelLabel(id);
+  return (label ? `${id} ${label}` : id).toLowerCase();
 }

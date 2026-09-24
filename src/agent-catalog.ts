@@ -26,13 +26,52 @@ export type SkillCatalogItem = {
   path: string;
 };
 
-// Family aliases the claude CLI resolves to the current release of each line.
-// Measured on claude 2.1.280 (2026-09-22): opus -> claude-opus-5-5,
-// fable -> claude-fable-5-1, sonnet -> claude-sonnet-5, haiku -> claude-haiku-4-5.
-// The former `claude-fable-5-1` pin is gone: `fable` lands on 5.1 itself now,
-// so the pin only produced a second Fable row. The picker shows the resolved
-// release name next to each alias (CLAUDE_ALIAS_LABELS in omg-model-display).
-export const CLAUDE_MODELS: string[] = ["opus", "fable", "sonnet", "haiku"];
+// Pinned full ids exist because the short aliases float. `opus`, `fable`,
+// `sonnet` and `haiku` each resolve to the newest release of their family
+// (verified 2026-09-24 against Claude Code: `--model <alias>` reported
+// modelUsage for claude-opus-5-5, claude-fable-5-1, claude-sonnet-5 and
+// claude-haiku-4-5-20251001). `claude-opus-5-5` and `claude-fable-5-1` are the
+// only way to stay on those releases on purpose, and the only entries that
+// name the version in the picker. Claude Code before 2.1.280 rejects
+// `claude-opus-5-5` with "does not support this model; version 2.1.280 or
+// newer is required", so a stale CLI must take the alias instead.
+//
+// Release dates are `created_at` from Anthropic's GET /v1/models, read
+// 2026-09-24. They only order the picker, newest first. Add a row when a new
+// pinned id joins the list; an alias takes the newest date in its family.
+const CLAUDE_RELEASES: Record<string, string> = {
+  "claude-opus-5-5": "2026-09-21",
+  "claude-fable-5-1": "2026-08-28",
+  "claude-opus-5": "2026-07-24",
+  "claude-sonnet-5": "2026-06-29",
+  "claude-fable-5": "2026-06-07",
+  "claude-opus-4-8": "2026-05-28",
+  "claude-haiku-4-5-20251001": "2025-10-15",
+};
+
+function claudeReleaseDate(model: string): string | null {
+  if (CLAUDE_RELEASES[model]) return CLAUDE_RELEASES[model];
+  if (!/^(opus|fable|sonnet|haiku)$/.test(model)) return null;
+  const family = Object.keys(CLAUDE_RELEASES).filter((id) => id.startsWith(`claude-${model}-`));
+  return family.map((id) => CLAUDE_RELEASES[id]!).sort().at(-1) ?? null;
+}
+
+/**
+ * Newest release first. A tie keeps list order, so a pinned id listed before
+ * its alias stays above it. Ids without a known date keep their place after
+ * the dated ones.
+ */
+export function sortClaudeModelsByRelease(models: readonly string[]): string[] {
+  return models
+    .map((model, index) => ({ model, index, date: claudeReleaseDate(model) ?? "" }))
+    .sort((a, b) => (a.date === b.date ? a.index - b.index : a.date < b.date ? 1 : -1))
+    .map((item) => item.model);
+}
+
+// Agentbox: aliases only, one row per family. `opus` and `fable` already land
+// on 5.5 and 5.1 (claude 2.1.280); the pinned ids only produced a second row
+// per family. The picker shows the release via CLAUDE_ALIAS_LABELS.
+export const CLAUDE_MODELS: string[] = sortClaudeModelsByRelease(["opus", "fable", "sonnet", "haiku"]);
 export const CODEX_MODELS: string[] = [
   "gpt-6-astra",
   "gpt-6-sol",
@@ -45,9 +84,11 @@ export const CODEX_MODELS: string[] = [
   "gpt-5.4-mini",
   "gpt-5.3-codex-spark",
 ];
-// The Agent SDK takes the same model strings as the CLI (see claude-ai-sdk.ts,
-// which passes this straight to query({ model })), so it shares the alias list.
-export const AISDK_MODELS: string[] = ["opus", "fable", "sonnet", "haiku"];
+// The Agent SDK takes the same model strings as the CLI, aliases or full ids
+// (see claude-ai-sdk.ts, which passes this straight to query({ model })), so
+// `claude-fable-5-1` and `claude-opus-5-5` are carried here for the same
+// reasons as CLAUDE_MODELS.
+export const AISDK_MODELS: string[] = [...CLAUDE_MODELS];
 export const CODEX_AISDK_MODELS: string[] = [
   "gpt-6-astra",
   "gpt-6-sol",

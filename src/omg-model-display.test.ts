@@ -53,7 +53,7 @@ describe("omg model display", () => {
     expect(parseOmgModel("claude-opus-4-8")).toBeNull();
     expect(parseOmgModel("gpt-5.6")).toBeNull();
     expect(parseOmgModel("omg/onlyprovider")).toBeNull();
-    expect(omgModelLabel("gpt-5.6")).toBe("gpt-5.6");
+    expect(omgModelLabel("grok-4.7")).toBe("grok-4.7");
     expect(omgModelLabel(null)).toBe("");
   });
 
@@ -67,6 +67,41 @@ describe("omg model display", () => {
     const text = omgModelSearchText("omg/deepseek/deepseek-v4-flash-0731");
     expect(text).toContain("omg/deepseek/deepseek-v4-flash-0731");
     expect(text).toContain("deepseek v4 flash");
-    expect(omgModelSearchText("gpt-5.6")).toBe("gpt-5.6");
+    expect(omgModelSearchText("grok-4.7")).toBe("grok-4.7");
+  });
+});
+
+describe("claude model display", () => {
+  test("Claude CLI ids and aliases get a short family name", () => {
+    const ids = ["opus", "claude-opus-5-5", "claude-fable-5-1", "fable", "sonnet", "haiku", "claude-opus-4-8-20260101"];
+    expect(ids.map((id) => omgModelLabel(id))).toEqual([
+      "Opus",
+      "Opus 5.5",
+      "Fable 5.1",
+      "Fable",
+      "Sonnet",
+      "Haiku",
+      "Opus 4.8",
+    ]);
+  });
+
+  test("Codex ids get the hosted GPT naming", () => {
+    expect(["gpt-6-astra", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4-mini", "gpt-5.3-codex-spark"].map((id) => omgModelLabel(id))).toEqual([
+      "GPT-6 Astra",
+      "GPT-5.6 Sol",
+      "GPT-5.5",
+      "GPT-5.4 Mini",
+      "GPT-5.3 Codex Spark",
+    ]);
+  });
+
+  test("other agents' ids pass through", () => {
+    expect(omgModelLabel("grok-4.7")).toBe("grok-4.7");
+    expect(omgModelLabel("anthropic/claude-opus-5")).toBe("anthropic/claude-opus-5");
+    expect(omgModelLabel(null)).toBe("");
+  });
+
+  test("filter text matches the display name", () => {
+    expect(omgModelSearchText("claude-opus-5-5")).toContain("opus 5.5");
   });
 });

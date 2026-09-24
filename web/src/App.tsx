@@ -7,9 +7,10 @@ import { ModelProviderIcon } from "./lib/model-provider-icons";
 import { useRuntimeLifecycle } from "./lib/runtime-lifecycle";
 import { LiveHeaderContext } from "./components/live-header-context";
 import { ProjectPillRail, projectPillsFor } from "./components/project-pill-rail";
-import { HostDrawerSlot, SideNavButton, SideNavDrawer } from "./components/side-nav";
+import { ProjectFolderMenu } from "./components/project-folder-menu";
+import { HostDrawerSlot, SideNavButton, SideNavDrawer, SideNavGlyph, SideNavPanel } from "./components/side-nav";
 import { FindingsPill, FindingsSheet } from "./components/findings-pill";
-import { sideNavRows } from "./lib/side-nav-items";
+import { sideNavRows, type SideNavRow } from "./lib/side-nav-items";
 import {
   CompactModelPickerSheet,
   type PickerAgentTile,
@@ -434,7 +435,6 @@ import {
   Bell,
   MoreVertical,
   Moon,
-  PanelLeftClose,
   PanelLeftOpen,
   Paperclip,
   Pause,
@@ -653,7 +653,7 @@ import {
   useAsk,
   useSessionQuestions,
 } from "./components/ask-center";
-import { PwaInstallCallout, PwaInstallSettingsSection } from "./components/pwa-install";
+import { GetAppsRailCard, PwaInstallCallout, PwaInstallSettingsSection } from "./components/pwa-install";
 import {
   CustomInstructionsPage,
   CustomInstructionsRow,
@@ -1399,7 +1399,7 @@ const CODEX_MODELS = [
 ];
 // Models the one-shot AI-SDK test option supports (the provider maps these
 // aliases). Kept in sync with the AISDK_MODELS allowlist in serve.ts.
-const AISDK_MODELS = ["opus", "fable", "sonnet", "haiku"];
+const AISDK_MODELS = CLAUDE_MODELS;
 const CODEX_AISDK_MODELS = [
   "gpt-6-astra",
   "gpt-5.6-sol",
@@ -1914,7 +1914,7 @@ function SessionTerminalOverlay({
   );
 }
 
-function ArtifactViewerPage({
+export function ArtifactViewerPage({
   artifact,
   onClose,
 }: {
@@ -1942,9 +1942,16 @@ function ArtifactViewerPage({
       ? artifact.name || artifact.caption || "File"
       : artifact.title || artifact.caption || artifact.name || "Artifact";
   // z-[100] sits above the mobile bottom composer (z-55), ask-center (z-60),
-  // and floating audio chrome (z-75) so the full-page viewer is not clipped
-  // by home-shell overlays. Dialogs/drawers remain higher (z-150+).
-  return (
+  // floating audio chrome (z-75) and the mobile session sheet (z-90), so the
+  // full-page viewer is not clipped by home-shell overlays. Dialogs/drawers
+  // remain higher (z-150+).
+  //
+  // Portalled to <body> for the same reason the session sheet is. A host that
+  // embeds this app wraps it in its own stacking context (omg.dev's Computer
+  // host is `relative z-[46]`), and a z-index inside that context can never
+  // rise above a body-level layer. Rendered in place, a file opened from the
+  // mobile session sheet showed up BEHIND the sheet.
+  return createPortal(
     <div className="fixed inset-0 z-[100] flex flex-col bg-background">
       <header className="flex shrink-0 items-center gap-2 border-b border-border px-2 py-2 pt-[calc(0.5rem+env(safe-area-inset-top))]">
         <button
@@ -2014,7 +2021,8 @@ function ArtifactViewerPage({
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -7242,6 +7250,18 @@ export function App() {
     // yet, because starting one is its whole job.
     return [NO_PROJECT_FILTER, ...folders];
   }, [autoAgents, repos, userScopedRoster]);
+  // Sessions per folder, for the folder menu. Bot conversations are left out,
+  // the same as the Chat list leaves them out.
+  const projectSessionCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const session of userScopedSessions) {
+      if (isBotConversation(session)) continue;
+      const key = session.project === "" ? NO_PROJECT_FILTER : session.project;
+      if (!key) continue;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return counts;
+  }, [userScopedSessions]);
   const mobileProjectOptions = useMemo(
     () => projectOptions,
     [projectOptions],
@@ -9469,7 +9489,9 @@ export function App() {
         />
       ) : null}
 
-      {embedded ? null : <PwaInstallCallout />}
+      {/* Wide layouts offer this at the foot of the rail instead (see
+          GetAppsRailCard), not as a banner across the whole layout. */}
+      {embedded || isWide ? null : <PwaInstallCallout />}
 
       {/* The desktop workspace shows this in the rail's brand row instead, so
           the line does not sit unaligned above the layout and push it down. */}
@@ -9532,6 +9554,7 @@ export function App() {
               userFilter={userFilter}
               projectFilter={projectFilter}
               projectOptions={projectOptions}
+              projectCounts={projectSessionCounts}
               // Project selection remains available in embed mode: on desktop
               // the rail is the only visible folder UI because the normal
               // header is hidden. The host owns identity/settings chrome, not
@@ -9562,6 +9585,24 @@ export function App() {
               // state and the extension registry, and the rail should not have to
               // know either to render a menu.
               hostSettingsInMenu={hostSettingsInMenu}
+              // The phone header's status line, at the top of the rail: the
+              // welcome, then what is building, then questions. The logo it
+              // replaced sits at the foot of the rail now.
+              railHeadline={
+                <LiveHeaderContext
+                  intro={false}
+                  brand={null}
+                  viewerName={viewer?.name}
+                  user={headerProfile}
+                  identity={identity}
+                  busyCount={liveSessions.filter(
+                    (session) => !!liveStream.busyBySid[session.sessionId ?? ""],
+                  ).length}
+                  onOpenNotifications={() => setTab("notifications")}
+                />
+              }
+              // Agentbox desktop workspace header: the Pages menu (dark mode,
+              // film mode, pages) stays next to the profile there.
               pagesMenu={
                 <PagesMenu
                   tab={tab}
@@ -9569,11 +9610,25 @@ export function App() {
                   onOpenTab={setTab}
                   extraTabs={extNavTabs}
                   showSettings={!embedded}
-                  // Hosted: Settings rides in this menu, same as the mobile
-                  // island, instead of a separate control in the rail footer.
                   onOpenHostSettings={hostSettingsInMenu ? onOpenHostSettings : undefined}
                 />
               }
+              sideNav={{
+                // The phone drawer's rows, from the same model, so the rail
+                // and the drawer list the same places in the same order.
+                rows: sideNavRows({
+                  tab,
+                  hiddenPages,
+                  showBots: settings.showBots,
+                  showSchedules: settings.showSchedules,
+                  showSettings: !embedded,
+                  extensions: extNavTabs,
+                }),
+                onNavigate: setTab,
+                // Hosted: Settings is the host's, and rides in this menu the
+                // way it rode in the old pages menu.
+                onOpenHostSettings: hostSettingsInMenu ? onOpenHostSettings : undefined,
+              }}
               repos={repos}
               onReposChanged={loadCore}
               messagesBySid={liveStream.messagesBySid}
@@ -11851,6 +11906,7 @@ function LiveView({
   onClearFindings,
   clearFindingsBusy = false,
   projectOptions = [],
+  projectCounts,
   onProjectChange,
   onUserChange,
   onOpenSettings,
@@ -11866,7 +11922,9 @@ function LiveView({
   onNewBot,
   onEditBot,
   onRefreshBots,
+  sideNav,
   pagesMenu,
+  railHeadline,
   repos = [],
   onReposChanged,
   hosted = false,
@@ -11890,6 +11948,8 @@ function LiveView({
   userFilter: string;
   projectFilter: string;
   projectOptions?: string[];
+  /** Sessions per folder, for the folder menu. */
+  projectCounts?: ReadonlyMap<string, number>;
   onProjectChange?: (v: string) => void;
   onUserChange?: (v: string) => void;
   onOpenSettings?: () => void;
@@ -11906,8 +11966,11 @@ function LiveView({
   onNewBot?: () => void;
   onEditBot?: (bot: PersistentBot) => void;
   onRefreshBots?: () => Promise<void>;
-  /** Rail overflow menu, built by the shell so RailStage stays unaware of tabs. */
+  /** The rail's menu, built by the shell so RailStage stays unaware of tabs. */
+  sideNav?: RailSideNav;
   pagesMenu?: ReactNode;
+  /** The rail header's status line (welcome, activity, questions). */
+  railHeadline?: ReactNode;
   repos?: Repo[];
   onReposChanged?: () => Promise<void>;
   hosted?: boolean;
@@ -12271,6 +12334,7 @@ function LiveView({
         onNew={onNew}
         userFilter={userFilter}
         projectOptions={projectOptions}
+        projectCounts={projectCounts}
         onProjectChange={onProjectChange}
         onUserChange={onUserChange}
         onOpenSettings={onOpenSettings}
@@ -12286,7 +12350,9 @@ function LiveView({
         onNewBot={onNewBot}
         onEditBot={onEditBot}
         onRefreshBots={onRefreshBots}
+        sideNav={sideNav}
         pagesMenu={pagesMenu}
+        railHeadline={railHeadline}
         repos={repos}
         onReposChanged={onReposChanged}
         hosted={hosted}
@@ -12486,6 +12552,7 @@ function RailStage({
   onNew,
   userFilter = "__all",
   projectOptions = [],
+  projectCounts,
   onProjectChange,
   onUserChange,
   onOpenSettings,
@@ -12501,7 +12568,9 @@ function RailStage({
   onNewBot,
   onEditBot,
   onRefreshBots,
+  sideNav,
   pagesMenu,
+  railHeadline,
   repos = [],
   onReposChanged,
   hosted = false,
@@ -12520,6 +12589,8 @@ function RailStage({
   projectFilter: string;
   userFilter?: string;
   projectOptions?: string[];
+  /** Sessions per folder, for the folder menu. */
+  projectCounts?: ReadonlyMap<string, number>;
   onProjectChange?: (v: string) => void;
   onUserChange?: (v: string) => void;
   onOpenSettings?: () => void;
@@ -12536,8 +12607,12 @@ function RailStage({
   onNewBot?: () => void;
   onEditBot?: (bot: PersistentBot) => void;
   onRefreshBots?: () => Promise<void>;
-  /** Rail overflow menu, built by the shell so RailStage stays unaware of tabs. */
+  /** The rail's menu, built by the shell so RailStage stays unaware of tabs. */
+  sideNav?: RailSideNav;
+  /** Agentbox desktop workspace: its header keeps the three-dot Pages menu. */
   pagesMenu?: ReactNode;
+  /** The rail header's status line (welcome, activity, questions). */
+  railHeadline?: ReactNode;
   repos?: Repo[];
   onReposChanged?: () => Promise<void>;
   hosted?: boolean;
@@ -12588,6 +12663,20 @@ function RailStage({
   const hostMachines = useEmbeddedHostOptions().machines;
   const appDialog = useAppDialog();
   const { conversations: botConversationsForRail, selectedConversationId: selectedBotConversationForRail, markRead: markBotRowRead, any: botsUnreadAny } = useContext(BotUnreadContext);
+  const { any: sessionsUnreadAny } = useContext(SessionUnreadContext);
+  // The rail's menu, drawn over its list. See SideNavPanel.
+  const [railNavOpen, setRailNavOpen] = useState(false);
+  // Unread lives on the menu rows now that the switch that carried it is
+  // gone. The menu button carries it too while the list hides a surface
+  // with news, so closing the menu cannot hide it.
+  const railNavUnread = useMemo(() => {
+    const keys = new Set<string>();
+    if (sessionsUnreadAny) keys.add("live");
+    if (botsUnreadAny) keys.add("bots");
+    return keys;
+  }, [botsUnreadAny, sessionsUnreadAny]);
+  const railNavHasNews =
+    (sessionsUnreadAny && railSurface !== "sessions") || (botsUnreadAny && railSurface !== "chat");
   const MAX_COLUMNS = 4;
   const layoutScope = projectFilter || "__all";
   const layoutKey = encodeURIComponent(layoutScope);
@@ -12622,18 +12711,17 @@ function RailStage({
   const [cursor, setCursor] = useState<string | null>(null);
   // The desktop rail uses the same polished project sheet and folder browser as
   // the composer, replacing the cramped native-style project dropdown.
-  const [projectSheetOpen, setProjectSheetOpen] = useState(false);
   // Open findings live behind the rail's Updates pill.
   const [railFindingsOpen, setRailFindingsOpen] = useState(false);
   const [folderBrowserOpen, setFolderBrowserOpen] = useState(false);
   const [folderBrowserCreate, setFolderBrowserCreate] = useState(false);
-  const canUseProjectSheet = repos.length > 0 && !!onProjectChange;
   const filterRepo = repos.find((repo) => repoProject(repo) === projectFilter);
-  const openFolderBrowserFromSheet = (create: boolean) => {
-    setProjectSheetOpen(false);
+  const openFolderBrowser = (create: boolean) => {
     setFolderBrowserCreate(create);
-    window.setTimeout(() => setFolderBrowserOpen(true), 180);
+    setFolderBrowserOpen(true);
   };
+  const showFolderMenu =
+    !railCollapsed && railSurface !== "chat" && !!onProjectChange && projectOptions.length > 0;
 
   const [showHelp, setShowHelp] = useState(false);
   // One-shot glow token for the stage pane just chosen from the rail. `n`
@@ -13565,6 +13653,7 @@ function RailStage({
           // rail (stage mode) concept.
           collapsed={workspaceUp ? false : railCollapsed}
           workspace={workspaceUp}
+          dense={!workspaceUp}
           onActivate={(shift) => activate(sid, shift)}
           onTogglePin={() => togglePin(sid)}
           onArchive={
@@ -13688,32 +13777,32 @@ function RailStage({
   // Open findings are a pill above the rail's footer, not a group at the end
   // of the list. A group there put more work under a list that is already
   // about work, and every finding pushed the running sessions further off
-  // the fold. Same shape as iOS at every width
-  // (mobile/src/omg/findings-pill.tsx), which floats it over the list on the
-  // phone and over the rail footer on iPad.
+  // the fold. Same pill as iOS (mobile/src/omg/findings-pill.tsx).
+  //
+  // Pressing it opens the list IN the rail, under the sessions, not in a
+  // bottom sheet. A sheet is a phone shape: on desktop it covered the stage
+  // and pulled the eye to the bottom of the screen, away from the rail the
+  // pill lives in.
   const autoRailPill =
     findings.length && !railCollapsed ? (
-      <>
-        <div className="pointer-events-none relative z-10 -mb-1 flex justify-center pb-1">
-          <button
-            type="button"
-            onClick={() => setRailFindingsOpen(true)}
-            data-testid="rail-findings-pill"
-            aria-label={`${findings.length} update${findings.length === 1 ? "" : "s"} from auto agents. Open`}
-            className="pointer-events-auto flex h-7 items-center gap-1.5 rounded-full border border-border/70 bg-card/90 px-2.5 text-xs font-medium text-muted-foreground shadow-sm backdrop-blur-xl transition-colors hover:text-foreground"
-          >
-            <span className="tabular-nums">
-              {findings.length} update{findings.length === 1 ? "" : "s"}
-            </span>
-            <ChevronUp className="size-3 shrink-0 opacity-70" />
-          </button>
-        </div>
-        <FindingsSheet
-          open={railFindingsOpen}
-          onOpenChange={setRailFindingsOpen}
-          count={findings.length}
-          actions={
-            <span className="flex items-center gap-1">
+      railFindingsOpen ? (
+        <section
+          aria-label="Updates"
+          data-testid="rail-findings-panel"
+          className="flex max-h-[50%] min-h-0 shrink-0 flex-col border-t border-border animate-in fade-in slide-in-from-bottom-8 duration-[380ms] ease-[cubic-bezier(0.25,0.8,0.25,1)] motion-reduce:animate-none"
+        >
+          <div className="flex h-10 shrink-0 items-center gap-2 pl-3 pr-1.5">
+            <button
+              type="button"
+              onClick={() => setRailFindingsOpen(false)}
+              aria-expanded
+              aria-label="Hide updates"
+              className="flex min-w-0 items-baseline gap-2 text-left outline-none focus-visible:text-foreground"
+            >
+              <span className="text-[13px] font-semibold">Updates</span>
+              <span className="text-xs tabular-nums text-muted-foreground">{findings.length} open</span>
+            </button>
+            <span className="ml-auto flex items-center gap-1">
               <ClearFindingsButton
                 count={findings.length}
                 busy={clearFindingsBusy}
@@ -13725,22 +13814,45 @@ function RailStage({
                 onClick={onTriageFindings}
                 compact
               />
+              <button
+                type="button"
+                onClick={() => setRailFindingsOpen(false)}
+                aria-label="Hide updates"
+                title="Hide updates"
+                className="flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+              >
+                <ChevronDown className="size-4" />
+              </button>
             </span>
-          }
-        >
-          {groupFindingsByAgent(findings).map((report) => (
-            <AutoReportRow
-              key={report.agentId}
-              report={report}
-              agentName={nameFor(report.agentId)}
-              onOpen={() => {
-                setRailFindingsOpen(false);
-                onOpenReport(report.agentId);
-              }}
-            />
-          ))}
-        </FindingsSheet>
-      </>
+          </div>
+          <div className="flex min-h-0 flex-col gap-1 overflow-y-auto px-1.5 pb-2">
+            {groupFindingsByAgent(findings).map((report) => (
+              <AutoReportRow
+                key={report.agentId}
+                report={report}
+                agentName={nameFor(report.agentId)}
+                onOpen={() => onOpenReport(report.agentId)}
+              />
+            ))}
+          </div>
+        </section>
+      ) : (
+        <div className="pointer-events-none relative z-10 flex justify-center pb-2.5 pt-1.5 animate-in fade-in zoom-in-95 duration-200 motion-reduce:animate-none">
+          <button
+            type="button"
+            onClick={() => setRailFindingsOpen(true)}
+            data-testid="rail-findings-pill"
+            aria-expanded={false}
+            aria-label={`${findings.length} update${findings.length === 1 ? "" : "s"} from auto agents. Open`}
+            className="pointer-events-auto flex h-7 items-center gap-1.5 rounded-full border border-border/70 bg-card/90 px-2.5 text-xs font-medium text-muted-foreground shadow-sm backdrop-blur-xl transition-colors hover:text-foreground"
+          >
+            <span className="tabular-nums">
+              {findings.length} update{findings.length === 1 ? "" : "s"}
+            </span>
+            <ChevronUp className="size-3 shrink-0 opacity-70" />
+          </button>
+        </div>
+      )
     ) : null;
 
   // On the bot surface the stage shows exactly one column — the bot you picked.
@@ -13794,15 +13906,16 @@ function RailStage({
     // and how many, which is what the other rail lists all say.
     <RailGroup label="Bots" count={botRailRows.length} collapsed={railCollapsed}>
       {!railCollapsed && onNewBot ? (
+        // The same row as the Chat list's New session.
         <button
           type="button"
           onClick={onNewBot}
-          className="flex h-20 w-full items-center gap-3 rounded-lg pl-4 pr-3.5 text-left text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          className="mb-1 flex h-10 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
         >
-          <span className="flex size-11 shrink-0 items-center justify-center rounded-full border border-dashed border-border">
-            <Plus className="size-4" />
+          <span className="flex size-7 shrink-0 items-center justify-center rounded-full border border-dashed border-border">
+            <Plus className="size-3.5" />
           </span>
-          <span className="truncate">New bot</span>
+          <span className="min-w-0 flex-1 truncate">New bot</span>
         </button>
       ) : null}
       {botRailRows.map((row) => {
@@ -13838,7 +13951,10 @@ function RailStage({
               busy={busy}
               active={active}
               collapsed={railCollapsed}
-              avatarSize={railCollapsed ? 32 : 44}
+              // The desktop session row's density and bot face size, so the
+              // two rail lists read as one list.
+              dense
+              avatarSize={railCollapsed ? 32 : 36}
               preview={preview}
               unread={row.unread}
               timestamp={row.lastMessageTs || bot.lastMessageAt}
@@ -13975,6 +14091,21 @@ function RailStage({
         // rail is what has to make room for it.
         style={{ width: railCollapsed ? 56 : 320, overscrollBehaviorX: "contain" }}
       >
+        {/* Everything above the footer. The menu covers exactly this, so the
+            machine switcher under it stays in view either way. */}
+        <div className="relative flex min-h-0 flex-1 flex-col">
+        {/* The list's face. When the menu opens over it, it steps back: a
+            short shift right and a dim, so the menu reads as arriving on top
+            of it rather than replacing it. Same idea as an iOS push. */}
+        <div
+          className={cn(
+            "flex min-h-0 flex-1 flex-col transition-[translate,opacity] duration-[380ms] ease-[cubic-bezier(0.25,0.8,0.25,1)] motion-reduce:transition-none",
+            // Closed carries no translate at all, not translate-x-0: any
+            // translate value makes this box the containing block for
+            // position: fixed descendants, which would break any it grows.
+            railNavOpen && !railCollapsed ? "translate-x-8 opacity-30" : "opacity-100",
+          )}
+        >
         {railCollapsed ? (
           <div className="flex shrink-0 flex-col items-center gap-1 border-b border-border py-2">
             <button
@@ -14007,78 +14138,50 @@ function RailStage({
             >
               <Plus className="size-4" />
             </button>
-            {/* Replaces a lone Shipped megaphone. That button was the collapsed
-                rail's only page link, so Artifacts had no entry point here at
-                all — and it named one destination where the rail needs a place
-                to put several. */}
-            {pagesMenu}
           </div>
         ) : (
-          <div className="flex shrink-0 flex-col gap-2 border-b border-border px-2 py-2">
-            {/* Hosted replaces the LFG mark with omg.dev and moves project
-                scope to the action row so the lockup always has room. */}
-            <div className="flex items-center gap-1.5">
-              {/* Leads the row, which is where the collapsed strip puts its
-                  expand button. The control then stays in one place in both
-                  states instead of moving when you use it. Collapsing used to
-                  be ⌘B only — a shortcut you could find nowhere but the `?`
-                  overlay — while expanding had a button, so the affordance
-                  existed in one direction. */}
+          <div className="flex h-12 shrink-0 items-center gap-1.5 border-b border-border px-2">
+            {/* The menu leads the row. It holds every place the rail can
+                show and every page besides, which used to be split between a
+                Chat / Bots / Schedules switch under this row and a three-dot
+                menu at its end. */}
+            {sideNav ? (
               <button
                 type="button"
-                onClick={() => setRailCollapsed((v) => !v)}
-                aria-label="Collapse sidebar"
-                title="Collapse sidebar (⌘B)"
-                className="flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                onClick={() => setRailNavOpen(true)}
+                aria-label="Menu"
+                aria-expanded={railNavOpen}
+                title="Menu"
+                data-testid="rail-menu-button"
+                className="relative flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
               >
-                <PanelLeftClose className="size-4" />
+                <SideNavGlyph />
+                {railNavHasNews ? (
+                  <span className={cn(UNREAD_DOT_CLASS, "absolute right-1 top-1")} aria-hidden="true" />
+                ) : null}
               </button>
+            ) : null}
+            {railHeadline ?? (
               <RuntimeStatusBrand>
                 <ProductBrand hosted={hosted} />
               </RuntimeStatusBrand>
-              {/* Folders, not a filter. This used to be the scope control and
-                  wore the current folder's name, which made it read as "you
-                  are here" while also being the only way to add a folder.
-                  Scoping belongs to the project pills, so this is just the
-                  door to the folder manager and says one thing. */}
-              {canUseProjectSheet ? (
-                <button
-                  type="button"
-                  onClick={() => setProjectSheetOpen(true)}
-                  aria-label="Projects"
-                  title="Projects"
-                  className="flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                >
-                  <Folder className="size-4" />
-                </button>
+            )}
+            <div className="ml-auto flex items-center gap-1">
+              {onOpenAsk ? (
+                <>
+                  {hosted ? null : <UpdateNavButton />}
+                  <AskNavButton active={false} onOpen={onOpenAsk} />
+                </>
               ) : null}
-              <div className="ml-auto flex items-center gap-1">
-                {onOpenAsk ? (
-                  <>
-                    {hosted ? null : <UpdateNavButton />}
-                    <AskNavButton active={false} onOpen={onOpenAsk} />
-                  </>
-                ) : null}
-                {onUserChange ? (
-                  <UserFilterMenu
-                    value={userFilter}
-                    users={users}
-                    onChange={onUserChange}
-                  />
-                ) : null}
-                {pagesMenu}
-              </div>
+              {onUserChange ? (
+                <UserFilterMenu
+                  value={userFilter}
+                  users={users}
+                  onChange={onUserChange}
+                  size="sm"
+                />
+              ) : null}
             </div>
-            {/* Sits below the actions, directly above the list it switches.
-                Above the brand row it read as app-level navigation; what it
-                actually does is change which list the rail is showing.
-                Unlike the mobile dock, this never sits inside a full-screen
-                bot conversation — the desktop rail always keeps showing the
-                roster, with the stage panes doing the switching. Hiding it
-                once a bot is selected (`selectedBotId`, mirroring the mobile
-                guard added in 1b3ca7d) stranded desktop users on the Bots
-                surface with no way back to Chat. Always render it here. */}
-            <SurfaceToggle active={railSurface} onOpenSessions={onOpenSessions} onOpenBots={onOpenBots} onOpenAuto={onOpenAuto} />
           </div>
         )}
         {!railCollapsed && railSurface !== "chat" && overviewPrefs.view === "projects" && onProjectChange && projectOptions.length > 0 ? (
@@ -14111,19 +14214,48 @@ function RailStage({
             </button>
           ) : null}
           {!railCollapsed ? (
-            <button
-              type="button"
-              onClick={startNew}
-              className="mb-1 flex h-10 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            >
-              <span className="flex size-7 shrink-0 items-center justify-center rounded-full border border-dashed border-border">
-                <Plus className="size-3.5" />
-              </span>
-              <span className="min-w-0 flex-1 truncate">New session</span>
-              <kbd className="shrink-0 rounded-[5px] bg-background/70 px-1.5 py-px font-mono text-[10px] font-medium text-muted-foreground ring-1 ring-inset ring-border">
-                C
-              </kbd>
-            </button>
+            // "New session in <folder>". The folder picker sits on this row's
+            // trailing edge, where the C shortcut hint was, instead of taking
+            // a row of its own above the list. The hint lives in the title.
+            // Two items side by side at one height. Neither has a surface at
+            // rest; each lights up only while it is hovered, pressed or (the
+            // folder) open. A highlight on the row with a second one on the
+            // chip inside it read as two levels of the same control.
+            <div className="mb-1 flex h-10 w-full items-stretch gap-1.5">
+              <button
+                type="button"
+                onClick={startNew}
+                title="New session (C)"
+                className="flex min-w-0 flex-1 items-center gap-2 rounded-lg pl-2 pr-2.5 text-left text-[13px] font-medium text-foreground outline-none transition-colors hover:bg-muted active:bg-muted focus-visible:ring-2 focus-visible:ring-primary/60"
+              >
+                <span className="flex size-7 shrink-0 items-center justify-center rounded-full border border-dashed border-border">
+                  <Plus className="size-3.5" />
+                </span>
+                <span className="min-w-0 flex-1 truncate">New session</span>
+                {showFolderMenu ? null : (
+                  <kbd className="shrink-0 rounded-[5px] bg-background/70 px-1.5 py-px font-mono text-[10px] font-medium text-muted-foreground ring-1 ring-inset ring-border">
+                    C
+                  </kbd>
+                )}
+              </button>
+              {showFolderMenu ? (
+                <ProjectFolderMenu
+                  trigger="chip"
+                  value={projectFilter}
+                  projects={projectOptions}
+                  labelFor={(value) => projectFilterLabel(value, shortProject)}
+                  onChange={(next) => onProjectChange?.(next)}
+                  counts={projectCounts}
+                  canRemove={(project) => repos.some((repo) => repoProject(repo) === project)}
+                  onRemove={async (project) => {
+                    const repo = repos.find((candidate) => repoProject(candidate) === project);
+                    if (repo) await unlinkRepoFromList(repo, onReposChanged);
+                  }}
+                  onAddFolder={() => openFolderBrowser(false)}
+                  onNewFolder={() => openFolderBrowser(true)}
+                />
+              ) : null}
+            </div>
           ) : null}
           {!railCollapsed && <OverviewToolbar prefs={overviewPrefs} count={overviewGroups.reduce((n,g) => n+g.count,0)} project={projectFilter !== "__all" ? shortProject(projectFilter) : undefined} onClearProject={() => onProjectChange?.("__all")} />}
           {!overviewGroups.length && !railCollapsed && <p role="status" className="px-3 py-6 text-sm text-muted-foreground">Geen gesprekken gevonden. Pas je zoekopdracht of filters aan.</p>}
@@ -14135,6 +14267,10 @@ function RailStage({
             projectFilter={projectFilter}
             onProjectChange={onProjectChange}
             renderItem={renderRailItem}
+            // The folder menu above names the scope, so a header under it
+            // repeating "lfg · 9" said the same thing twice.
+            headerless={showFolderMenu}
+            dense
           />
           </>}
         </div>
@@ -14153,7 +14289,53 @@ function RailStage({
             with a machine it can reach, so a plain install sees no change.
             A hosted surface never shows it: the host owns machine selection. */}
         {autoRailPill}
-        {!hosted || hostMachines ? <MachineSwitcher variant="rail" collapsed={railCollapsed} /> : null}
+        </div>
+        {sideNav && !railCollapsed ? (
+          <SideNavPanel
+            open={railNavOpen}
+            onBack={() => setRailNavOpen(false)}
+            rows={sideNav.rows}
+            onNavigate={sideNav.onNavigate}
+            unread={railNavUnread}
+            // The machine lives in the menu, first, as in the phone drawer.
+            // It is set once and rarely changed, so it does not need a
+            // permanent row at the foot of the rail.
+            machineSwitcher={!hosted || hostMachines ? <MachineSwitcher variant="nav" /> : null}
+            footer={
+              sideNav.onOpenHostSettings ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRailNavOpen(false);
+                    sideNav.onOpenHostSettings?.();
+                  }}
+                  className="flex min-h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-[14px] text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+                >
+                  <Settings className="size-4 shrink-0" />
+                  <span className="min-w-0 flex-1 truncate">Settings</span>
+                </button>
+              ) : null
+            }
+          />
+        ) : null}
+        </div>
+        {/* Hosted too. The host offers "Install omg" only inside its
+            account menu, so this card is the one visible offer on either. */}
+        {!railCollapsed ? <GetAppsRailCard /> : null}
+        {/* The product mark, at the foot, where the machine switcher was. The
+            header carries the status line instead. Without a status line
+            (no shell headline), the header keeps the mark and this stays
+            empty. */}
+        {railHeadline ? (
+          <div
+            className={cn(
+              "flex h-12 shrink-0 items-center border-t border-border",
+              railCollapsed ? "justify-center" : "px-3",
+            )}
+          >
+            <ProductBrand hosted={hosted} compact={railCollapsed} />
+          </div>
+        ) : null}
         {hosted ? (
           <div
             data-lfg-host-slot="rail-footer"
@@ -14165,6 +14347,35 @@ function RailStage({
           />
         ) : null}
       </aside>
+      {/* THE RAIL'S EDGE. Collapse and expand live here, on the divider they
+          act on, instead of as one more icon in the rail's header. Hovering
+          the edge lights it; the grip in its middle is the button. */}
+      <div className="group/rail-edge relative z-40 w-0 shrink-0">
+        <div className="absolute inset-y-0 -left-1.5 flex w-3 items-center justify-center">
+          <span
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors group-hover/rail-edge:bg-primary/40"
+          />
+          <button
+            type="button"
+            onClick={() => {
+              setRailNavOpen(false);
+              setRailCollapsed((v) => !v);
+            }}
+            aria-label={railCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            title={railCollapsed ? "Expand sidebar (⌘B)" : "Collapse sidebar (⌘B)"}
+            data-testid="rail-edge-toggle"
+            className="group/grip relative flex h-10 w-3 items-center justify-center rounded-full opacity-0 outline-none transition-[opacity,width,background-color] duration-150 hover:w-6 hover:bg-card hover:shadow-md hover:ring-1 hover:ring-border focus-visible:w-6 focus-visible:bg-card focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-primary/60 group-hover/rail-edge:opacity-100"
+          >
+            <span className="h-6 w-1 rounded-full bg-muted-foreground/40 group-hover/grip:hidden group-focus-visible/grip:hidden" aria-hidden="true" />
+            {railCollapsed ? (
+              <ChevronRight className="hidden size-3.5 text-foreground group-hover/grip:block group-focus-visible/grip:block" />
+            ) : (
+              <ChevronLeft className="hidden size-3.5 text-foreground group-hover/grip:block group-focus-visible/grip:block" />
+            )}
+          </button>
+        </div>
+      </div>
 
       <div
         className={cn(
@@ -14251,21 +14462,9 @@ function RailStage({
 
       {showHelp ? <ShortcutsHelp onClose={() => setShowHelp(false)} /> : null}
 
-      {canUseProjectSheet ? (
+      {onProjectChange ? (
         <>
-          {/* Manage only. Scoping the list is the folder title's job now, so
-              this button has one meaning: the folders themselves. */}
-          <ComposerProjectSheet
-            manageOnly
-            open={projectSheetOpen}
-            repos={repos}
-            selected=""
-            onOpenChange={setProjectSheetOpen}
-            onSelect={() => setProjectSheetOpen(false)}
-            onBrowse={() => openFolderBrowserFromSheet(false)}
-            onCreate={() => openFolderBrowserFromSheet(true)}
-            onReposChanged={onReposChanged}
-          />
+          {/* Opened from the folder menu's Add folder and New folder. */}
           <ProjectFolderBrowser
             open={folderBrowserOpen}
             initialPath={filterRepo?.cwd || undefined}
@@ -14379,6 +14578,14 @@ function collectGroupSids(nodes: SessionTreeNode[], into: string[] = []): string
   return into;
 }
 
+/** What the desktop rail's menu lists and where its rows go. */
+type RailSideNav = {
+  rows: SideNavRow[];
+  onNavigate: (key: string) => void;
+  /** A host that owns Settings gets a row that opens its own. */
+  onOpenHostSettings?: () => void;
+};
+
 function SessionGroups({
   groups,
   pinnedNodes,
@@ -14388,6 +14595,7 @@ function SessionGroups({
   onProjectChange,
   renderItem,
   headerless = false,
+  dense = false,
   leading,
   trailing,
 }: {
@@ -14408,6 +14616,8 @@ function SessionGroups({
    * rail has no pills, so it keeps its headers and they stay the filter.
    */
   headerless?: boolean;
+  /** Desktop rail: headerless runs keep the rows' own tight gap. */
+  dense?: boolean;
   /** Above every group. The rail puts New session here. */
   leading?: ReactNode;
   /** Below every group. Auto findings. */
@@ -14498,7 +14708,7 @@ function SessionGroups({
       ) : null}
       {groups.map((group) =>
         headerless ? (
-          <div key={group.key} className="flex flex-col gap-2">
+          <div key={group.key} className={cn("flex flex-col", dense ? "gap-0.5" : "gap-2")}>
             {group.nodes.map((node) => renderNode(node))}
           </div>
         ) : (
@@ -14682,6 +14892,7 @@ function RailGroup({
 const RailRow = memo(function RailRow({
   railKey,
   collapsed,
+  dense = false,
   active,
   cursored,
   ariaLabel,
@@ -14704,6 +14915,11 @@ const RailRow = memo(function RailRow({
   /** `data-rail-sid`, for surfaces that scroll/cursor rows by id. Omit where nothing looks a row up this way. */
   railKey?: string;
   collapsed: boolean;
+  /**
+   * Desktop rail density. The 5rem row matches the iOS row, which is sized
+   * for a thumb; with a pointer the same fleet took twice the scrolling.
+   */
+  dense?: boolean;
   active: boolean;
   cursored: boolean;
   ariaLabel?: string;
@@ -14836,7 +15052,8 @@ const RailRow = memo(function RailRow({
         onTouchEnd={onTouchEnd}
         title={collapsed ? tooltip : undefined}
         className={cn(
-          "group relative flex cursor-pointer touch-pan-y select-none items-center gap-3 rounded-xl border py-1.5 outline-none transition-[background-color,box-shadow,border-color] duration-150",
+          "group relative flex cursor-pointer touch-pan-y select-none items-center rounded-xl border outline-none transition-[background-color,box-shadow,border-color] duration-150",
+          dense ? "gap-2.5 py-1" : "gap-3 py-1.5",
           // Fixed height. The preview arrives late and is replaced as a row
           // streams, so a row sized to its own text kept resizing under the
           // cursor and shoved every row below it — the whole list twitching
@@ -14845,7 +15062,7 @@ const RailRow = memo(function RailRow({
           // 5rem and 16/14 padding, from SESSION_ROW in mobile/src/components.tsx.
           // The web row was 60px with 8px of padding, so the same fleet read
           // as a denser product on the web than in the app.
-          collapsed ? "h-11 justify-center px-0" : "h-20 pl-4 pr-3.5",
+          collapsed ? "h-11 justify-center px-0" : dense ? "h-[3.75rem] pl-2.5 pr-2" : "h-20 pl-4 pr-3.5",
           swiping
             ? "border-transparent bg-card"
             : active
@@ -14872,7 +15089,8 @@ const RailRow = memo(function RailRow({
               <span className="flex items-baseline gap-1.5">
                 <span
                 className={cn(
-                  "overview-row-title lfg-film-blur min-w-0 flex-1 truncate text-[17px] leading-tight tracking-[-0.2px]",
+                  "overview-row-title lfg-film-blur min-w-0 flex-1 truncate leading-tight",
+                  dense ? "text-[14.5px] tracking-[-0.1px]" : "text-[17px] tracking-[-0.2px]",
                   // Unread is not the dot's job alone: the title carries full
                   // weight until it is read, then settles back. Same rule as
                   // the iOS row.
@@ -14892,7 +15110,10 @@ const RailRow = memo(function RailRow({
                   to animate. */}
               <span
                 key={typeof preview === "string" ? preview : undefined}
-                className="rail-preview h-5 truncate text-sm leading-tight text-muted-foreground"
+                className={cn(
+                  "rail-preview truncate leading-tight text-muted-foreground",
+                  dense ? "h-[18px] text-[13px]" : "h-5 text-sm",
+                )}
               >
                 {preview}
               </span>
@@ -14954,6 +15175,7 @@ const RailItem = memo(function RailItem({
   topPinned,
   collapsed,
   workspace = false,
+  dense = false,
   onActivate,
   onTogglePin,
   onArchive,
@@ -14969,6 +15191,8 @@ const RailItem = memo(function RailItem({
   topPinned: boolean;
   collapsed: boolean;
   workspace?: boolean;
+  /** Desktop rail: a shorter row with a smaller mark and type. */
+  dense?: boolean;
   onActivate: (shiftKey: boolean) => void;
   onTogglePin: () => void;
   /** Swipe left to archive. Absent on surfaces where that is not offered. */
@@ -15012,6 +15236,7 @@ const RailItem = memo(function RailItem({
     <RailRow
       railKey={session.sessionId ?? ""}
       collapsed={collapsed}
+      dense={dense}
       active={active}
       cursored={cursored}
       unread={unread}
@@ -15028,7 +15253,7 @@ const RailItem = memo(function RailItem({
         // the bot-backed row a slightly larger slot makes the two weigh the
         // same on screen, and the group is homogeneous so nothing is left
         // ragged.
-        drivingBot ? "size-11" : "size-10"
+        dense ? (drivingBot ? "size-9" : "size-8") : drivingBot ? "size-11" : "size-10"
       }
       mark={plainRow ? null : (
         <>
@@ -15041,13 +15266,16 @@ const RailItem = memo(function RailItem({
           {drivingBot ? (
             // The creature carries busy in its own posture, so a bot-backed
             // row would be saying it twice.
-            <BotAvatar bot={drivingBot} working={busy} size={44} />
+            <BotAvatar bot={drivingBot} working={busy} size={dense ? 36 : 44} />
           ) : showFavicon ? (
             <>
               {busy ? (
                 <Loader2
                   aria-label="working"
-                  className="pointer-events-none absolute inset-0 m-auto size-9 animate-spin text-warning motion-reduce:animate-none"
+                  className={cn(
+                    "pointer-events-none absolute inset-0 m-auto animate-spin text-warning motion-reduce:animate-none",
+                    dense ? "size-8" : "size-9",
+                  )}
                   strokeWidth={1.75}
                 />
               ) : null}
@@ -15055,7 +15283,7 @@ const RailItem = memo(function RailItem({
                 src={faviconSrc}
                 alt=""
                 aria-hidden="true"
-                className="size-9 rounded-md object-contain"
+                className={cn("rounded-md object-contain", dense ? "size-7" : "size-9")}
                 loading="lazy"
                 decoding="async"
                 onError={() => setFailedFaviconSrc(faviconSrc)}
@@ -15066,7 +15294,7 @@ const RailItem = memo(function RailItem({
               session={session}
               busy={busy}
               rounding="rounded-none"
-              large
+              large={!dense}
               showAccountNumber={false}
             />
           ) : (
@@ -15075,7 +15303,10 @@ const RailItem = memo(function RailItem({
           {!drivingBot && showFavicon && showAgentIcons ? (
             <span
               title={session.agentLabel || sessionIconAlt(session.agent, session.model)}
-              className="absolute bottom-1 right-1 flex size-[18px] items-center justify-center rounded-md bg-card ring-2 ring-card"
+              className={cn(
+                "absolute flex size-[18px] items-center justify-center rounded-md bg-card ring-2 ring-card",
+                dense ? "-bottom-1 -right-1" : "bottom-1 right-1",
+              )}
             >
               <AgentMark
                 session={session}
@@ -15224,6 +15455,7 @@ function BotRosterRow({
   busy,
   active,
   collapsed,
+  dense = false,
   avatarSize,
   preview,
   previewClassName,
@@ -15236,6 +15468,8 @@ function BotRosterRow({
   busy: boolean;
   active: boolean;
   collapsed: boolean;
+  /** Desktop rail: the session rows' shorter row and smaller type. */
+  dense?: boolean;
   avatarSize: number;
   preview: ReactNode;
   previewClassName?: string;
@@ -15255,6 +15489,8 @@ function BotRosterRow({
   return (
     <RailRow
       collapsed={collapsed}
+      dense={dense}
+      markBoxClassName={dense && !collapsed ? "size-9" : undefined}
       active={active}
       cursored={false}
       unread={unread}
@@ -17303,19 +17539,11 @@ function SessionChatBody({
               }}
               onCancel={(base) => setMessageText(base)}
             />
-            {chatBusy && canDriveSession(session) ? (
-              <Button
-                size="icon"
-                type="button"
-                variant="tint"
-                className="size-10 shrink-0 rounded-full md:size-8"
-                onClick={() => void interrupt()}
-                aria-label="Stop (Esc or Ctrl/Cmd+.)"
-                title="Stop — Esc or Ctrl/Cmd+."
-              >
-                <Pause className="size-4" />
-              </Button>
-            ) : null}
+            {/* No Stop button here. It sat between the mic and send for the
+                whole of every turn, one more circle in a bar that should be
+                about what you type. Stop lives in the session's menu (the
+                header's ⋯, the row's right-click, the phone's title sheet)
+                and on Esc or Ctrl/Cmd+. */}
             {/* Mounted only once there's something to send (typed text, a
                 dictation interim/final already folded into messageText, or an
                 attachment) — an arrow with nothing behind it was dead chrome.
@@ -22698,6 +22926,27 @@ function ProjectFolderBrowser({
   );
 }
 
+/**
+ * Take a folder off the machine's project list. The folder stays on disk.
+ * Reports the outcome as a toast, so every caller says the same thing.
+ */
+async function unlinkRepoFromList(
+  repo: Repo,
+  onReposChanged?: (removedCwd?: string) => void | Promise<void>,
+): Promise<void> {
+  try {
+    await api("/api/repos", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: repo.cwd }),
+    });
+    toast.success(`Removed ${repo.name}`, { description: "The folder is still on disk." });
+    await onReposChanged?.(repo.cwd);
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : "Couldn't remove that project");
+  }
+}
+
 function ComposerProjectSheet({
   open,
   repos,
@@ -22779,15 +23028,7 @@ function ComposerProjectSheet({
   async function unlinkRepo(repo: Repo) {
     setBusyCwd(repo.cwd);
     try {
-      await api("/api/repos", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: repo.cwd }),
-      });
-      toast.success(`Removed ${repo.name}`, { description: "The folder is still on disk." });
-      await onReposChanged?.(repo.cwd);
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Couldn't remove that project");
+      await unlinkRepoFromList(repo, onReposChanged);
     } finally {
       setBusyCwd(null);
     }
@@ -31694,7 +31935,7 @@ function BotEditorPage({
             <ChevronRight className={cn("size-3.5 transition-transform duration-150", advanced && "rotate-90")} />
             Advanced
           </span>
-          <span className="max-w-[55%] truncate text-xs text-muted-foreground">{backend} · {model}</span>
+          <span className="max-w-[55%] truncate text-xs text-muted-foreground">{backend} · {omgModelLabel(model)}</span>
         </CollapsibleTrigger>
         <CollapsibleContent className="pt-2">
           <div className="flex items-center justify-between rounded-xl border border-border px-3 py-2">
@@ -31881,8 +32122,8 @@ function ScheduleAgentPicker({
           <button
             type="button"
             className="flex size-7 shrink-0 items-center justify-center rounded-full hover:bg-muted"
-            aria-label={`Change coding agent — currently ${label}${agent.model ? ` · ${agent.model}` : ""}`}
-            title={agent.model ? `${label} · ${agent.model}` : label}
+            aria-label={`Change coding agent — currently ${label}${agent.model ? ` · ${omgModelLabel(agent.model)}` : ""}`}
+            title={agent.model ? `${label} · ${omgModelLabel(agent.model)}` : label}
           />
         }
       >
@@ -31928,7 +32169,7 @@ function ScheduleAgentPicker({
             <DropdownMenuLabel>Model</DropdownMenuLabel>
             {models.map((item) => (
               <DropdownMenuRadioItem key={item} value={item}>
-                {item}
+                {omgModelLabel(item)}
               </DropdownMenuRadioItem>
             ))}
           </DropdownMenuRadioGroup>

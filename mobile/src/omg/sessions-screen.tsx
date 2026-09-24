@@ -1,3 +1,5 @@
+import { useSessionStatus } from "./use-session-status";
+import { recordConnectionTiming } from "./connection-trace";
 import { startPendingSession } from "./pending-session";
 import { sessionCache } from "./session-cache-store";
 import { WindowedSessionList } from "./windowed-session-list";
@@ -35,8 +37,9 @@ import {
   useRef,
   useState,
 } from "react";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
-  AppState,
+  LayoutAnimation,
   Platform,
   Pressable,
   RefreshControl,
@@ -48,6 +51,7 @@ import Reanimated, {
   useAnimatedKeyboard,
   useAnimatedStyle,
   useSharedValue,
+  withTiming,
 } from "react-native-reanimated";
 import { LinearGradient } from "expo-linear-gradient";
 import { composerReservation } from "./composer-reservation";
@@ -78,12 +82,19 @@ import {
   sessionStableId,
   type SessionNode,
 } from "./session-tree";
-import { FindingsDrawer, FindingsPill, PILL_GAP, PILL_HEIGHT } from "./findings-pill";
+import {
+  FindingsDrawer,
+  FindingsPill,
+  FindingsRailPanel,
+  PILL_GAP,
+  PILL_HEIGHT,
+  PILL_RETURN,
+} from "./findings-pill";
 import { canDriveSession, type DriveableSession } from "./session-runtime";
 import { useOverlapWatch } from "./list-overlap-watch";
 import { groupNodesByProject } from "./session-groups";
 import { SessionActivityPane } from "./session-activity";
-import { observeSessionStatus, SessionStatusState } from "./session-status";
+import { SessionStatusState } from "./session-status";
 import { sessionPreview } from "./session-preview";
 import { SubagentGroup } from "./subagent-group";
 import {
@@ -94,7 +105,17 @@ import {
 } from "./auto-agents";
 import { useComputerPicker } from "./computer-picker";
 import { NavGestureContext } from "./nav-gesture-context";
-import { SideNavButton, SIDE_NAV_RADIUS, SideNavDrawer, sideNavWidth, useSideNavGesture } from "./side-nav";
+import {
+  RAIL_NAV_DURATION,
+  railNavEasing,
+  SideNavButton,
+  SIDE_NAV_RADIUS,
+  SideNavDrawer,
+  SideNavRailPanel,
+  sideNavWidth,
+  useSideNavGesture,
+} from "./side-nav";
+import { useReduceMotionEnabled } from "./motion";
 import {
   clearSessionUnread,
   fetchSessionsForViewer,
@@ -124,7 +145,7 @@ import { useToast } from "./toast";
 import { SessionListSkeleton } from "./skeleton";
 import { useTheme } from "./theme";
 import { cloudComputerLabel, bindingLabel, relativeTime } from "./format";
-import { CLOUD_BINDING_ID } from "./config";
+import { CLOUD_BINDING_ID, STORAGE_KEYS } from "./config";
 import {
   isSharedBindingId,
   SHARED_REVOKED_DETAIL,
@@ -364,7 +385,22 @@ export function SessionsScreen({
   const { width, height: windowHeight } = useWindowDimensions();
   const wide = workspace && width >= 768;
   const home = pathname === "/";
-  const railWidth = wide ? 320 : 0;
+  /**
+   * THE RAIL CAN BE PUT AWAY on the wide iPad, from the handle on its divider
+   * (the web's desktop rail does the same). `wide` still decides the pane
+   * layout; `railOpen` decides whether the rail takes its 320pt. Remembered
+   * per device, like the web's.
+   */
+  const [railCollapsed, setRailCollapsed] = useState(false);
+  useEffect(() => {
+    void AsyncStorage.getItem(STORAGE_KEYS.railCollapsed)
+      .then((saved) => {
+        if (saved === "1") setRailCollapsed(true);
+      })
+      .catch(() => {});
+  }, []);
+  const railOpen = wide && !railCollapsed;
+  const railWidth = railOpen ? 320 : 0;
   const router = useRouter();
   const navigateWorkspace = (href: Href) => {
     if (href === "/") router.dismissTo("/");
@@ -408,6 +444,7 @@ export function SessionsScreen({
     return Array.isArray(saved) ? saved : [];
   };
   const [sessions, setSessions] = useState<OmgSession[]>(cachedSessions);
+  useLayoutEffect(() => { recordConnectionTiming("sessions.commit"); }, [sessions]);
   /**
    * HAS SESSIONS HAD ITS TURN YET — see the long note on `SESSIONS_SETTLE_TIMEOUT_MS`
    * below for what this exists to prevent. Kept as its own flag rather than
@@ -773,30 +810,15 @@ export function SessionsScreen({
     }, [probe]),
   );
 
-  // Observe the fleet only while Home is visible and the app is foregrounded.
-  // REST reconciles membership every minute, or every 10s without live frames.
-  useFocusEffect(
-    useCallback(() => {
-      if (!client || !ready) return;
-      let stop: (() => void) | undefined;
-      const start = () => {
-        if (stop) return;
-        const unsubscribe = observeSessionStatus({
-          live: client.live,
-          apply: (rows) => statusState.apply(rows),
-          refresh: (quiet) => { void load(quiet); },
-          connectionChanged: setConnection,
-        });
-        stop = () => { unsubscribe(); stop = undefined; };
-      };
-      if (AppState.currentState !== "background") start();
-      const appState = AppState.addEventListener("change", (state) => {
-        if (state === "background") stop?.();
-        else if (state === "active") start();
-      });
-      return () => { appState.remove(); stop?.(); };
-    }, [client, ready, load, statusState]),
-  );
+  useSessionStatus({
+    live: client?.live ?? null,
+    state: statusState,
+    ready,
+    cloud: bindingId === CLOUD_BINDING_ID,
+    denied: readiness?.status === "unauthorized",
+    load,
+    connectionChanged: setConnection,
+  });
 
   const currentSharedComputer = useMemo(
     () => sharedComputers.find((c) => c.id === bindingId) ?? null,
@@ -1036,8 +1058,48 @@ export function SessionsScreen({
   const drawerWidth = sideNavWidth(width);
   const navGesture = useSideNavGesture({
     visible: navOpen, onOpen: () => setNavOpen(true), onClose: () => setNavOpen(false),
-    progress: navProgress, width: drawerWidth, enabled: true,
+    // The wide iPad opens its menu inside the rail instead (below), so the
+    // edge swipe there would open a second, different menu.
+    progress: navProgress, width: drawerWidth, enabled: !wide,
   });
+  /**
+   * THE RAIL'S MENU on the wide iPad, ported from the web's desktop rail: the
+   * same rows as the drawer, slid over the rail's list with Back. The list
+   * steps back while it is up (a short shift right and a dim), so the menu
+   * reads as arriving on top of it. See SideNavRailPanel.
+   */
+  const [railNavOpen, setRailNavOpen] = useState(false);
+  const railNavProgress = useSharedValue(0);
+  const reduceMotion = useReduceMotionEnabled();
+  const railNavShown = railNavOpen && railOpen;
+  useEffect(() => {
+    railNavProgress.value = withTiming(railNavShown ? 1 : 0, {
+      duration: reduceMotion ? 0 : RAIL_NAV_DURATION,
+      easing: railNavEasing(),
+    });
+  }, [railNavShown, railNavProgress, reduceMotion]);
+  const railFaceStyle = useAnimatedStyle(() => ({
+    opacity: 1 - 0.7 * railNavProgress.value,
+    transform: [{ translateX: 32 * railNavProgress.value }],
+  }));
+  // The Updates list, open inside the rail instead of in the sheet.
+  const [railFindingsOpen, setRailFindingsOpen] = useState(false);
+  // Nothing open folds it, so the next finding arrives as the pill again.
+  useEffect(() => {
+    if (!autoGroups.length) setRailFindingsOpen(false);
+  }, [autoGroups.length]);
+  const toggleRail = useCallback(() => {
+    if (!wide) return;
+    if (!reduceMotion) {
+      LayoutAnimation.configureNext(LayoutAnimation.create(220, "easeInEaseOut", "opacity"));
+    }
+    setRailNavOpen(false);
+    setRailCollapsed((collapsed) => {
+      const next = !collapsed;
+      void AsyncStorage.setItem(STORAGE_KEYS.railCollapsed, next ? "1" : "0").catch(() => {});
+      return next;
+    });
+  }, [wide, reduceMotion]);
   const navPageStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: drawerWidth * navProgress.value }],
     borderTopLeftRadius: SIDE_NAV_RADIUS * navProgress.value,
@@ -1082,8 +1144,11 @@ export function SessionsScreen({
       ? () => setShortcutsOpen(false)
       : navOpen
         ? () => setNavOpen(false)
-        : null,
+        : railNavShown
+          ? () => setRailNavOpen(false)
+          : null,
   );
+  useKeyCommand({ key: "b" }, wide ? toggleRail : null);
 
   /**
    * The composer Start button. Same request the web's composer sends
@@ -1526,7 +1591,7 @@ export function SessionsScreen({
           flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 16, flexShrink: 1 }}>
             <SideNavButton floating onPress={() => setNavOpen((open) => !open)}
-              online={currentBinding?.online ?? false} machineName={machineName} />
+              machineName={machineName} />
             <LiveWelcome firstName={firstName} busyCount={flattenNodes(working).length}
               connection={connection}
               showingSaved={showingSaved}
@@ -1564,7 +1629,9 @@ export function SessionsScreen({
                 bottom: 0,
                 left: 0,
                 width: wide ? railWidth : "100%",
-                display: wide || home ? "flex" : "none",
+                display: (wide ? railOpen : home) ? "flex" : "none",
+                // The list steps right under the menu; keep it inside the rail.
+                overflow: "hidden",
                 paddingTop: Math.max(insets.top, 56),
                 borderRightWidth: wide ? 1 : 0,
                 borderRightColor: colors.border,
@@ -1572,6 +1639,16 @@ export function SessionsScreen({
             : { flex: 1 }
         }
       >
+        {/* The rail's face. On the wide iPad it steps back while the rail's
+            menu is over it; everywhere else its progress stays at 0. */}
+        <Reanimated.View
+          style={[{ flex: 1 }, railFaceStyle]}
+          // Under the menu the list is paint only: no taps, and VoiceOver
+          // reads the menu, not the rows it covers.
+          pointerEvents={railNavShown ? "none" : "auto"}
+          accessibilityElementsHidden={railNavShown}
+          importantForAccessibility={railNavShown ? "no-hide-descendants" : "auto"}
+        >
         {workspace ? (
           <>
             {/* ONE GUTTER FOR THE RAIL: `space.md` here, on the tab strip,
@@ -1588,12 +1665,11 @@ export function SessionsScreen({
             >
               <View style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: space.xs }}>
                 {/* Opens the nav at every width. It also carries the machine
-                    name and its online dot, which is what the rail footer used
+                    name, which is what the rail footer used
                     to show, so nothing goes off screen by moving the rows into
                     the drawer. */}
                 <SideNavButton
-                  onPress={() => setNavOpen(true)}
-                  online={currentBinding?.online ?? false}
+                  onPress={() => (wide ? setRailNavOpen(true) : setNavOpen(true))}
                   machineName={machineName}
                 />
                 {/* Flat, like the phone's bar item. The glass island it wore
@@ -1624,7 +1700,7 @@ export function SessionsScreen({
             rows are really on screen. On the phone that is Home being focused.
             In the iPad workspace the rail is permanent at width, and only the
             narrow layout ever covers it. */}
-        <SessionActivityPane onScreen={workspace ? wide || home : paneOnScreen}>
+        <SessionActivityPane onScreen={workspace ? railOpen || (!wide && home) : paneOnScreen}>
         <WindowedSessionList
           style={{ flex: 1, position: "relative", zIndex: 0 }}
           /**
@@ -1868,14 +1944,79 @@ export function SessionsScreen({
         />
         </SessionActivityPane>
         {/* THE PILL ON THE RAIL: in flow at the foot of the column, below the
-            list. It sat above the nav footer before that footer moved into the
-            drawer; it now simply ends the rail. */}
-        {wide && autoGroups.length ? (
-          <View style={{ paddingVertical: space.xs, paddingBottom: insets.bottom + space.xs }}>
-            <FindingsPill groups={autoGroups} onPress={() => setFindingsOpen(true)} />
-          </View>
+            list. Pressing it opens the Updates list here, in the rail, as on
+            the web's desktop rail; the sheet is the phone's shape. */}
+        {railOpen && autoGroups.length ? (
+          railFindingsOpen ? (
+            <View style={{ paddingBottom: insets.bottom }}>
+              <FindingsRailPanel
+                groups={autoGroups}
+                onHide={() => setRailFindingsOpen(false)}
+                onOpenAgent={openAutoAgent}
+                maxHeight={Math.round(windowHeight * 0.5)}
+              />
+            </View>
+          ) : (
+            <Reanimated.View
+              entering={PILL_RETURN}
+              style={{ paddingVertical: space.xs, paddingBottom: insets.bottom + space.xs }}
+            >
+              <FindingsPill groups={autoGroups} onPress={() => setRailFindingsOpen(true)} />
+            </Reanimated.View>
+          )
+        ) : null}
+        </Reanimated.View>
+        {railOpen ? (
+          <SideNavRailPanel
+            open={railNavShown}
+            progress={railNavProgress}
+            width={railWidth}
+            topInset={Math.max(insets.top, 56)}
+            onBack={() => setRailNavOpen(false)}
+            pathname={pathname}
+            computerOptions={computerPicker.options}
+            machineName={machineName}
+            navigate={(href) => navigateWorkspace(href as Href)}
+            onShortcuts={keyCommandsAvailable() ? () => setShortcutsOpen(true) : undefined}
+          />
         ) : null}
       </View>
+      {/* THE RAIL'S EDGE, from the web's desktop rail: collapse and expand
+          live on the divider they act on. A touch screen has no hover to
+          reveal it, so the grip is always drawn, quietly. */}
+      {wide ? (
+        <View
+          pointerEvents="box-none"
+          style={{
+            position: "absolute",
+            top: 0,
+            bottom: 0,
+            left: Math.max(0, railWidth - 12),
+            width: 24,
+            zIndex: 40,
+            justifyContent: "center",
+            alignItems: "center",
+          }}
+        >
+          <Pressable
+            onPress={toggleRail}
+            hitSlop={{ top: 12, bottom: 12, left: 8, right: 8 }}
+            accessibilityRole="button"
+            accessibilityLabel={railOpen ? "Collapse sidebar" : "Expand sidebar"}
+            accessibilityHint="Command B"
+            style={({ pressed }) => ({
+              width: pressed ? 24 : 12,
+              height: 44,
+              borderRadius: 12,
+              alignItems: "center",
+              justifyContent: "center",
+              backgroundColor: pressed ? colors.card : "transparent",
+            })}
+          >
+            <View style={{ width: 4, height: 28, borderRadius: 2, backgroundColor: colors.borderStrong }} />
+          </Pressable>
+        </View>
+      ) : null}
       <ShortcutsSheet visible={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
       <CreateSheet
         visible={createOpen}
@@ -2071,7 +2212,6 @@ export function SessionsScreen({
           pathname={pathname}
           computerOptions={computerPicker.options}
           machineName={machineName}
-          online={currentBinding?.online ?? false}
           onDismiss={() => setNavOpen(false)}
           navigate={(href) => {
             if (workspace) navigateWorkspace(href as Href);

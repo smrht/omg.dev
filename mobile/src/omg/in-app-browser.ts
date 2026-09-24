@@ -34,6 +34,7 @@ import { Linking } from "react-native";
 
 type WebBrowserModule = {
   openBrowserAsync: (url: string, opts?: Record<string, unknown>) => Promise<{ type: string }>;
+  openAuthSessionAsync?: (url: string, redirectUrl?: string | null, opts?: Record<string, unknown>) => Promise<{ type: string; url?: string }>;
   dismissBrowser?: () => void | Promise<void>;
   WebBrowserPresentationStyle?: { PAGE_SHEET?: string; FORM_SHEET?: string };
 };
@@ -89,4 +90,22 @@ export function dismissSignInPage(): void {
   } catch {
     // Nothing open. Fine.
   }
+}
+
+
+/**
+ * Open a sign-in page in an auth session. The session ends by itself when
+ * the page navigates to `returnUrl` (a custom scheme such as omg://…), which
+ * is how a provider's redirect comes back to the app without the app ever
+ * reading the page. "closed" means the person (or iOS) ended it first;
+ * "unavailable" means this build has no auth session module.
+ */
+export async function openAuthSession(
+  url: string,
+  returnUrl: string,
+): Promise<{ status: "done"; url: string } | { status: "closed"; type: string } | { status: "unavailable" }> {
+  const wb = webBrowser();
+  if (!wb?.openAuthSessionAsync) return { status: "unavailable" };
+  const result = await wb.openAuthSessionAsync(url, returnUrl, { preferEphemeralSession: false });
+  return result.type === "success" && result.url ? { status: "done", url: result.url } : { status: "closed", type: result.type };
 }
