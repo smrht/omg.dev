@@ -10,5 +10,5 @@ try:
  out=subprocess.run(['python3',str(guard),str(r),'--apply'],capture_output=True,text=True)
  assert out.returncode!=0 and 'not verified' in out.stderr
 finally:p.write_text(original)
-subprocess.run(['python3',str(guard),str(r)],check=True)
+subprocess.run(['python3',str(guard),str(r.parent/'candidate')],check=True)  # positive control: the staged candidate
 print('GUARD_NEGATIVE_CONTROLS_PASS')
