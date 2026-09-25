@@ -2036,8 +2036,12 @@ const STATUS_DOT_IDLE = "bg-success/30 ring-1 ring-inset ring-success/20";
 /**
  * A session's agent mark, with the app's one working treatment.
  *
- * Working shrinks the mark and puts an amber spinner in the space it gives
- * up, so the state is drawn around the mark instead of on top of it. This
+ * Working shrinks the mark and puts a blue (primary) spinner in the space it
+ * gives up, so the state is drawn around the mark instead of on top of it.
+ * It used to be amber, which vanished around the orange Claude mark: the arc
+ * read as part of the logo. Blue contrasts with every agent mark and is the
+ * colour SessionStatusDot already uses for working, so it also stays readable
+ * as a static ring when reduced motion stops the spin. This
  * already existed in SessionHeaderIdentity, where the card and sheet headers
  * use it; the rail row did not share it and grew its own badge instead, so
  * the same session read as amber in its header and blue in the rail. One
@@ -2061,7 +2065,7 @@ function NeutralSessionMark({ busy, size = 24 }: { busy: boolean; size?: number 
     >
       {busy ? (
         <Loader2
-          className="absolute inset-0 m-auto animate-spin text-warning motion-reduce:animate-none"
+          className="absolute inset-0 m-auto animate-spin text-primary motion-reduce:animate-none"
           style={{ width: size * 1.35, height: size * 1.35 }}
           strokeWidth={1.75}
         />
@@ -2099,7 +2103,7 @@ function AgentMark({
         <Loader2
           aria-label="working"
           className={cn(
-            "pointer-events-none absolute inset-0 m-auto animate-spin text-warning motion-reduce:animate-none",
+            "pointer-events-none absolute inset-0 m-auto animate-spin text-primary motion-reduce:animate-none",
             compact ? "size-4" : large ? "size-9" : "size-6",
           )}
           strokeWidth={1.75}
@@ -15273,7 +15277,7 @@ const RailItem = memo(function RailItem({
                 <Loader2
                   aria-label="working"
                   className={cn(
-                    "pointer-events-none absolute inset-0 m-auto animate-spin text-warning motion-reduce:animate-none",
+                    "pointer-events-none absolute inset-0 m-auto animate-spin text-primary motion-reduce:animate-none",
                     dense ? "size-8" : "size-9",
                   )}
                   strokeWidth={1.75}
@@ -15371,7 +15375,7 @@ const RailItem = memo(function RailItem({
         ) : plainRow && busy ? (
           <Loader2
             aria-label="working"
-            className="size-4 shrink-0 animate-spin text-warning motion-reduce:animate-none"
+            className="size-4 shrink-0 animate-spin text-primary motion-reduce:animate-none"
             strokeWidth={1.75}
           />
         ) : plainRow && session.status === "blocked" ? (
@@ -19719,8 +19723,8 @@ const onTouchStart = (e: ReactTouchEvent) => {
              Working is not passed at all any more. This header already draws
              it on the identity mark above (AgentMark, via
              SessionHeaderIdentity), so at narrow widths the same session was
-             reporting working twice on one row, in two colours: the amber
-             ring around the mark and a blue spinner further along. */
+             reporting working twice on one row: the ring around the mark
+             and a second spinner further along. */
           <SessionStatusDot
             paused={session.status === "blocked"}
             className="lg:hidden"
@@ -31035,7 +31039,7 @@ function SessionHeaderIdentity({
     return (
       <Loader2
         aria-label="working"
-        className="size-5 shrink-0 animate-spin text-warning motion-reduce:animate-none"
+        className="size-5 shrink-0 animate-spin text-primary motion-reduce:animate-none"
         strokeWidth={1.75}
       />
     );
