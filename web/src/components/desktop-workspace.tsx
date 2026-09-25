@@ -42,6 +42,8 @@ export type WorkspaceSummary = {
   meta?: string;
   /** Real state only (working / blocked reason), or nothing. */
   status?: string;
+  /** True when status means "working": drawn blue with a dot, not amber. */
+  busy?: boolean;
   /** The latest line the roster already loaded. Never a fetched transcript. */
   body?: string;
 };
@@ -291,7 +293,16 @@ export function DesktopWorkspace({
                       </p>
                     ) : null}
                     {summary.status ? (
-                      <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">
+                      <p
+                        className={
+                          summary.busy
+                            ? "mt-1 text-xs font-semibold text-primary"
+                            : "mt-1 text-xs text-amber-700 dark:text-amber-400"
+                        }
+                      >
+                        {summary.busy ? (
+                          <span aria-hidden="true" className="mr-1 inline-block size-1.5 -translate-y-px rounded-full bg-current align-middle" />
+                        ) : null}
                         {summary.status}
                       </p>
                     ) : null}

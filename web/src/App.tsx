@@ -2171,25 +2171,24 @@ function SessionStatusDot({
       </span>
     );
   }
-  // Working is the app's one loading state: the same spinner every pending
-  // action already shows. It used to be an amber pulsing dot here and only
-  // here, which read as a warning badge rather than "this is running" — the
-  // same colour the paused badge uses, one row apart, meaning two things.
+  // Working is a solid blue dot, not a spinner. The spinner depended on a
+  // CSS animation (it stood still in Firefox and under reduced motion), and
+  // a still arc around the mark read as part of the logo. A filled dot in
+  // the app's primary colour says "running" without any motion. Blue, not
+  // amber, so it never collides with the paused badge.
   if (busy) {
     return (
       <span
         aria-label="working"
-        title="Working"
+        title="Bezig"
         className={cn(
-          "flex shrink-0 items-center justify-center rounded-full text-primary",
+          "shrink-0 rounded-full bg-primary",
           variant === "avatar"
-            ? "absolute -right-0.5 -top-0.5 size-3.5 bg-card ring-2 ring-card"
-            : "size-4",
+            ? "absolute -right-0.5 -top-0.5 size-3 ring-2 ring-card"
+            : "size-2",
           className,
         )}
-      >
-        <Loader2 className="size-2.5 animate-spin motion-reduce:animate-none" />
-      </span>
+      />
     );
   }
   return (
@@ -13697,7 +13696,7 @@ function RailStage({
       session.last?.text ||
       session.lastUserText ||
       "";
-    return { title: titleForSession(session), meta, status, body: plainPreviewText(body), mark: <span className="workspace-summary-mark"><AgentMark session={session} busy={busy} /></span> };
+    return { title: titleForSession(session), meta, status, busy: busy && session.status !== "blocked", body: plainPreviewText(body), mark: <span className="workspace-summary-mark"><AgentMark session={session} busy={false} /></span> };
   }, [selectedWorkspaceSid, orderedSids, bySid, busyBySid, messagesBySid]);
   // Nest children in the DOM (same model as the mobile session tree) so
   // depth-2+ grandchildren indent further and tree elbows hit mid-row.
@@ -15273,16 +15272,6 @@ const RailItem = memo(function RailItem({
             <BotAvatar bot={drivingBot} working={busy} size={dense ? 36 : 44} />
           ) : showFavicon ? (
             <>
-              {busy ? (
-                <Loader2
-                  aria-label="working"
-                  className={cn(
-                    "pointer-events-none absolute inset-0 m-auto animate-spin text-primary motion-reduce:animate-none",
-                    dense ? "size-8" : "size-9",
-                  )}
-                  strokeWidth={1.75}
-                />
-              ) : null}
               <img
                 src={faviconSrc}
                 alt=""
@@ -15296,13 +15285,13 @@ const RailItem = memo(function RailItem({
           ) : showAgentIcons ? (
             <AgentMark
               session={session}
-              busy={busy}
+              busy={false}
               rounding="rounded-none"
               large={!dense}
               showAccountNumber={false}
             />
           ) : (
-            <NeutralSessionMark busy={busy} />
+            <NeutralSessionMark busy={false} />
           )}
           {!drivingBot && showFavicon && showAgentIcons ? (
             <span
@@ -15334,9 +15323,12 @@ const RailItem = memo(function RailItem({
               className="absolute bottom-0 left-0 ring-2 ring-card"
             />
           ) : null}
-          {/* Blocked keeps the corner badge: it is a state, not a progress,
-              and a solid glyph on a filled pill reads at this size. */}
+          {/* Blocked and working share the corner badge: blocked as a pause
+              pill, working as a solid blue dot. No spinner: it needs an
+              animation that Firefox and reduced motion leave standing still.
+              A bot keeps state in its own posture. */}
           <SessionStatusDot
+            busy={busy && !drivingBot}
             paused={session.status === "blocked"}
             variant="avatar"
           />
@@ -15364,20 +15356,28 @@ const RailItem = memo(function RailItem({
           <Pin aria-label="Pinned to top" className="size-3 shrink-0 text-primary" fill="currentColor" />
         ) : null
       }
-      preview={<span className={questions.length || session.status === "blocked" ? "text-amber-700 dark:text-amber-400" : undefined}>{overviewPreview}</span>}
+      preview={
+        busy && !questions.length && session.status !== "blocked" ? (
+          <span>
+            <span className="font-semibold text-primary">
+              <span aria-hidden="true" className="mr-1 inline-block size-1.5 -translate-y-px rounded-full bg-current align-middle" />
+              Bezig
+            </span>
+            {" · " + (latest || "Agent werkt aan je opdracht")}
+          </span>
+        ) : (
+          <span className={questions.length || session.status === "blocked" ? "text-amber-700 dark:text-amber-400" : undefined}>{overviewPreview}</span>
+        )
+      }
       metadata={workspace ? <span className="workspace-row-metadata">
         <span className="workspace-row-model" title={session.model || session.agentLabel || undefined}>{session.model ? pickerModelDisplay(session.model).label : session.agentLabel || sessionIconAlt(session.agent, session.model)}</span>
-        <span className={cn("workspace-row-state", (questions.length > 0 || session.status === "blocked") && "text-amber-600 dark:text-amber-400")}>{questions.length ? "Vraag aan jou" : session.status === "blocked" ? "Wacht op jou" : busy ? "Bezig" : unread ? "Nieuw antwoord" : topPinned ? "Vastgepind" : ""}</span>
+        <span className={cn("workspace-row-state", (questions.length > 0 || session.status === "blocked") ? "text-amber-600 dark:text-amber-400" : busy && "font-semibold text-primary")}>{questions.length ? "Vraag aan jou" : session.status === "blocked" ? "Wacht op jou" : busy ? "Bezig" : unread ? "Nieuw antwoord" : topPinned ? "Vastgepind" : ""}</span>
       </span> : null}
       indicator={
         unread ? (
           unreadDot
         ) : plainRow && busy ? (
-          <Loader2
-            aria-label="working"
-            className="size-4 shrink-0 animate-spin text-primary motion-reduce:animate-none"
-            strokeWidth={1.75}
-          />
+          <SessionStatusDot busy variant="inline" />
         ) : plainRow && session.status === "blocked" ? (
           <SessionStatusDot paused variant="inline" />
         ) : null
