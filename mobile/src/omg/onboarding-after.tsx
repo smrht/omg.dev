@@ -38,8 +38,9 @@ import type { OmgClient } from "@omg-dev/client";
 
 import { ContinueScreen } from "./onboarding-continue";
 import { launchOnboardingTask, type LaunchOutcome } from "./onboarding-launch";
-import { OnboardingTranscript } from "./onboarding-transcript";
+import { SessionScreenBody } from "../../app/session/[id]";
 import { PlanScreen } from "./onboarding-plan";
+import { prefetchPurchaseCatalog } from "./purchase-flow";
 import { PrimaryAction, SecondaryAction, StepHeading } from "./onboarding-chrome";
 import { WorkingScreen } from "./onboarding-working";
 import { Text } from "./text";
@@ -67,6 +68,7 @@ export function OnboardingAfterSignIn({
   onNotify,
   onOpenSession,
   onDone,
+  pendingTitle = null,
   splash,
 }: {
   client: OmgClient | null;
@@ -86,12 +88,26 @@ export function OnboardingAfterSignIn({
    * this person a visit.
    */
   onDone: (ran: boolean) => void;
+  /**
+   * The prompt the person just wrote, when they wrote it in THIS launch.
+   * With it, the Computer's start-up happens on the working screen, showing
+   * their own task, instead of on `splash`. Benny, 2026-09-24: no splash
+   * inside the flow.
+   */
+  pendingTitle?: string | null;
+  /** Only for a prompt stashed by an earlier launch, where no title is known. */
   splash: ReactNode;
 }) {
   const { colors, space } = useTheme();
   const [stage, setStage] = useState<Stage>("launching");
   const [outcome, setOutcome] = useState<LaunchOutcome | null>(null);
   const [tick, setTick] = useState(0);
+  /**
+   * They answered the working screen (Notify me / Not now) before the task
+   * had started. Held, and acted on the moment it starts: they go straight to
+   * the continue screen instead of being asked again.
+   */
+  const [answered, setAnswered] = useState(false);
   const startedAt = useRef(Date.now());
   /**
    * One attempt in flight at a time, and the flag is set SYNCHRONOUSLY.
@@ -117,6 +133,12 @@ export function OnboardingAfterSignIn({
   const mounted = useRef(true);
   useEffect(() => () => {
     mounted.current = false;
+  }, []);
+
+  // The pricing page (step 06) is seconds away. Load its plans now, so it
+  // opens on the table rather than a spinner.
+  useEffect(() => {
+    prefetchPurchaseCatalog();
   }, []);
 
   useEffect(() => {
@@ -146,6 +168,11 @@ export function OnboardingAfterSignIn({
       cancelled = true;
     };
   }, [stage, client, ready, cwd, tick, onDone]);
+
+  // An answer given while the Computer was starting moves them on once it has.
+  useEffect(() => {
+    if (answered && stage === "working" && outcome?.kind === "started") setStage("continue");
+  }, [answered, stage, outcome]);
 
   if (outcome?.kind === "failed") {
     return (
@@ -186,7 +213,29 @@ export function OnboardingAfterSignIn({
     );
   }
 
-  if (stage === "launching" || outcome?.kind !== "started") return <>{splash}</>;
+  /*
+   * The Computer is still starting. With the person's own prompt in hand, this
+   * IS the working screen: the task is on its way, and "Notify me" and
+   * "Not now" are real answers that take effect when it starts. Without a
+   * prompt (one stashed by an earlier launch) there is nothing true to show.
+   */
+  if (stage === "launching" || outcome?.kind !== "started") {
+    if (!pendingTitle) return <>{splash}</>;
+    return (
+      <WorkingScreen
+        title={pendingTitle}
+        agent={agent}
+        runningCount={Math.max(1, runningCount)}
+        waiting={answered}
+        onNotify={() => {
+          onNotify();
+          setAnswered(true);
+        }}
+        onSkip={() => setAnswered(true)}
+        onBack={() => setAnswered(true)}
+      />
+    );
+  }
 
   if (stage === "working") {
     return (
@@ -210,7 +259,13 @@ export function OnboardingAfterSignIn({
     return (
       <ContinueScreen
         interest={outcome.interest}
-        transcript={<OnboardingTranscript client={client} sessionId={outcome.sessionId} />}
+        /*
+         * THE CHAT PAGE ITSELF, read-only (Benny, 2026-09-24). The old card
+         * had its own transcript that listened for live events only, so it
+         * opened empty; this one loads the saved messages and shows the
+         * prompt at once, exactly as the session does after "Let me in".
+         */
+        transcript={<SessionScreenBody sessionId={outcome.sessionId} initialPrompt={outcome.prompt} readOnly />}
         client={client}
         sessionId={outcome.sessionId}
         agent={agent}

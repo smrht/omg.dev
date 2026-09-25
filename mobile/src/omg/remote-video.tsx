@@ -28,8 +28,9 @@
  * a missing module degrades to the same honest card the app showed before
  * video had a renderer at all.
  */
-import { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Pressable, StyleSheet, View } from "react-native";
+import MenuView, { type MenuAction } from "@expo/ui/community/menu";
+import { type ReactNode, useEffect, useRef, useState } from "react";
+import { ActivityIndicator, Platform, Pressable, Share, StyleSheet, View } from "react-native";
 
 import { Icon } from "../components";
 import { useOmg } from "./provider";
@@ -207,6 +208,25 @@ export function RemoteVideo({
   // A landscape guess only when the artifact is silent about its shape.
   const box = fitBox(declaredRatio ?? 16 / 9, maxWidth, maxHeight);
 
+  /*
+   * Save goes through the system share sheet, which lists "Save Video" for a
+   * local video file. The player streams from a signed URL and never has the
+   * whole file, so this pulls one to the cache first (the same stable cache
+   * `download` keeps), then hands the sheet a file URL.
+   *
+   * Share is React Native's own module, so this needs no native module beyond
+   * the two the player already requires, and it ships over the air.
+   */
+  const save = async () => {
+    const local = await download((p) => client.transport.fetch(p), bindingId, path, loaded.fs);
+    await Share.share({ url: local });
+  };
+  const withMenu = (content: ReactNode) => (
+    <VideoMenu save={save}>
+      {content}
+    </VideoMenu>
+  );
+
   if (uri) {
     // A signed URL carries a grant that lives ten minutes, and the player
     // keeps requesting ranges from that URL as it plays and seeks. Once the
@@ -217,7 +237,9 @@ export function RemoteVideo({
       bindingId && uri.includes("__omg_grant=")
         ? () => signedRequestFor(bindingId, path, { forceRefresh: true }).then((r) => r?.url ?? null)
         : undefined;
-    return <Player video={loaded.video} uri={uri} box={box} renew={renew} />;
+    return (
+      withMenu(<Player video={loaded.video} uri={uri} box={box} renew={renew} />)
+    );
   }
 
   const still = (
@@ -242,37 +264,102 @@ export function RemoteVideo({
     </View>
   );
 
+  return withMenu(
+      <Pressable
+        onPress={() => setRequested(true)}
+        disabled={requested}
+        accessibilityRole="button"
+        accessibilityLabel={label ? `Play ${label}` : "Play video"}
+        style={{ alignSelf: "flex-start", opacity: requested ? 0.7 : 1 }}
+      >
+        {still}
+        <View
+          pointerEvents="none"
+          style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, alignItems: "center", justifyContent: "center" }}
+        >
+          <View
+            style={{
+              width: 56,
+              height: 56,
+              borderRadius: 28,
+              alignItems: "center",
+              justifyContent: "center",
+              backgroundColor: "rgba(0,0,0,0.55)",
+            }}
+          >
+            {requested ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Icon ios="play.fill" android="play_arrow" size={24} color="#fff" />
+            )}
+          </View>
+        </View>
+      </Pressable>,
+  );
+}
+
+/**
+ * Save lives in the system context menu: press and hold the video, the way
+ * Photos and Messages offer it. It used to be a caption row under every
+ * video, which read as clutter. The row now appears only while the file is
+ * being pulled or after a failure, because a menu cannot show progress.
+ *
+ * iOS only: Android's Share ignores `url`, so it would share nothing.
+ */
+function VideoMenu({ save, children }: { save: () => Promise<void>; children: ReactNode }) {
+  const { colors, type, space, isDark } = useTheme();
+  const [state, setState] = useState<"idle" | "busy" | "failed">("idle");
+  if (Platform.OS !== "ios") return <View style={{ alignSelf: "flex-start" }}>{children}</View>;
+  const run = () => {
+    if (state === "busy") return;
+    setState("busy");
+    save()
+      .then(() => setState("idle"))
+      .catch(() => setState("failed"));
+  };
+  const actions: MenuAction[] = [{ id: "save", title: "Save or Share", image: "square.and.arrow.up" }];
   return (
-    <Pressable
-      onPress={() => setRequested(true)}
-      disabled={requested}
-      accessibilityRole="button"
-      accessibilityLabel={label ? `Play ${label}` : "Play video"}
-      style={{ alignSelf: "flex-start", opacity: requested ? 0.7 : 1 }}
-    >
-      {still}
-      <View
-        pointerEvents="none"
-        style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, alignItems: "center", justifyContent: "center" }}
+    <View style={{ alignSelf: "flex-start", gap: space.xs }}>
+      <MenuView
+        actions={actions}
+        shouldOpenOnLongPress
+        colorScheme={isDark ? "dark" : "light"}
+        onPressAction={({ nativeEvent }) => {
+          if (nativeEvent.event === "save") run();
+        }}
+        testID="video-menu"
       >
         <View
-          style={{
-            width: 56,
-            height: 56,
-            borderRadius: 28,
-            alignItems: "center",
-            justifyContent: "center",
-            backgroundColor: "rgba(0,0,0,0.55)",
+          accessibilityHint="Press and hold for options"
+          accessibilityActions={[{ name: "save", label: "Save or Share" }]}
+          onAccessibilityAction={(event) => {
+            if (event.nativeEvent.actionName === "save") run();
           }}
         >
-          {requested ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <Icon ios="play.fill" android="play_arrow" size={24} color="#fff" />
-          )}
+          {children}
         </View>
-      </View>
-    </Pressable>
+      </MenuView>
+      {state === "idle" ? null : (
+        <Pressable
+          onPress={run}
+          disabled={state === "busy"}
+          accessibilityRole="button"
+          accessibilityLabel={state === "busy" ? "Preparing video" : "Could not download. Try again"}
+          testID="video-save-status"
+          hitSlop={8}
+          style={{ alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: space.xs, paddingVertical: 2 }}
+        >
+          {state === "busy" ? (
+            <ActivityIndicator size="small" color={colors.textMuted} />
+          ) : (
+            <Icon ios="exclamationmark.circle" android="error" size={14} color={colors.textMuted} />
+          )}
+          <Text style={{ ...type.caption, color: colors.textMuted }}>
+            {state === "busy" ? "Preparing video" : "Could not download. Try again"}
+          </Text>
+        </Pressable>
+      )}
+    </View>
   );
 }
 

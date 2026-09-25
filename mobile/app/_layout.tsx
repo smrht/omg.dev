@@ -14,7 +14,6 @@ import Reanimated, {
 
 import { AiConsentScreen, useAiDataConsent } from "../src/omg/ai-consent";
 import {
-  SetupScreen,
   rosterFromReadiness,
   useIntro,
   useOnboarding,
@@ -28,7 +27,7 @@ import { loadDemoMode } from "../src/omg/demo";
 import { AgentVillageWidgetBridge } from "../src/omg/village-widget-bridge";
 import { AgentLiveActivityBridge } from "../src/omg/agent-live-activity";
 import { OnboardingAfterSignIn } from "../src/omg/onboarding-after";
-import { OnboardingFlow, WelcomeGate } from "../src/omg/onboarding-flow";
+import { OnboardingFlow, WelcomeGate, type OnboardingChoice } from "../src/omg/onboarding-flow";
 import { isNewAccount, shouldMarkOnboarded, shouldShowSetup } from "../src/omg/onboarding-gate";
 import { stashOnboardingChoice } from "../src/omg/onboarding-handoff";
 import { registerForPushNotifications, useNotificationTapRouting } from "../src/omg/push";
@@ -181,11 +180,21 @@ function LaunchGate() {
  * else had to clear first -- setup, a slow plan read, anything added later.
  */
 function OpenWhenMounted({ sessionId, onOpened }: { sessionId: string; onOpened: () => void }) {
+  const { colors } = useTheme();
   useEffect(() => {
-    router.push(`/session/${sessionId}`);
-    onOpened();
+    /*
+     * No slide, and a cover until it is open (Benny, 2026-09-24). The pricing
+     * page used to hand over to Home for about a second while the session
+     * slid in over it: a screen from after onboarding, shown in the middle of
+     * it. `arrive=instant` turns the push animation off (see the session
+     * Stack.Screen), and the cover in the flow's own colour hides the one or
+     * two frames of Home before the session paints.
+     */
+    router.push(`/session/${sessionId}?arrive=instant`);
+    const timer = setTimeout(onOpened, 350);
+    return () => clearTimeout(timer);
   }, [sessionId, onOpened]);
-  return null;
+  return <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: colors.bg }]} />;
 }
 
 function RootNavigator() {
@@ -203,6 +212,12 @@ function RootNavigator() {
   const [afterSignInDone, setAfterSignInDone] = useState(false);
   /** The signed-in questions (steps 02 and 03) are answered for this launch. */
   const [questionsDone, setQuestionsDone] = useState(false);
+  /**
+   * The choice the questions just produced: step 04 shows its prompt at once,
+   * and "Not now" on the data notice reopens the prompt with it.
+   */
+  const [questionsChoice, setQuestionsChoice] = useState<OnboardingChoice | null>(null);
+  const questionsPrompt = questionsChoice?.prompt.trim() || null;
   /**
    * The new flow actually ran for this person, so setup below still owes them
    * a visit -- even though buying a plan in step 06 has just made `established`
@@ -263,6 +278,13 @@ function RootNavigator() {
       onboarding.complete();
     }
   }, [onboarding, machinesLoaded, established, newArrival]);
+  // No setup pages any more (see the gate below): once steps 04 to 06 are over,
+  // a new account is done. A returning account is marked by the effect above.
+  useEffect(() => {
+    if (afterSignInDone && shouldShowSetup({ state: onboarding.state, established, newArrival, machinesLoaded })) {
+      onboarding.complete();
+    }
+  }, [afterSignInDone, onboarding, machinesLoaded, established, newArrival]);
   /**
    * A tapped notification goes to the thing it is about.
    *
@@ -363,6 +385,29 @@ function RootNavigator() {
   }, [signOut]);
 
   const glyphsReady = useLucideFont();
+
+  /*
+   * What a gate shows while it waits.
+   *
+   * The splash is right for a cold start: nothing is on screen yet. It is
+   * wrong once somebody has just signed in, because then it lands in the
+   * middle of onboarding. Benny's rule, 2026-09-24: no splash inside the
+   * flow. So after a sign-in in this launch the short local waits (consent,
+   * onboarding flag) hold a plain page in the flow's own colour, and the
+   * long ones are not reached by a new account at all (see the gates).
+   *
+   * A ref written during render on purpose: the very first signed-in render
+   * already needs the answer, and an effect would be one frame late.
+   */
+  const sawSignedOut = useRef(false);
+  if (authStatus === "signed-out") sawSignedOut.current = true;
+  const hold = sawSignedOut.current ? (
+    <View style={{ flex: 1, backgroundColor: colors.bg }}>
+      <StatusBar style={isDark ? "light" : "dark"} />
+    </View>
+  ) : (
+    <Splash />
+  );
 
   if (authStatus === "loading" || !glyphsReady) {
     return <Splash />;
@@ -525,32 +570,22 @@ function RootNavigator() {
    * reinstalled. Keep every consent check below the signed-out branch.
    */
   if (consent.state === "loading") {
-    return <Splash />;
-  }
-
-  if (consent.state === "needed") {
-    return (
-      <>
-        <StatusBar style={isDark ? "light" : "dark"} />
-        <AiConsentScreen onAccept={consent.accept} onDecline={handleDecline} />
-      </>
-    );
+    return hold;
   }
 
   /*
-   * Onboarding, after consent and below the signed-out branch.
+   * Onboarding, below the signed-out branch.
    *
-   * Order matters twice. It is below signed-out for the reason spelled out
-   * above: any gate above that branch can make sign-in unreachable, which is
-   * exactly the splash deadlock #237 fixed. It is below consent because
-   * consent is the precondition for sending anything anywhere, and explaining
-   * the product to someone who then declines and gets signed out is wasted.
+   * It is below signed-out for the reason spelled out above: any gate above
+   * that branch can make sign-in unreachable, which is exactly the splash
+   * deadlock #237 fixed. The data notice sits after the questions, before
+   * anything can be sent; see the gate for it below.
    *
    * Like consent, this parks in "loading" until there is a user id, so it
    * cannot flash for the moment between signed-in and the account resolving.
    */
   if (onboarding.state === "loading") {
-    return <Splash />;
+    return hold;
   }
 
   /*
@@ -564,7 +599,9 @@ function RootNavigator() {
       <StatusBar style={isDark ? "light" : "dark"} />
       <OnboardingFlow
         finalLabel="Start"
+        initial={questionsChoice}
         onDone={(choice) => {
+          setQuestionsChoice(choice);
           void stashOnboardingChoice(choice).finally(() => setQuestionsDone(true));
         }}
       />
@@ -593,6 +630,7 @@ function RootNavigator() {
    * A load ERROR is not a reason to wait forever, so that falls through and
    * the predicate runs on what we have.
    */
+
   /*
    * A new sign-up goes to the questions AT ONCE. The creation time already
    * says who they are, so there is no reason to hold them on the splash for
@@ -603,8 +641,43 @@ function RootNavigator() {
     return questionsGate;
   }
 
-  if (onboarding.state === "needed" && !machinesLoaded && !machinesError) {
-    return <Splash />;
+  /*
+   * THE DATA NOTICE, after the questions for a new sign-up (Benny,
+   * 2026-09-24): asking about AI providers before somebody has even said what
+   * they want read as a wall. Nothing above this line sends anything to an AI
+   * provider -- the questions keep the prompt and any picked files on the
+   * phone -- and everything below it can, so the guarantee Apple asked for
+   * still holds: no transmission before an affirmative "Agree".
+   *
+   * Everyone else (a returning customer, an unknown account age) still meets
+   * it first, exactly where it was.
+   */
+  if (consent.state === "needed") {
+    return (
+      <>
+        <StatusBar style={isDark ? "light" : "dark"} />
+        <AiConsentScreen
+          onAccept={consent.accept}
+          /*
+           * A new sign-up who just wrote a prompt goes back to it (Benny,
+           * 2026-09-24). Signing them out would throw away the thing they
+           * came to do. Everyone else meets the notice with nothing written,
+           * and declining still signs out, as it always has.
+           */
+          onDecline={
+            onboarding.state === "needed" && newAccount === true && questionsDone
+              ? () => setQuestionsDone(false)
+              : handleDecline
+          }
+        />
+      </>
+    );
+  }
+
+  // A new sign-up never waits here: its questions came first, and step 04
+  // below waits for the Computer on its own screen, not on a splash.
+  if (onboarding.state === "needed" && newAccount !== true && !machinesLoaded && !machinesError) {
+    return hold;
   }
 
   /*
@@ -657,31 +730,25 @@ function RootNavigator() {
           }}
           onOpenSession={setPendingSession}
           onDone={endAfterSignIn}
-          splash={<Splash />}
+          pendingTitle={questionsPrompt}
+          splash={hold}
         />
       </>
     );
   }
 
+  /*
+   * THE CONNECT AND PLAN SETUP PAGES ARE OUT OF ONBOARDING (Benny,
+   * 2026-09-24: "not needed now"). Onboarding ends when steps 04 to 06 end,
+   * and the account is marked done here instead of by SetupScreen's last
+   * button. Connecting an agent stays in Settings > Coding agents.
+   *
+   * `shouldShowSetup` still names who WOULD be owed the step, so it is the
+   * condition for finishing: nobody reaches the app with the flag unwritten.
+   * The plain page shows for the one render before the effect lands.
+   */
   if (shouldShowSetup(gate)) {
-    /*
-     * The roster is whatever the Computer has told us so far. `waking` is a
-     * real answer, not an error, so the screen says "starting up" instead of
-     * drawing an empty list that reads as "no agents exist".
-     */
-    const { agents, waking } = rosterFromReadiness(readiness);
-    return (
-      <>
-        <StatusBar style={isDark ? "light" : "dark"} />
-        <SetupScreen
-          onDone={onboarding.complete}
-          agents={agents}
-          waking={waking}
-          onConnected={probe}
-          transport={client?.transport ?? null}
-        />
-      </>
-    );
+    return hold;
   }
 
 
@@ -816,7 +883,15 @@ function RootNavigator() {
               layout effect runs. */}
           <Stack.Screen name="index" options={{ title: "" }} />
           <Stack.Screen name="archive" options={{ title: "Archive", headerLargeTitle: true }} />
-          <Stack.Screen name="session/[id]" options={{ title: "Session" }} />
+          <Stack.Screen
+            name="session/[id]"
+            options={({ route }) => ({
+              title: "Session",
+              // The first session after onboarding opens in place, not with a
+              // slide over Home. See OpenWhenMounted.
+              ...((route.params as { arrive?: string } | undefined)?.arrive === "instant" ? { animation: "none" as const } : {}),
+            })}
+          />
             <Stack.Screen name="session/new" options={{ headerShown: false }} />
           {/* Switching machines is the frequent action and belongs in the menu
               on the machine chip; pairing and per-machine detail still need a
