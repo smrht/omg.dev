@@ -24073,6 +24073,16 @@ function NewSessionDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentRequest]);
 
+  // A hook, so it must run on every render: below the early return it was
+  // skipped while the composer was closed, and opening it from the usage
+  // campfire then rendered one more hook than before (React error #310).
+  const { usage, loading: usageLoading } = useProviderUsage({
+    agent,
+    accountId: agent === "aisdk" ? claudeAccountId || null : null,
+    combineAccounts: agent === "aisdk" && !claudeAccountId,
+    enabled: open,
+  });
+
   // Keep this component alive while the resume picker is open. On desktop its
   // owning dialog closes first, otherwise the dialog's modal backdrop and focus
   // trap sit above the full-screen picker and dismissing the dialog unmounts it.
@@ -24523,12 +24533,6 @@ function NewSessionDialog({
           selected: (option.accountId ?? "") === claudeAccountId,
         }))
       : [];
-  const { usage, loading: usageLoading } = useProviderUsage({
-    agent,
-    accountId: agent === "aisdk" ? claudeAccountId || null : null,
-    combineAccounts: agent === "aisdk" && !claudeAccountId,
-    enabled: open,
-  });
   const agentHeaderLabel = (() => {
     const label = AGENT_CATALOG.find((entry) => entry.key === agent)?.label ?? selectedAgentOption.label;
     return agent === "opencode" ? "OpenCode" : label.charAt(0).toUpperCase() + label.slice(1);
