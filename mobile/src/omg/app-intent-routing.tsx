@@ -23,6 +23,30 @@ import type { OmgClient } from "@omg-dev/client";
 
 import { startPendingSession } from "./pending-session";
 
+/**
+ * Start a session with the server's default agent and open its chat at once.
+ * Shared by the Siri intent and by a share from another app
+ * (`share-routing.tsx`), so both take the composer's creation path.
+ *
+ * Neither carries a folder, so the session goes to "Chats without a
+ * project", the same endpoint the composer uses when that chip is selected.
+ * Plain `/api/sessions/new` would let the server pick a repository.
+ */
+export function openPromptSession(
+  client: OmgClient,
+  scope: string,
+  prompt: string,
+  router: ReturnType<typeof useRouter>,
+): void {
+  const pending = startPendingSession(scope, prompt, () =>
+    client.transport.request<{ sessionId?: string }>("/api/sessions/new-unassigned", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt }),
+    }));
+  router.push(`/session/new?request=${pending.token}` as Href);
+}
+
 /** The invocation name dispatched by StartOmgSessionIntent.perform(). */
 const START_SESSION = "startSession";
 
@@ -50,17 +74,11 @@ export function useAppIntentRouting(
      * and navigation does not wait on the POST, so the chat opens at once with
      * the spoken prompt as its first row.
      *
-     * The agent, model and folder are left to the server. An intent has no
-     * access to the picker state on the home screen, and a spoken "start a
-     * session" carries no folder.
+     * The agent and model are left to the server. An intent has no access to
+     * the picker state on the home screen. It carries no folder, so the chat
+     * is created without a project.
      */
-    const pending = startPendingSession(scope, prompt, () =>
-      client.transport.request<{ sessionId?: string }>("/api/sessions/new", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
-      }));
-    router.push(`/session/new?request=${pending.token}` as Href);
+    openPromptSession(client, scope, prompt, router);
   }, [client, scope, router]);
 
   useEffect(() => {

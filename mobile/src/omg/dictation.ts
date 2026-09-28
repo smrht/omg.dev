@@ -59,6 +59,10 @@ const STREAM_CHUNK_MS = 100;
 // upstream to commit. Long enough for a real round trip, short enough that a
 // dead socket doesn't make the send button hang.
 const FINAL_WAIT_MS = 4000;
+// How long to wait once the machine says "finalizing": the realtime final was
+// late, so it is transcribing its own copy of this take. That copy is already
+// on the machine, so waiting here beats uploading the whole recording again.
+const FALLBACK_WAIT_MS = 20000;
 
 const WS_CONNECTING = 0;
 const WS_OPEN = 1;
@@ -166,10 +170,16 @@ export function useDictation(
   const socketBrokenRef = useRef(false);
   const pendingRef = useRef<Uint8Array[]>([]);
   const committedRef = useRef("");
+  // The latest partial, mirrored out of state so stop() can read it after its
+  // wait without a stale closure.
+  const partialRef = useRef("");
   // Resolvers waiting on the next "final" frame, settled by the flush stop()
   // sends — mirrors the web composer's finalWaiters so a stop() doesn't hand
   // back a clipped partial instead of the tail the bridge is about to commit.
   const finalWaitersRef = useRef<Array<() => void>>([]);
+  // Set while stop() waits for the final; the "finalizing" frame calls it to
+  // stretch the wait to FALLBACK_WAIT_MS.
+  const extendFinalWaitRef = useRef<(() => void) | null>(null);
 
   const settleFinalWaiters = useCallback(() => {
     const waiters = finalWaitersRef.current;
@@ -205,6 +215,7 @@ export function useDictation(
     setLive(false);
     setError(null);
     committedRef.current = "";
+    partialRef.current = "";
     socketBrokenRef.current = false;
     pendingRef.current = [];
     finalWaitersRef.current = [];
@@ -239,7 +250,10 @@ export function useDictation(
           return; // Not JSON — one bad frame should not end a live take.
         }
         if (msg.type === "partial") {
+          partialRef.current = msg.text ?? "";
           setPartial(msg.text ?? "");
+        } else if (msg.type === "finalizing") {
+          extendFinalWaitRef.current?.();
         } else if (msg.type === "final") {
           const text = msg.text ?? "";
           committedRef.current = committedRef.current
@@ -247,6 +261,7 @@ export function useDictation(
               ? `${committedRef.current} ${text}`
               : committedRef.current
             : text;
+          partialRef.current = "";
           setPartial("");
           settleFinalWaiters();
         }
@@ -307,21 +322,46 @@ export function useDictation(
       const socket = socketRef.current;
 
       let text: string | null = null;
-      if (socket && !socketBrokenRef.current && socket.readyState === WS_OPEN) {
+      // Captured before the flush wait: a socket that drops DURING the wait
+      // still leaves these words on screen, and they must not be thrown away.
+      let streamed = false;
+      // readyState alone decides. The sticky broken flag also latches on a
+      // transient `error` event, and on 2026-09-25 three of eight takes skipped
+      // the flush while the machine was still receiving their audio — each one
+      // then paid for a full re-upload instead of a ~0.2 s final.
+      if (socket && socket.readyState === WS_OPEN) {
+        streamed = true;
         // Ask the bridge to commit whatever it has heard, then give it a
         // short window to send the trailing "final" before deciding the
         // stream came up empty.
         try {
           socket.send(JSON.stringify({ type: "flush" }));
           await new Promise<void>((resolve) => {
-            finalWaitersRef.current.push(resolve);
-            setTimeout(resolve, FINAL_WAIT_MS);
+            let timer = setTimeout(resolve, FINAL_WAIT_MS);
+            finalWaitersRef.current.push(() => {
+              clearTimeout(timer);
+              resolve();
+            });
+            extendFinalWaitRef.current = () => {
+              clearTimeout(timer);
+              timer = setTimeout(resolve, FALLBACK_WAIT_MS);
+            };
           });
+          extendFinalWaitRef.current = null;
           socket.send(JSON.stringify({ type: "eof" }));
         } catch {
           // Send failed mid-flush — fall through to the file below.
         }
         text = committedRef.current.trim() || null;
+      }
+      // The final never came in time, but the user already saw these words as
+      // the live partial. Send them. Falling through to the batch POST instead
+      // costs a second full upload of the take, and on a hosted workspace that
+      // endpoint is realtime-only and answers 503 — a slow wait that ends in
+      // an error instead of the text that was on screen.
+      if (streamed) {
+        const tail = partialRef.current.trim();
+        if (tail) text = text ? `${text} ${tail}` : tail;
       }
       closeSocket();
 
@@ -362,6 +402,7 @@ export function useDictation(
       // is no good message to show — the provider-not-configured case above
       // has one and says so.
     } finally {
+      extendFinalWaitRef.current = null;
       closeSocket();
       setPartial("");
       setLevel(0);

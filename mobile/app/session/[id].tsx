@@ -1,4 +1,6 @@
 import { createdSessionPrompt } from "../../src/omg/pending-session";
+import { parseOmgPromptEnvelope } from "../../src/omg/omg-prompt-envelope";
+import { archiveSession } from "../../src/omg/archiving";
 import { openingReveal } from "../../src/omg/opening-reveal";
 import { keepOpener, useTranscriptPage } from "../../src/omg/use-transcript-page";
 import { appendTranscriptDraft, INITIAL_TRANSCRIPT_ITEMS, TranscriptWindow } from "../../src/omg/transcript-items";
@@ -100,7 +102,7 @@ import { HeldQueue, type HeldRow } from "../../src/omg/held-queue";
 type SendMode = "steer" | "queue";
 
 /** An open row from GET /api/ask — the shape the web's ask center reads. */
-type AskQuestion = {
+export type AskQuestion = {
   id: string;
   question: string;
   options?: string[];
@@ -210,6 +212,8 @@ function SessionScreenContent({
   bot = null,
   onDeliver,
   initialPrompt,
+  initialAgent = null,
+  initialModel = null,
   readOnly = false,
 }: {
   sessionId: string | null;
@@ -229,6 +233,13 @@ function SessionScreenContent({
   screenKey?: string;
   /** The first row to show before the machine has any transcript to page. */
   initialPrompt?: string;
+  /**
+   * The agent and model the composer launched with. The header draws them
+   * until the session row arrives, so a new conversation opens with its own
+   * face and model line instead of swapping them in a second later.
+   */
+  initialAgent?: string | null;
+  initialModel?: string | null;
   /**
    * Present only for a bot's own conversation. Swaps the header identity for
    * the bot's face and name, hides fork/close/continue (a bot session never
@@ -308,7 +319,11 @@ function SessionScreenContent({
    * `data` memo), the same row it lands in once it is done.
    */
   const [streamThought, setStreamThought] = useState("");
-  const [busy, setBusy] = useState(false);
+  // A conversation that was just launched is working from its first frame: the
+  // machine starts the turn as it creates the session. Starting idle drew
+  // "Message" and no working row, then flipped both once the list or the
+  // socket reported busy. Either of those still has the last word.
+  const [busy, setBusy] = useState(!!initialPrompt && !!initialAgent);
   const headerActivity = useSessionActivity(busy);
   /**
    * HELD SENDS. A queue-mode send while the agent is busy is kept on the
@@ -686,9 +701,17 @@ function SessionScreenContent({
    */
   const touchingRef = useRef(false);
 
-  const firstUserText = messages.find((m) => m.role === "user" && m.text)?.text?.trim();
+  // The machine's copy of the first message carries the launch envelope. The
+  // title falls back to it until the session row loads, and must show the
+  // person's words, not "=== omg.dev RUNTIME CONTRACT".
+  const firstUserRaw = messages.find((m) => m.role === "user" && m.text)?.text ?? "";
+  const firstUserText = (parseOmgPromptEnvelope(firstUserRaw)?.task ?? firstUserRaw).trim() || undefined;
   const title = sessionInfo?.title ?? firstUserText ?? "Session";
-  const agentLabel = sessionInfo?.agent ?? "omg";
+  const agentLabel = sessionInfo?.agent ?? initialAgent ?? "omg";
+  // While the session row is unknown, a launched conversation keeps its model
+  // line: the chosen model, or an empty line of the same height when the box
+  // picks the default. The title then does not jump up and back down.
+  const headerModel = sessionInfo ? sessionInfo.model : initialPrompt && initialAgent ? (initialModel ?? " ") : null;
 
   // Header facts (title, agent) come from the session list, not the
   // transcript. peekSessions paints a cached answer instantly; listSessions
@@ -727,6 +750,10 @@ function SessionScreenContent({
          * this one lookup rather than from a failed send.
          */
         setLive(false);
+        // An ended session is not working. A just-launched conversation
+        // starts busy (see `busy`), and this path is the one that has to take
+        // that back when the socket never reports a turn.
+        if (!socketBusySeen.current) setBusy(false);
         const resumable = await client.transport
           .request<{ sessions?: { sessionId: string; title?: string; lastUserText?: string; agent?: string; model?: string | null }[] }>(
             "/api/sessions/resumable?limit=50",
@@ -775,16 +802,29 @@ function SessionScreenContent({
                * pure, namespace-marked no-op for every non-bot message.
                */
               const echoText = stripBotLaunchEnvelope(event.message.text ?? "");
-              const confirmed = prev.find((m) => isOptimisticId(m.id) && m.text === echoText);
+              /*
+               * The opener shown for a just-created session (`local-create-*`)
+               * is the bare prompt, but the server's copy of that first user
+               * message can carry more (the omg.dev instructions chip rides on
+               * it). An exact match missed it and the prompt showed twice in
+               * onboarding's chat card (2026-09-25). A user message that
+               * contains the opener's words is that opener arriving.
+               */
+              const isEcho = (m: Entry) =>
+                isOptimisticId(m.id) &&
+                (m.text === echoText ||
+                  (String(m.id).startsWith("local-create-") &&
+                    event.message.role === "user" &&
+                    !!m.text?.trim() &&
+                    echoText.includes(m.text.trim())));
+              const confirmed = prev.find(isEcho);
               // The echo keeps the optimistic row's key (see Entry.localKey), so
               // the list sees one row settling rather than one leaving and one
               // arriving — and it is NOT marked fresh, for the same reason.
               const incoming: Entry = confirmed
                 ? { ...event.message, queued: undefined, localKey: confirmed.id ?? undefined }
                 : event.message;
-              const withoutOptimistic = prev.filter(
-                (m) => !(isOptimisticId(m.id) && m.text === echoText),
-              );
+              const withoutOptimistic = prev.filter((m) => !isEcho(m));
               if (incoming.id && !confirmed) liveKeysRef.current.add(incoming.id);
               if (incoming.id && withoutOptimistic.some((m) => m.id === incoming.id)) {
                 return withoutOptimistic.map((m) => (m.id === incoming.id ? incoming : m));
@@ -1398,18 +1438,20 @@ function SessionScreenContent({
         text: "Archive",
         style: "destructive",
         onPress: () => {
-          void (async () => {
-            try {
-              await client.transport.request(`/api/sessions/${encodeURIComponent(id)}/close`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ source: "session_menu" }),
-              });
-              router.back();
-            } catch (e) {
-              setError(e instanceof Error ? e.message : String(e));
-            }
-          })();
+          // Leave at once. Waiting for the close kept the archived chat on
+          // screen for the whole round trip. Home already leaves the row out
+          // (archiving.ts); a close the machine refuses puts it back there,
+          // and this screen is gone by then, so the refusal is an alert.
+          router.back();
+          void archiveSession(id, () =>
+            client.transport.request(`/api/sessions/${encodeURIComponent(id)}/close`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ source: "session_menu" }),
+            }),
+          ).catch((e) => {
+            Alert.alert("Couldn't archive the session", e instanceof Error ? e.message : String(e));
+          });
         },
       },
     ]);
@@ -1755,15 +1797,15 @@ function SessionScreenContent({
             activity={headerActivity}
             style={{ ...type.subhead, fontWeight: "600", color: colors.text }}
           />
-          {dropped || sessionInfo?.model ? (
+          {dropped || headerModel ? (
             <Text numberOfLines={1} style={{ ...type.caption, color: colors.textSecondary }}>
-              {dropped ? "Reconnecting…" : sessionInfo?.model}
+              {dropped ? "Reconnecting…" : headerModel}
             </Text>
           ) : null}
         </View>
       </View>
     ),
-    [agentLabel, bot, colors, dropped, headerActivity, sessionInfo?.model, space.sm, title, type],
+    [agentLabel, bot, colors, dropped, headerActivity, headerModel, space.sm, title, type],
   );
 
   /**
@@ -2073,7 +2115,6 @@ function SessionScreenContent({
         ListFooterComponent={
           <View>
             <View onLayout={(event) => setFooterHeight(event.nativeEvent.layout.height)}>
-              {thinking ? bot ? <BotWorkingIndicator bot={bot} /> : <ThinkingPill /> : null}
               {/* THINGS THE AGENT IS WAITING ON, AT THE END OF THE STREAM.
                   A website login request and an ask-user question are events
                   in the conversation, so they belong where the conversation
@@ -2083,7 +2124,7 @@ function SessionScreenContent({
                   with the rest, and the composer stays a composer. The
                   transcript reserves this footer's measured height, so a card
                   appearing does not hide the message above it. */}
-              <View style={{ gap: space.sm, paddingTop: space.md }}>
+              <View style={{ gap: space.sm }}>
                 <BrowserLoginCard sessionId={id ?? null} />
                 {asks.map((q) => (
                   <QuestionCard
@@ -2104,6 +2145,9 @@ function SessionScreenContent({
                   />
                 ) : null}
               </View>
+              {/* The live "Working" line stays the last thing in the stream.
+                  Under it, a card sat detached from the messages it answers. */}
+              {thinking ? bot ? <BotWorkingIndicator bot={bot} /> : <ThinkingPill /> : null}
             </View>
             <View style={{ height: replySpace }} />
           </View>
@@ -2656,7 +2700,7 @@ function SessionScreenContent({
  * Used for a native prompt from the transcript socket and for an ask-user
  * question from /api/ask alike.
  */
-function QuestionCard({
+export function QuestionCard({
   question,
   options,
   onAnswer,

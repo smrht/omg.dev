@@ -2,6 +2,81 @@
 
 Recent product updates and deployment notes.
 
+## September 28, 2026 - `omg update` restarts the service (v0.6.138)
+
+- `omg update` now restarts the running service after it installs a release, also on an omg.dev Computer. Before, it printed "Restarting the service…" and the old version kept running.
+- `omg update` waits for the new service and reports the version it runs. It fails with an error when the old version is still running.
+- `omg update` also restarts a service that runs an older version than the one installed on disk.
+- Threads: people chat together, and omg joins when someone writes @omg. Pull down on the session list to start a thread on iOS and on a touch screen on the web.
+- A session link in a message shows as a tag with the agent icon, the session title and the project.
+- On the iOS village widget, a tap on a villager opens that villager's session.
+
+## September 28, 2026 - Agents make images and videos (v0.6.137)
+
+- The Computer agent can make images and short videos with four new tools: `omg_generate_image`, `omg_generate_video`, `omg_media_job` and `omg_media_models`. Each job is paid from your omg credits at the provider price.
+- The default image model is Recraft V4.1 Flash. Posters and other images with much text use GPT Image 2.5 Flare. The default video is Seedance 1.5 Pro Fast, 5 seconds at 720p.
+- The agent checks the price before each job. One job can cost at most $1, and one day at most $5.
+- Downloaded videos are saved with the index first, so they play on iPhone.
+- A short session id in a message, such as `228efabd`, opens that session on web and iOS. When the title is known, the link shows the session title.
+
+## September 27, 2026 - Phone app previews come first (v0.6.136)
+
+- On a new user's first task, a phone app request now starts the Expo preview before the agent writes any app code, also when the request includes a design to match. The preview card appears early and follows each edit.
+- Agents on models that cannot see images no longer try to download or inspect a linked design image. They build from the words in the request.
+
+## September 27, 2026 - First tasks show a preview first (v0.6.135)
+
+- A new user's first task shows a first version within about five minutes, whatever they asked for. Before, only the "Build an app" card did, and a typed request could run for over an hour before any preview.
+- The same rules apply when the user stops the first task and types a new one.
+- Agents on models that cannot see images check the page text instead of taking screenshots they cannot read.
+
+## September 27, 2026 - No QR code on a phone (v0.6.134)
+
+- On a phone, the open Expo preview card shows "Need Expo Go? Get it on Google Play" (the App Store on iPhone and iPad) instead of a QR code. A phone cannot scan its own screen. A computer still shows the QR code.
+- When the agent makes a preview card, it says the preview is ready and points to the card. It no longer pastes the long exps:// link that the card already shows.
+- The iPhone "Build an app" card asks for "a preview I can open on my phone".
+
+## September 27, 2026 - Less text on the preview card (v0.6.133)
+
+- The open Expo preview card shows the QR code and one line: "Scan with your phone camera to open in Expo Go." "Expo Go" links to the App Store or Google Play for your phone.
+- The numbered steps and the first-load note are gone. "Private to you" moved behind a small info icon. The links are one row: "Web preview · New tab".
+- The iPhone card shows one line, "Need Expo Go? Get it on the App Store", and a "Web preview · Safari" row.
+
+## September 27, 2026 - A smaller preview card (v0.6.132)
+
+- The Expo preview card is one line on a phone: the app name and "Open in Expo Go". Tap the name to see the QR code, the steps and "Open web preview". On a computer the card starts open, because you scan the QR code there. The card remembers if you opened or closed it.
+- The iPhone app shows the same one-line card.
+- An app name with "&" shows as "&", not "&amp;".
+
+## September 26, 2026 - Faster first mobile apps (v0.6.131)
+
+- New Expo apps store their data on the phone. The first screen works in Expo Go at once, with no backend to deploy and no sign-in errors.
+- A new Expo project comes with its packages installed, and the agent sends the Expo Go link before it writes the app.
+- A working agent's row now reads "Working for 9m 27s · Writing code". The time is for the whole run.
+- On iPhone, the "Build an app" card asks for an Expo app and an early Expo Go link.
+
+## September 26, 2026 - The first task shows what it is doing (v0.6.130)
+
+- While an agent works, its row says what it is doing, such as "Writing code · 4m 10s" or "Deploying · 1m". Before, a new user could see only "Worked for 11m" and dots.
+- A new preview card appears when the preview has started. Before, an Expo preview said "Stopped: the development server is not running" while it was still being built.
+- New Expo apps show a first working version sooner, and their data works on the phone without sign-in.
+- Dictation finishes a take from the Computer's own copy of the audio, and shows when the hosted relay is finalizing.
+
+## September 25, 2026 - One typing indicator (v0.6.129)
+
+- A live reply shows one row of typing dots. Before, a reply that was still writing its first paragraph showed two.
+- On iPhone, a new account that already picked its first task on the web is not shown the task cards again.
+- Dictation sends the words on screen when the final transcript is late.
+
+## September 25, 2026 - DeepSeek replies stop rewriting themselves (v0.6.128)
+
+- Live replies from DeepSeek and other OpenCode models no longer replace themselves while they stream. The model's reasoning now shows as a thought, and the answer text stays in place.
+- A steered message keeps its place in the list, and a steer shows the whole reply.
+- A queued message shows as sent at once.
+- The login card goes away once the chat says "Signed in".
+- On the web, each group in the updates list has its own Triage & execute action on hover.
+- On iPhone, new accounts pick a first task from cards and answer three quick questions. You can also share a link from any app to start a session.
+
 ## September 25, 2026 - Session titles that name the task (v0.6.127)
 
 - New sessions get a title that says what the task is. Before, the title model sometimes did the task instead, and a session could be titled with an invented error message or with the model's own instructions.

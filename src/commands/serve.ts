@@ -19,7 +19,23 @@ import { PATHS, appVersion, installInfo, localServeBaseUrl } from "../config.ts"
 import { desktopRuntimeReadyPayload } from "../desktop-parent.ts";
 import { handleServerAccessRequest } from "../server-access.ts";
 import { CloudAccountError, createCloudAccount } from "../cloud-account.ts";
-import { generateSessionTitle } from "../session-auto-title.ts";
+import { generateSessionTitle, omgChatCompletionsEndpoint } from "../session-auto-title.ts";
+import {
+  answerMention,
+  appendThreadMessage,
+  bridgeTaskCompletion,
+  isThread,
+  listThreads,
+  mentionsOmg,
+  readThreadMessages,
+  startThread,
+  summarizeThread,
+  threadAuthor,
+  threadParticipantId,
+  threadTasks,
+  threadUpdate,
+  type ThreadDeps,
+} from "../threads.ts";
 import { buildContinueSessionPrompt } from "../session-continue-prompt.ts";
 import { regenerateSessionTitle } from "../session-title-regenerate.ts";
 import { hasHostedOmgAiProxy, hasOmgProviderAccess } from "../omg-provider.ts";
@@ -102,7 +118,7 @@ import { createRole, deleteRole, getRole, listRoles, roleEgress, roleForUser, ro
 import { DEFAULT_ALLOW_HOSTS, startEgressProxy, type EgressProxy } from "../sandbox/egress-proxy.ts";
 import { sessionToken, verifySessionToken, boxSecretMaterial } from "../policy/session-token.ts";
 import * as pwaBootLog from "../pwa-boot-log.ts";
-import { botRuntimeContract, shortSessionId } from "../omg-capabilities.ts";
+import { botRuntimeContract, modelSeesImages, shortSessionId, withFirstRunEnvelope } from "../omg-capabilities.ts";
 import {
   getCachedResumableSession,
   queryHistoricalCache,
@@ -245,6 +261,7 @@ import {
   ensureBotConversation,
   ensureConversationHuman,
   getConversation,
+  threadForTaskSession,
   leaveConversationParticipant,
   replaceConversationPrimaryRuntime,
   upsertConversationParticipant,
@@ -499,9 +516,10 @@ import {
   voiceSetupInfo,
   sttStreamingAvailable,
   openSttStream,
+  sttBatchAvailable,
   type VoiceSettings,
-  type SttStreamBridge,
 } from "../voice-providers.ts";
+import { SttStreamTake } from "../stt-stream-take.ts";
 import {
   codingAgentHasInstaller,
   isCodingAgentKind,
@@ -818,7 +836,7 @@ import {
   updateHeldMessage,
   takeUndeliveredQueue,
 } from "../sendq.ts";
-import { startFleetWatcher } from "../voice-bus.ts";
+import { startFleetWatcher, subscribeFleet } from "../voice-bus.ts";
 import { startSessionPushBridge } from "../session-push.ts";
 
 const PORT = Number(process.env.LFG_PORT ?? process.env.PORT ?? 8766);
@@ -1228,6 +1246,159 @@ function renderReportHtml(raw: string): string {
 }
 
 // ---------- legacy: pre-agents flat reports ----------
+
+/** Model used for a thread's quick @omg answers. */
+const THREAD_REPLY_MODEL = "anthropic/claude-sonnet-4.6";
+
+const threadDeps: ThreadDeps = {
+  complete: async (system, user) => {
+    const endpoint = omgChatCompletionsEndpoint();
+    if (!endpoint) return null;
+    const response = await fetch(endpoint.url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(endpoint.token ? { Authorization: `Bearer ${endpoint.token}` } : {}),
+      },
+      body: JSON.stringify({
+        model: THREAD_REPLY_MODEL,
+        max_tokens: 900,
+        temperature: 0.3,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+      }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) return null;
+    const body = await response.json().catch(() => null) as { choices?: Array<{ message?: { content?: unknown } }> } | null;
+    const content = body?.choices?.[0]?.message?.content;
+    return typeof content === "string" ? content : null;
+  },
+  // Through the normal creation route, so a task gets every rule a session
+  // started from the composer gets: admission, worktree, user tag, title.
+  startTask: async ({ prompt, title, cwd, user }) => {
+    // Settings' "Default agent and model". The creation route picks the agent
+    // from it on its own, but the model is applied by the clients, so a task
+    // with no client has to pass the pair itself.
+    const { defaultAgent, defaultModel } = getGlobalSettingsSync();
+    const agentChoice = defaultAgent?.trim()
+      ? { agent: defaultAgent.trim(), ...(defaultModel?.trim() ? { model: defaultModel.trim() } : {}) }
+      : {};
+    const response = await fetch(
+      `http://127.0.0.1:${PORT}/api/sessions/${cwd ? "new" : "new-unassigned"}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt,
+          title,
+          ...agentChoice,
+          ...(cwd ? { cwd } : {}),
+          ...(user.includes("@") ? { user } : {}),
+        }),
+      },
+    );
+    const body = await response.json().catch(() => null) as { sessionId?: string; error?: string } | null;
+    if (!response.ok || !body?.sessionId) throw new Error(body?.error || `session start failed (${response.status})`);
+    return body.sessionId;
+  },
+};
+
+function threadViewer(req: Request, requested: string | null | undefined): { identity: string; name: string | null } {
+  const identity = botViewerFromRequest(req, requested).identity;
+  const profile = userRoster().find((row) => row.email.toLowerCase() === identity.toLowerCase());
+  return { identity, name: profile?.name || null };
+}
+
+async function handleThreadRequest(req: Request, url: URL, path: string): Promise<Response | null> {
+  if (path === "/api/threads" && req.method === "GET") return json({ threads: listThreads() });
+  if (path === "/api/threads" && req.method === "POST") {
+    const body = (await req.json().catch(() => null)) as { text?: unknown; title?: unknown; user?: unknown } | null;
+    const viewer = threadViewer(req, typeof body?.user === "string" ? body.user : url.searchParams.get("user"));
+    const thread = startThread({ ...viewer, title: typeof body?.title === "string" ? body.title : null });
+    const text = typeof body?.text === "string" ? body.text.trim() : "";
+    if (text) postThreadMessage(thread.id, text, viewer);
+    return json({ thread: summarizeThread(thread) });
+  }
+  const one = path.match(/^\/api\/threads\/([0-9a-f-]{36})$/i);
+  const messages = path.match(/^\/api\/threads\/([0-9a-f-]{36})\/messages$/i);
+  const id = one?.[1] ?? messages?.[1];
+  if (!id) return null;
+  const conversation = getConversation(id);
+  if (!isThread(conversation)) return err(404, "thread not found");
+  if (one && req.method === "GET") {
+    const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit")) || 200));
+    const live = await listSessionsCached().catch(() => []);
+    const viewer = threadViewer(req, url.searchParams.get("user"));
+    return json({
+      // Which author is the caller, so a client can put their own bubbles on the right.
+      me: threadParticipantId(viewer.identity),
+      thread: summarizeThread(conversation),
+      participants: conversation.participants,
+      messages: readThreadMessages(id, limit),
+      tasks: threadTasks(conversation, live),
+    });
+  }
+  if (one && req.method === "PATCH") {
+    const body = (await req.json().catch(() => null)) as { title?: unknown; projectCwd?: unknown; archived?: unknown } | null;
+    let project: { cwd: string; name: string } | null | undefined;
+    if (body?.projectCwd === null) project = null;
+    else if (typeof body?.projectCwd === "string") {
+      const repo = (await listRepos()).find((row) => row.cwd === body.projectCwd);
+      if (!repo) return err(400, "unknown project");
+      project = { cwd: repo.cwd, name: repo.project || repo.name };
+    }
+    const updated = threadUpdate(id, {
+      ...(typeof body?.title === "string" || body?.title === null ? { title: body.title as string | null } : {}),
+      ...(project !== undefined ? { project } : {}),
+      ...(typeof body?.archived === "boolean" ? { archived: body.archived } : {}),
+    });
+    return updated ? json({ thread: summarizeThread(updated) }) : err(404, "thread not found");
+  }
+  if (one && req.method === "DELETE") {
+    threadUpdate(id, { archived: true });
+    return json({ ok: true });
+  }
+  if (messages && req.method === "POST") {
+    const body = (await req.json().catch(() => null)) as { text?: unknown; user?: unknown; replyTo?: unknown } | null;
+    const text = typeof body?.text === "string" ? body.text.trim() : "";
+    if (!text) return err(400, "text is required");
+    const replyTo = typeof body?.replyTo === "string" && body.replyTo ? body.replyTo : null;
+    // Replies are one level deep, as in Slack: only a top-level message has them.
+    if (replyTo && !readThreadMessages(id).some((row) => row.id === replyTo && !row.replyTo)) {
+      return err(400, "replyTo must be a top-level message in this thread");
+    }
+    const viewer = threadViewer(req, typeof body?.user === "string" ? body.user : url.searchParams.get("user"));
+    return json({ message: postThreadMessage(id, text, viewer, replyTo) });
+  }
+  return err(405, "method not allowed");
+}
+
+/**
+ * Store a person's message, then let omg answer in the background if
+ * mentioned. omg answers in the replies: of this message, or of the message
+ * this one replies to.
+ */
+function postThreadMessage(
+  threadId: string,
+  text: string,
+  viewer: { identity: string; name: string | null },
+  replyTo: string | null = null,
+) {
+  const message = appendThreadMessage(threadId, {
+    author: threadAuthor(threadId, viewer.identity, viewer.name),
+    text,
+    replyTo,
+  });
+  if (mentionsOmg(text)) {
+    void answerMention(threadId, text, viewer.identity, threadDeps, replyTo ?? message.id).catch((error) => {
+      console.error(`[threads] @omg failed in ${threadId}:`, error);
+    });
+  }
+  return message;
+}
 
 async function listRepos() {
   return listConfiguredRepos({ reposRoot: REPOS_ROOT, selfRepo: SELF_REPO });
@@ -3936,7 +4107,7 @@ const termBridges = new WeakMap<object, PtyBridge>();
 // it down. Tagged in ws.data so open/message/close can tell it apart from the
 // terminal and browser-login sockets that share these handlers.
 type SttStreamSocketData = { sttStream: true };
-const sttBridges = new WeakMap<object, SttStreamBridge>();
+const sttTakes = new WeakMap<object, SttStreamTake>();
 
 // ---- computer (remote desktop) sockets ----
 // The Computer tab holds a websocket to /api/computer carrying raw RFB in both
@@ -4124,16 +4295,24 @@ export async function cmdServe() {
               ws.send(JSON.stringify(o));
             } catch {}
           };
-          const bridge = openSttStream({
-            onPartial: (text) => send({ type: "partial", text }),
-            onFinal: (text) => send({ type: "final", text }),
-            onClose: () => {
+          const take = new SttStreamTake({
+            send,
+            closeClient: () => {
               try {
                 ws.close();
               } catch {}
             },
+            openBridge: openSttStream,
+            batchAvailable: sttBatchAvailable,
+            transcribe: async (wav) => {
+              const r = await transcribeStt(wav);
+              if (!r.ok) return null;
+              const body = (await r.json().catch(() => null)) as { text?: string } | null;
+              return typeof body?.text === "string" ? body.text : null;
+            },
+            log: (line) => console.log(line),
           });
-          if (!bridge) {
+          if (!take.start()) {
             // Documented fallback (see openSttStream): no realtime-capable
             // provider is configured on this machine. This used to close with
             // zero trace anywhere — the exact condition a dictation bug report
@@ -4144,7 +4323,7 @@ export async function cmdServe() {
             } catch {}
             return;
           }
-          sttBridges.set(ws, bridge);
+          sttTakes.set(ws, take);
           return;
         }
         if (!("sessionName" in ws.data)) {
@@ -4201,16 +4380,16 @@ export async function cmdServe() {
         }
         // Streaming-STT bridge: binary frames are raw 16 kHz PCM; text frames are
         // the worker's {"type":"flush"|"eof"} control messages.
-        const sttBridge = sttBridges.get(ws);
-        if (sttBridge) {
+        const sttTake = sttTakes.get(ws);
+        if (sttTake) {
           if (typeof message === "string") {
             try {
               const ctrl = JSON.parse(message) as { type?: string };
-              if (ctrl.type === "flush") sttBridge.flush();
-              else if (ctrl.type === "eof") sttBridge.close();
+              if (ctrl.type === "flush") sttTake.flush();
+              else if (ctrl.type === "eof") sttTake.close();
             } catch {}
           } else {
-            sttBridge.pushPcm(message as Uint8Array);
+            sttTake.audio(message as Uint8Array);
           }
           return;
         }
@@ -4251,10 +4430,10 @@ export async function cmdServe() {
           return;
         }
         // Streaming-STT bridge: tear the upstream realtime-STT socket down.
-        const sttBridge = sttBridges.get(ws);
-        if (sttBridge) {
-          sttBridges.delete(ws);
-          sttBridge.close();
+        const sttTake = sttTakes.get(ws);
+        if (sttTake) {
+          sttTakes.delete(ws);
+          sttTake.close();
           return;
         }
         const bridge = termBridges.get(ws);
@@ -5147,7 +5326,14 @@ a{color:#60a5fa}
       if (path === "/api/voice/stt" && req.method === "POST") {
         const audio = await req.arrayBuffer();
         if (!audio.byteLength) return err(400, "empty audio");
-        return transcribeStt(audio);
+        // The slow path: the client re-uploaded a whole take. Logged so a slow
+        // dictation shows up next to its stt-stream take line.
+        const started = performance.now();
+        const response = await transcribeStt(audio);
+        console.log(
+          `[voice] stt batch upload: ${audio.byteLength}B -> ${response.status} in ${Math.round(performance.now() - started)}ms`,
+        );
+        return response;
       }
 
       // ---- voice provider config: which STT provider the dictation proxies
@@ -5415,6 +5601,20 @@ a{color:#60a5fa}
         const { handleCloudAppsRequest } = await import("../cloud-apps.ts");
         const handled = await handleCloudAppsRequest(req, url, {
           getAccessToken: () => cloudAccount.getAccessToken(),
+        });
+        if (handled) return handled;
+      }
+      // Agent media generation billed to omg credits (src/media-generation.ts).
+      if (
+        path === "/api/media/models" ||
+        path === "/api/media/generate" ||
+        path.startsWith("/api/media/jobs/")
+      ) {
+        // A video job may wait up to 300 s, beyond the 240 s idle timeout.
+        server.timeout(req, 360);
+        const { handleMediaRequest } = await import("../media-generation.ts");
+        const handled = await handleMediaRequest(req, url, {
+          spendPath: join(PATHS.data, "media-spend.json"),
         });
         if (handled) return handled;
       }
@@ -6382,6 +6582,12 @@ a{color:#60a5fa}
           if (error instanceof BotSelfManagementError) return err(error.status, error.message);
           throw error;
         }
+      }
+
+      // ---- threads: people-first chat, see src/threads.ts ----
+      if (path === "/api/threads" || path.startsWith("/api/threads/")) {
+        const handled = await handleThreadRequest(req, url, path);
+        if (handled) return handled;
       }
 
       // ---- persistent bots ----
@@ -8403,7 +8609,11 @@ a{color:#60a5fa}
         const install = installInfo();
         if (req.method === "GET") {
           if (url.searchParams.get("ready") === "1") {
-            return json(desktopRuntimeReadyPayload(SERVER_INSTANCE_ID));
+            // `version` is what this process EXECUTES, not what is on disk.
+            // `omg update` compares it with the disk version to decide whether
+            // the running service still needs a restart, and to prove one
+            // happened.
+            return json({ ...desktopRuntimeReadyPayload(SERVER_INSTANCE_ID), version: appVersion() });
           }
           // A manual "Check" click forces a fresh lookup that bypasses the
           // 5-minute release-tag cache; the passive on-load check stays cached.
@@ -9267,6 +9477,8 @@ a{color:#60a5fa}
           spawnedBy?: string;
           /** Start even though the live-agent cap is full — self-hosted only. */
           overLimit?: boolean;
+          /** A new user's first task: wrap it in the first-run rules (withFirstRunEnvelope). */
+          firstRun?: boolean;
           /** Role the session runs as at the MCP endpoints. Missing = owner. */
           role?: string;
           agent?: "claude" | "codex" | "aisdk" | "codex-aisdk" | "opencode" | "omg" | "jcode" | "grok" | "cursor" | "copilot" | "hermes" | "pi";
@@ -9470,6 +9682,9 @@ a{color:#60a5fa}
         const cwd = cwdResolved.cwd;
         const worktree = cwdResolved.worktree;
         let prompt = body?.prompt;
+        if (body?.firstRun === true && spawnedBy !== "subagent") {
+          prompt = withFirstRunEnvelope(prompt, { seesImages: modelSeesImages(model ?? opencodeDefault) });
+        }
         if (spawnedBy === "subagent") {
           prompt = withOmgSubagentContract(prompt, {
             parentSessionId: parent?.sessionId ?? parent?.nativeSessionId ?? parentId,
@@ -11854,6 +12069,13 @@ a{color:#60a5fa}
   // Bridge those same completions to Web Push, so an installed PWA hears
   // about a landed turn with the app closed. Must follow startFleetWatcher().
   startSessionPushBridge();
+  // A task started from a thread posts each finished turn back to it.
+  subscribeFleet(null, (ev) => {
+    if (ev.type !== "completed" || !threadForTaskSession(ev.sessionId)) return;
+    void listSessionsCached()
+      .then((rows) => bridgeTaskCompletion(ev.sessionId, rows.find((row) => row.sessionId === ev.sessionId) ?? null))
+      .catch((error) => console.error("[threads] task result not posted:", error));
+  });
   // Keep SQLite as the chat read model for every active session. Transcript
   // JSONL files are treated as an import source; live draft deltas stay
   // ephemeral until the provider writes the completed turn.

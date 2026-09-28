@@ -47,6 +47,65 @@ const unassignedChats: DemoSession[] = [];
  * working and two idle. The other folders hold one session each, enough to
  * populate the folder rail and to feed the Bots and Notifications screens.
  */
+/**
+ * A thread between two people, with omg's quick answer and two tasks: one
+ * waiting on a question, one finished. For the `threads` e2e plan only, like
+ * the other fixtures, so the App Store screenshots do not move.
+ */
+const threadFixture = process.env.EXPO_PUBLIC_OMG_THREADS_FIXTURE === "1";
+const DEMO_THREAD = "0d3a7c1e-0000-4000-8000-00000000abcd";
+const DEMO_TASK_ASKING = "d3a0c0de-0000-4000-8000-000000000001";
+const DEMO_TASK_DONE = "f4a1b2c3-0000-4000-8000-000000000002";
+const ME = "human:me";
+const ALEX = "human:alex";
+
+function demoThreadMessages(t: number) {
+  const msg = (id: string, ts: number, author: object, text: string, task?: object, replyTo?: string) =>
+    ({ id, threadId: DEMO_THREAD, ts, author, text, ...(task ? { task } : {}), ...(replyTo ? { replyTo } : {}) });
+  const alex = { kind: "human", participantId: ALEX, name: "Alex" };
+  const me = { kind: "human", participantId: ME, name: "Demo" };
+  const omg = { kind: "omg" };
+  return [
+    msg("t1", t - 40 * MIN, alex, "Should we drop the free tier?"),
+    msg("t2", t - 39 * MIN, me, "Keep it, but cap it at 3 tasks a day."),
+    msg("t3", t - 38 * MIN, alex, "@omg what do Linear and Vercel charge for their paid tiers?"),
+    msg("t4", t - 38 * MIN, omg, "Linear starts at $8 per seat a month. Vercel Pro is $20 per member a month.", undefined, "t3"),
+    msg("t5", t - 21 * MIN, me, "@omg update the pricing page with the cap"),
+    msg("t6", t - 20 * MIN, omg, "Started a task in web.", { sessionId: DEMO_TASK_ASKING, event: "started", title: "Cap the free tier on the pricing page", project: "web" }, "t5"),
+    msg("t7", t - 15 * MIN, alex, "@omg also fix the typo in the signup email"),
+    msg("t8", t - 14 * MIN, omg, "Started a task in web.", { sessionId: DEMO_TASK_DONE, event: "started", title: "Fix the signup email typo", project: "web" }, "t7"),
+    msg("t9", t - 2 * MIN, omg, "Fixed \"recieve\" in the signup email. Tests pass.", { sessionId: DEMO_TASK_DONE, event: "finished", title: "Fix the signup email typo", project: "web" }, "t7"),
+  ];
+}
+
+function demoThreadSummary() {
+  const t = now();
+  const messages = demoThreadMessages(t);
+  const last = messages.at(-1)!;
+  return {
+    id: DEMO_THREAD, title: "Pricing ideas", createdAt: t - 40 * MIN, updatedAt: last.ts,
+    project: { cwd: "/home/user/web", name: "web" },
+    lastMessage: { author: last.author, text: last.text, ts: last.ts },
+  };
+}
+
+function demoThreadDetail() {
+  const t = now();
+  return {
+    me: ME,
+    thread: demoThreadSummary(),
+    participants: [
+      { id: ME, kind: "human", role: "owner", display: { name: "Demo", fallback: "Demo" } },
+      { id: ALEX, kind: "human", role: "member", display: { name: "Alex", fallback: "Alex" } },
+    ],
+    messages: demoThreadMessages(t),
+    tasks: [
+      { sessionId: DEMO_TASK_ASKING, title: "Cap the free tier on the pricing page", project: "web", busy: false, status: "ok", ended: false },
+      { sessionId: DEMO_TASK_DONE, title: "Fix the signup email typo", project: "web", busy: false, status: "ok", ended: true },
+    ],
+  };
+}
+
 function demoSessions(): DemoSession[] {
   const t = now();
   const sessions: DemoSession[] = [
@@ -186,6 +245,12 @@ function demoSessions(): DemoSession[] {
       busy: i % 3 === 0, lastActivityAt: t - (i + 30) * MIN,
     });
   }
+  if (sessionRefFixture) sessions.push({
+    ...sessions[0], sessionId: SESSION_REF_TARGET, tmuxTarget: "omg-demo:session-ref",
+    title: "Fix the attribution bug", lastUserText: "Fix the attribution bug.",
+    busy: false, botId: undefined, lastActivityAt: t - 40 * MIN,
+    last: { role: "assistant", text: "Attribution fix is merged.", ts: t - 40 * MIN },
+  });
   return [...unassignedChats, ...sessions];
 }
 
@@ -201,6 +266,14 @@ const videoFixture = process.env.EXPO_PUBLIC_OMG_VIDEO_FIXTURE === "1";
  * is not part of that story.
  */
 const inlineCardFixture = process.env.EXPO_PUBLIC_OMG_INLINE_CARDS_FIXTURE === "1";
+/**
+ * A reply that cites another session as a bare short id in inline code, the
+ * way agents do, for the `session-ref` e2e plan. The cited session needs a
+ * real UUID id, because only a short id of that shape becomes a link. Off by
+ * default so the App Store capture does not change.
+ */
+const sessionRefFixture = process.env.EXPO_PUBLIC_OMG_SESSION_REF_FIXTURE === "1";
+const SESSION_REF_TARGET = "5a1d0c3e-7b2f-4c1a-9e3d-2f6b8a4c7d10";
 /** The one session the inline-card fixture attaches everything to. */
 const INLINE_CARD_SESSION = "demo-rate-limiter";
 /** Exactly the wrapper src/commands/serve.ts sends after a transfer. */
@@ -240,6 +313,12 @@ function demoMessages(sessionId: string): OmgMessage[] {
     }));
   }
 
+  if (sessionRefFixture && sessionId === SESSION_REF_TARGET) {
+    return [
+      { id: "r1", role: "user", kind: "text", text: "Fix the attribution bug.", ts: t - 50 * MIN },
+      { id: "r2", role: "assistant", kind: "text", text: "Attribution fix is merged. StartTrial now sends the click ids.", ts: t - 40 * MIN },
+    ];
+  }
   if (sessionId === "demo-rate-limiter") {
     return [
       { id: "m1", role: "user", kind: "text", text: "Switch the rate limiter from a fixed window to a sliding one. Keep the same per-key limits.", ts: t - 22 * MIN },
@@ -247,6 +326,9 @@ function demoMessages(sessionId: string): OmgMessage[] {
       { id: "m3", role: "assistant", kind: "text", text: "Replaced the fixed-window counter in `limiter.ts` with a sliding log keyed by client id. Added a test that fires two bursts across a window boundary and asserts the second is throttled.", ts: t - 12 * MIN },
       { id: "m4", role: "user", kind: "text", text: "Nice. Run the suite and push if it's green.", ts: t - 6 * MIN },
       { id: "m5", role: "assistant", kind: "text", text: "Running the limiter tests…", ts: t - 20_000, pending: true },
+      ...(sessionRefFixture
+        ? [{ id: "m-ref", role: "assistant", kind: "text", text: `The attribution follow-up is in session \`${SESSION_REF_TARGET.slice(0, 8)}\`. The merge commit is \`02b282843\`.`, ts: t - 15_000 } as OmgMessage]
+        : []),
       ...(inlineCardFixture
         ? [{ id: "m6", role: "user", kind: "text", text: TRANSFER_NOTICE, ts: t - 10_000 } as OmgMessage]
         : []),
@@ -263,6 +345,12 @@ function demoAsk() {
   const t = now();
   return {
     questions: [
+      ...(threadFixture
+        ? [{
+            id: "q-thread", question: "The new free tier needs a Stripe price. Create it in live mode?",
+            options: ["Yes, live", "Test mode only"], sessionId: DEMO_TASK_ASKING, agent: "claude", createdAt: t - 2 * MIN,
+          }]
+        : []),
       ...(inlineCardFixture
         ? [{
             id: "q0", question: "The invoice page needs a product-owner call: cancel box-1 now, or wait for the billing cycle?",
@@ -418,8 +506,12 @@ function answer(path: string): unknown | null {
       { ...demoArtifact, id: "demo-hidden-file", kind: "file", title: "Hidden file output", name: "Hidden file output", url: "/api/artifacts/demo-hidden-file" }], total: 4 };
   }
   if (openingFixture && clean === "/api/sessions/demo-created/messages") {
-    return { messages: [{ id: "demo-created-prompt", role: "user", text: createdPrompt },
-      { id: "demo-created-reply", role: "assistant", text: "Your new conversation is ready." }] };
+    // Wrapped the way the machine wraps every launch (tmux.ts launchEnvelope),
+    // so the opening checks see the real first row, instructions chip included.
+    const launched = `=== omg.dev RUNTIME CONTRACT (capability version demo) ===\nYou are an omg.dev-managed coding agent.\n=== END omg.dev RUNTIME CONTRACT ===\n\n=== USER TASK ===\n${createdPrompt}`;
+    // Stamped like the machine's rows, so the transcript's time stamp holds.
+    return { messages: [{ id: "demo-created-prompt", role: "user", text: launched, ts: createdAt },
+      { id: "demo-created-reply", role: "assistant", text: "Your new conversation is ready.", ts: createdAt + 1000 }] };
   }
   if (clean === "/api/bootstrap") return demoBootstrap();
   // The Settings software row reads this. Without an answer the row is absent,
@@ -439,6 +531,8 @@ function answer(path: string): unknown | null {
     };
   }
   if (clean === "/api/sessions") return { sessions: demoSessions() };
+  if (clean === "/api/threads") return { threads: threadFixture ? [demoThreadSummary()] : [] };
+  if (threadFixture && clean === `/api/threads/${DEMO_THREAD}`) return demoThreadDetail();
   if (clean === "/api/ask") return demoAsk();
   if (clean.startsWith("/api/browser-login")) {
     if (!inlineCardFixture) return { requests: [], iosAvailable: false, desktopAvailable: false };
@@ -483,6 +577,7 @@ function answer(path: string): unknown | null {
 // Opt-in slow-network fixture for recorded opening/navigation checks only.
 const openingFixture = process.env.EXPO_PUBLIC_OMG_OPENING_FIXTURE === "1";
 let createdPrompt = "";
+let createdAt = 0;
 async function openingDelay(path: string) {
   if (openingFixture && /\/api\/(bootstrap|sessions)/.test(path)) {
     await new Promise(resolve => setTimeout(resolve, path === "/api/sessions/new" ? 60000 : path === "/api/bootstrap" ? 90000 : 5000));
@@ -519,9 +614,11 @@ export function getDemoTransport(): OmgTransport {
       } as unknown as Response;
     },
     async request<T>(path: string, init?: RequestInit): Promise<T> {
+      const requestedAt = Date.now();
       await openingDelay(path);
       if (openingFixture && path === "/api/sessions/new") {
         createdPrompt = JSON.parse(String(init?.body ?? "{}")).prompt ?? "";
+        createdAt = requestedAt;
         return { sessionId: "demo-created" } as T;
       }
       if (path === "/api/sessions/new-unassigned" && init?.method === "POST") {

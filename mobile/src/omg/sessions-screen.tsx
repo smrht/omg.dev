@@ -1,6 +1,7 @@
 import { useSessionStatus } from "./use-session-status";
 import { recordConnectionTiming } from "./connection-trace";
 import { startPendingSession } from "./pending-session";
+import { archiveSession as archiveSessionOnMachine, forgetArchivedSessions, useArchivingSessionIds } from "./archiving";
 import { sessionCache } from "./session-cache-store";
 import { WindowedSessionList } from "./windowed-session-list";
 /**
@@ -39,6 +40,7 @@ import {
 } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
+  Keyboard,
   LayoutAnimation,
   Platform,
   Pressable,
@@ -96,6 +98,9 @@ import { groupNodesByProject } from "./session-groups";
 import { SessionActivityPane } from "./session-activity";
 import { SessionStatusState } from "./session-status";
 import { sessionPreview } from "./session-preview";
+import { threadPullStage } from "./thread-tasks";
+import { threadPreview } from "./threads";
+import { useThreads } from "./use-threads";
 import { SubagentGroup } from "./subagent-group";
 import {
   groupHomeAutoFindings,
@@ -443,7 +448,16 @@ export function SessionsScreen({
     const saved = sessionCache.read<OmgSession[]>(rosterKey);
     return Array.isArray(saved) ? saved : [];
   };
-  const [sessions, setSessions] = useState<OmgSession[]>(cachedSessions);
+  const [listedSessions, setSessions] = useState<OmgSession[]>(cachedSessions);
+  // Sessions being archived (from a swipe here or from the session screen's
+  // own Archive) never draw, whatever a refresh returns. See archiving.ts.
+  const archivingIds = useArchivingSessionIds();
+  const sessions = useMemo(
+    () => archivingIds.size
+      ? listedSessions.filter((session) => !archivingIds.has(session.sessionId ?? ""))
+      : listedSessions,
+    [listedSessions, archivingIds],
+  );
   useLayoutEffect(() => { recordConnectionTiming("sessions.commit"); }, [sessions]);
   /**
    * HAS SESSIONS HAD ITS TURN YET — see the long note on `SESSIONS_SETTLE_TIMEOUT_MS`
@@ -471,6 +485,21 @@ export function SessionsScreen({
    * nobody asked, the answer is silence.
    */
   const [pulling, setPulling] = useState(false);
+  /**
+   * PULL DOWN PAST THE REFRESH TO START A THREAD. A short pull refreshes, as
+   * it always has. A long pull arms a new thread with a haptic tick, and
+   * releasing it opens an empty thread. Only transitions set state, so a
+   * scroll frame does not re-render the list.
+   */
+  const [threadPull, setThreadPull] = useState<0 | 1 | 2>(0);
+  const threadPullRef = useRef<0 | 1 | 2>(0);
+  const draggingRef = useRef(false);
+  const setPullStage = useCallback((stage: 0 | 1 | 2) => {
+    if (threadPullRef.current === stage) return;
+    if (stage === 2) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    threadPullRef.current = stage;
+    setThreadPull(stage);
+  }, []);
   /**
    * Which open finding is expanded to show its full reasoning. ONE at a
    * time: a finding carries several reasoning bullets and a suggestion, so
@@ -636,6 +665,7 @@ export function SessionsScreen({
     return new SessionStatusState((fresh) => {
     if (currentClient.current !== client || epoch !== sessionCache.epoch) return;
     sessionCache.write(rosterKey, fresh);
+    forgetArchivedSessions(fresh.map((session) => session.sessionId));
     const signature = sessionsSignature(fresh);
     if (signature !== sessionsSignatureRef.current) {
       sessionsSignatureRef.current = signature;
@@ -900,6 +930,13 @@ export function SessionsScreen({
       ),
     [visibleSessions, projectPicker, ready],
   );
+
+  /**
+   * THREADS ARE GLOBAL. They sit above the tasks and ignore the folder
+   * filter: a thread is a conversation between people, not work in one
+   * project, and no agent runs behind it (src/threads.ts in the lfg repo).
+   */
+  const { threads, refresh: refreshThreads, archive: archiveThread } = useThreads();
 
   /**
    * GROUPED BY FOLDER, NOT BY WORKING/IDLE.
@@ -1173,8 +1210,12 @@ export function SessionsScreen({
         body: JSON.stringify({ prompt, cwd, agent: agentPicker.agent,
           model: agentPicker.model ?? undefined, thinkingLevel: agentPicker.thinking ?? undefined,
           fastMode: agentPicker.fastMode, claudeAccountId: agentPicker.claudeAccountId }),
-      }));
+      }), { agent: agentPicker.agent, model: agentPicker.model });
     setCreateOpen(false);
+    // The Home composer stays mounted (and focused) under the pushed chat, so
+    // the keyboard would ride along and cover the new conversation's first
+    // rows. Starting a conversation is the end of typing here.
+    Keyboard.dismiss();
     const href = `/session/new?request=${pending.token}` as Href;
     if (workspace) navigateWorkspace(href);
     else router.push(href);
@@ -1257,20 +1298,32 @@ export function SessionsScreen({
    * dialog: a deliberate swipe past a threshold IS the confirmation, and an
    * archived session can be resumed.
    */
+  // On iPad the rail stays and the thread fills the pane beside it, the way a
+  // session opens there; on a phone it is a pushed screen.
+  const openThread = (href: Href) => {
+    if (workspace) navigateWorkspace(href);
+    else router.push(href);
+  };
+  const openNewThread = () => {
+    Keyboard.dismiss();
+    openThread("/thread/new" as Href);
+  };
+
   const archiveSession = useCallback(
     (sessionId: string | null) => {
       if (!client || !sessionId) return;
       // Drop the row immediately. The request is not instant, and leaving a
       // card that has just been swiped away sitting on screen until the server
-      // answers reads as the gesture having failed.
-      statusState.remove(sessionId);
+      // answers reads as the gesture having failed. archiving.ts keeps it
+      // hidden from any refresh that lands before the close does.
       void (async () => {
         try {
-          await client.transport.request(`/api/sessions/${encodeURIComponent(sessionId)}/close`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ source: "mobile_swipe_archive" }),
-              });
+          await archiveSessionOnMachine(sessionId, () =>
+            client.transport.request(`/api/sessions/${encodeURIComponent(sessionId)}/close`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ source: "mobile_swipe_archive" }),
+            }));
         } catch (e) {
           setError(e instanceof Error ? e.message : String(e));
         } finally {
@@ -1280,7 +1333,7 @@ export function SessionsScreen({
         }
       })();
     },
-    [client, statusState, load],
+    [client, load],
   );
 
   /**
@@ -1701,6 +1754,30 @@ export function SessionsScreen({
             In the iPad workspace the rail is permanent at width, and only the
             narrow layout ever covers it. */}
         <SessionActivityPane onScreen={workspace ? railOpen || (!wide && home) : paneOnScreen}>
+        {threadPull ? (
+          <View
+            pointerEvents="none"
+            testID="thread-pull-hint"
+            style={{
+              position: "absolute",
+              left: 0,
+              right: 0,
+              top: insets.top + 44 + space.sm + (folderRail ? 50 : 0) + 44,
+              alignItems: "center",
+              zIndex: 1,
+            }}
+          >
+            <Text
+              style={{
+                ...type.footnote,
+                fontWeight: threadPull === 2 ? "600" : "400",
+                color: threadPull === 2 ? colors.text : colors.textMuted,
+              }}
+            >
+              {threadPull === 2 ? "Release to start a thread" : "Pull more to start a thread"}
+            </Text>
+          </View>
+        ) : null}
         <WindowedSessionList
           style={{ flex: 1, position: "relative", zIndex: 0 }}
           /**
@@ -1733,13 +1810,28 @@ export function SessionsScreen({
           // automatic inset added the bar's height on top of that: a blank
           // band between the folder pills and the first row on iPad.
           contentInsetAdjustmentBehavior="never"
+          scrollEventThrottle={16}
+          onScrollBeginDrag={() => {
+            draggingRef.current = true;
+          }}
+          onScroll={workspace ? undefined : (event) => {
+            if (!draggingRef.current) return;
+            const pull = -event.nativeEvent.contentOffset.y;
+            setPullStage(threadPullStage(pull));
+          }}
+          onScrollEndDrag={() => {
+            draggingRef.current = false;
+            const armed = threadPullRef.current === 2;
+            setPullStage(0);
+            if (armed) openNewThread();
+          }}
           refreshControl={
             <RefreshControl
               refreshing={pulling}
               onRefresh={() => {
                 setPulling(true);
                 refreshAuto();
-                void Promise.all([probe(), load(true)]).finally(() =>
+                void Promise.all([probe(), load(true), refreshThreads()]).finally(() =>
                   setPulling(false),
                 );
               }}
@@ -1924,6 +2016,26 @@ export function SessionsScreen({
             <SessionListSkeleton style={{ paddingTop: space.xl }} />
           ) : (
             <>
+              {/* ALWAYS SHOWN, even with no threads: its "New" is the way to
+                  start the first one. On iPad it is the only way; the pull
+                  gesture is phone-only. */}
+              <View testID="threads-section" style={{ paddingBottom: space.sm }}>
+                <SectionHeader label="Threads" count={threads.length} actionLabel="New" actionAccessibilityLabel="New thread" onAction={openNewThread} />
+                {threads.map((thread) => (
+                  <SessionCard
+                    key={`thread:${thread.id}`}
+                    sessionId={thread.id}
+                    title={thread.title}
+                    subtitle={threadPreview(thread)}
+                    timestamp={relativeTime(thread.updatedAt)}
+                    hideAvatar
+                    onPress={() => openThread(`/thread/${thread.id}` as Href)}
+                    onArchive={() => archiveThread(thread.id)}
+                    animateEntry={animateEntry}
+                  />
+                ))}
+                {homeRows.length ? <SectionHeader label="Tasks" count={roots.length} /> : null}
+              </View>
               {visibleSessions.length === 0 && loading ? (
                 // First fetch on this machine, nothing on screen to disturb.
                 // Once `visibleSessions` is non-empty, RefreshControl (pull-to-refresh)
@@ -1936,6 +2048,7 @@ export function SessionsScreen({
                   detail="Start one below and it shows up here."
                 />
               ) : null}
+
 
 
             </>

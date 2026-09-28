@@ -4,7 +4,7 @@ import { DEFAULT_MAX_BOT_SCHEDULES } from "./settings.ts";
 // Bump whenever an agent-facing omg.dev capability or its operating guidance
 // changes. Managed sessions persist the value they launched with, which lets
 // the UI identify long-lived sessions whose MCP/tool catalog predates a ship.
-export const OMG_CAPABILITY_VERSION = "2026-09-23.2";
+export const OMG_CAPABILITY_VERSION = "2026-09-28.1";
 
 export const OMG_CAPABILITIES = [
   {
@@ -39,12 +39,18 @@ export const OMG_CAPABILITIES = [
     tool: "omg_expose_port",
     useWhen: "A live HTTP development server in an omg.dev Cloud Computer should appear as a preview card.",
     guidance:
-      "For web previews, start one server on 0.0.0.0 and expose its exact port. For Expo Go, choose a free Metro port and call with expoGo:true before Metro starts. In an Expo template project, start Metro with `bash scripts/start-expo-preview.sh <expoGo.proxyUrl> <port>`; elsewhere start Metro with EXPO_PACKAGER_PROXY_URL set to expoGo.proxyUrl. Then give the user expoGo.url. Do not use Expo tunnel, exp.direct, ngrok, or LAN exposure.",
+      "For web previews, start one server on 0.0.0.0 and expose its exact port. For Expo Go, choose a free Metro port and call with expoGo:true before Metro starts. In an Expo template project, start Metro with `bash scripts/start-expo-preview.sh <expoGo.proxyUrl> <port>`; elsewhere start Metro with EXPO_PACKAGER_PROXY_URL set to expoGo.proxyUrl. The omg.dev app shows expoGo.url on the preview card, with an Open in Expo Go button and a QR code. So tell the user the preview is ready and to open it from the card below, and do not paste the exps:// URL. Paste expoGo.url only where the user cannot see the card, for example a reply sent with omg_send_to_origin to a messaging channel, or when the user asks for the link. Do not use Expo tunnel, exp.direct, ngrok, or LAN exposure.",
   },
   {
     tool: "omg_display_image / omg_display_video / omg_display_file",
     useWhen: "A local screenshot, recording, or file would be useful evidence in the omg.dev transcript.",
     guidance: "Use omg_display_file for a PDF, an audio clip, a CSV, a log, or any other document. Use these to show artifacts, not to talk: communicate with the human through normal assistant messages.",
+  },
+  {
+    tool: "omg_generate_image / omg_generate_video / omg_media_job / omg_media_models",
+    useWhen: "A task needs a new image or video made from a prompt on an omg.dev Computer.",
+    guidance:
+      "These spend the user's omg credits. Read the media-generation skill (guidePath from omg_media_models) first. Prefer the cheapest model that fits and tell the user the costUsd in your reply. Calls are capped per call and per UTC day. When a result has pending: true, call omg_media_job with the jobId and do not generate again. Show results with omg_display_image or omg_display_video; a video must be under 6 MB, H.264, faststart.",
   },
   {
     tool: "omg_input",
@@ -240,7 +246,61 @@ const SUBAGENT_HEADERS = [
   "=== LFG SUBAGENT OPERATING CONTRACT ===",
   "=== OMG SUBAGENT OPERATING CONTRACT ===",
   "=== omg.dev SUBAGENT OPERATING CONTRACT ===",
+  // Same shape: terminated by USER_TASK. See withFirstRunEnvelope.
+  "=== omg.dev FIRST RUN ===",
 ] as const;
+
+export const FIRST_RUN_HEADER = "=== omg.dev FIRST RUN ===";
+
+/**
+ * Whether a model can read the screenshots it takes. The DeepSeek models on
+ * the omg router cannot: in production first runs they spent 8 to 12 minutes
+ * writing screenshot and CDP harnesses, then said "I can't view images".
+ * Unknown models are assumed to see.
+ */
+export function modelSeesImages(model: string | undefined | null): boolean {
+  return !/deepseek/i.test(model ?? "");
+}
+
+/**
+ * The first task of a new user's first session, wrapped in the first-run rules.
+ *
+ * WHY. Real ad signups (2026-09-26/27) left minutes after publishing, and one
+ * never saw a result: after they stopped the starter task and typed their own,
+ * the agent built and self-tested for 49 minutes with no preview, spent 12 more
+ * on a screenshot harness it could not read, and sent the link 77 minutes in.
+ * The Expo path already puts the preview first; these rules do it for every
+ * card, template and typed prompt. They are in the envelope, not the visible
+ * prompt, and they hold for the whole session, so a request typed after the
+ * user stops the agent follows them too.
+ */
+export function withFirstRunEnvelope(prompt: string | undefined, opts: { seesImages: boolean }): string | undefined {
+  const text = prompt?.trim();
+  if (!text) return prompt;
+  return [
+    FIRST_RUN_HEADER,
+    "This session is a new user's first task on omg.dev. They are watching, and they leave if nothing appears. These rules hold for every request in this session, including a new request typed after the user stops you.",
+    "- Within about 5 minutes, show a first visible version. Start or reuse the dev server (in /home/user/project the web server on 5173 is already running), call `omg_expose_port`, and tell the user the preview is ready. Do this before deep work.",
+    // The Expo steps are spelled out here because the omg-app-builder skill
+    // only exists inside a project made by omg_create_project, so an agent
+    // that plans first never reads its fast path. Measured 2026-09-27 (Family
+    // Feast design build, deepseek-v4-flash): 31 turns and 5 min of code
+    // before the first omg_expose_port, then 2 min of cold Metro bundling,
+    // preview at 8 min. The A/B runs that exposed first had the card at 27 s.
+    `- For a phone app, do these steps first, before you write any app code, even when the request includes a design to match: 1. \`omg_create_project\` with \`template: "expo"\`. 2. \`omg_expose_port\` with port 8081 and \`expoGo: true\`. 3. From the project directory run \`bash scripts/start-expo-preview.sh <expoGo.proxyUrl> 8081\` with a 240000 ms shell timeout. 4. Tell the user the preview is ready and to open it from the card below. Metro reloads on every save, so the phone follows your edits. Then read the omg-app-builder skill in the project and build the screens.`,
+    "- Before that first preview: no test suites, no self-test loops, and no reading files one by one to learn the template. One quick check that the page loads is enough.",
+    "- After the preview: build in a few larger edits, run one typecheck or build, deploy once with `omg_deploy`, commit, then `omg_ship`.",
+    ...(opts.seesImages
+      ? []
+      : [
+          "- You cannot see images. Do not take screenshots or write browser or CDP scripts to check the UI. Check the page text instead, for example with `curl` on the preview URL.",
+          "- If the request links a design image, you cannot read it either. Do not download it or write scripts to inspect it. Build from the words in the request.",
+        ]),
+    "- Keep your messages to the user short and plain.",
+    USER_TASK,
+    text,
+  ].join("\n");
+}
 
 /** Earliest occurrence of any known contract marker, or -1. */
 function firstIndexOf(text: string, needles: readonly string[], from = 0): { at: number; needle: string } {

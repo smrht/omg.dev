@@ -169,6 +169,7 @@ describe("omg.dev runtime capabilities", () => {
       "omg_deploy / omg_deploy_status / omg_apps / omg_whoami / omg_app_visibility / omg_app_identity",
       "omg_expose_port",
       "omg_display_image / omg_display_video / omg_display_file",
+      "omg_generate_image / omg_generate_video / omg_media_job / omg_media_models",
       "omg_input",
       "omg_find_sessions",
       "omg_close_session",
@@ -309,5 +310,46 @@ describe("user standing instructions", () => {
     expect(omgUserInstructionsBlock(undefined)).toBe("");
     expect(omgUserInstructionsBlock("  ")).toBe("");
     expect(omgUserInstructionsBlock(RULES)).toContain(RULES);
+  });
+});
+
+describe("first-run envelope", () => {
+  test("wraps the task in the first-run rules and still shows only the human's ask", async () => {
+    const { withFirstRunEnvelope, withOmgRuntimeContract, stripOmgRuntimeContract, sessionTitleFromPrompt, FIRST_RUN_HEADER } =
+      await import("./omg-capabilities.ts");
+    const ask = "Build me a Lua obfuscator website";
+    const wrapped = withFirstRunEnvelope(ask, { seesImages: false })!;
+    expect(wrapped.startsWith(FIRST_RUN_HEADER)).toBe(true);
+    expect(wrapped).toContain("Within about 5 minutes");
+    expect(wrapped).toContain("including a new request typed after the user stops you");
+    expect(wrapped).toContain("You cannot see images");
+    expect(wrapped).toContain("If the request links a design image");
+    // The launch envelope wraps it once more; display surfaces peel both.
+    const launched = withOmgRuntimeContract(wrapped)!;
+    expect(stripOmgRuntimeContract(launched)).toBe(ask);
+    expect(sessionTitleFromPrompt(launched)).toBe(ask);
+  });
+
+  test("a phone app exposes Metro before any code, with the concrete Expo steps", async () => {
+    const { withFirstRunEnvelope } = await import("./omg-capabilities.ts");
+    const wrapped = withFirstRunEnvelope("Build a mobile app for my family", { seesImages: true })!;
+    const create = wrapped.indexOf('`omg_create_project` with `template: "expo"`');
+    const expose = wrapped.indexOf("`omg_expose_port` with port 8081 and `expoGo: true`");
+    const script = wrapped.indexOf("bash scripts/start-expo-preview.sh <expoGo.proxyUrl> 8081");
+    expect(create).toBeGreaterThan(0);
+    expect(expose).toBeGreaterThan(create);
+    expect(script).toBeGreaterThan(expose);
+    expect(wrapped).toContain("before you write any app code, even when the request includes a design to match");
+  });
+
+  test("the image rule is only for models that cannot see", async () => {
+    const { withFirstRunEnvelope, modelSeesImages } = await import("./omg-capabilities.ts");
+    expect(withFirstRunEnvelope("x", { seesImages: true })).not.toContain("You cannot see images");
+    expect(withFirstRunEnvelope("x", { seesImages: true })).not.toContain("design image");
+    expect(modelSeesImages("omg/deepseek/deepseek-v4-flash-0731")).toBe(false);
+    expect(modelSeesImages("omg/deepseek/deepseek-v4-pro")).toBe(false);
+    expect(modelSeesImages("opus")).toBe(true);
+    expect(modelSeesImages(undefined)).toBe(true);
+    expect(withFirstRunEnvelope("", { seesImages: true })).toBe("");
   });
 });

@@ -74,6 +74,7 @@ import {
   omgTransportGeneration,
   omgUpload,
 } from "./lib/omg-client";
+import { registerSessionRefHandlers } from "./lib/session-ref-link";
 import {
   FRONTEND_VERSION,
   formatComputerVersion,
@@ -99,7 +100,11 @@ import {
 } from "./lib/project-filter";
 import { ChatStarterRow } from "./components/chat-starter-row";
 import { groupNodesByProject, type ProjectGroup } from "./lib/session-groups";
-import { pathnameToSessionId, sessionToPath } from "./lib/app-search";
+import { pathnameToSessionId, pathnameToThreadId, sessionToPath, threadToPath } from "./lib/app-search";
+import { NEW_THREAD_ID, ThreadChat, ThreadRailSection } from "./components/threads";
+import { PullToThread } from "./components/pull-to-thread";
+import { useThreads } from "./lib/threads";
+import type { ThreadSummary } from "../../packages/protocol/src/threads";
 import {
   BOT_ROSTER_ROW_CLASS,
   isPrimarySurfaceTab,
@@ -307,7 +312,7 @@ import {
   reconcileQueueMessages,
   retryQueuedMessage,
 } from "./lib/queue-reconcile";
-import { HeldQueueCards } from "./components/held-queue-cards";
+import { HeldQueueCards, LOCAL_HELD_ID_PREFIX } from "./components/held-queue-cards";
 import { SystemMessageLine } from "./components/system-message-line";
 import { classifyUserTurn } from "./lib/system-message";
 import { canDriveSession } from "./lib/session-runtime";
@@ -497,7 +502,7 @@ import {
   windowLiveMessages,
 } from "./lib/transcript-paging";
 import { nextScrollMode } from "./lib/transcript-stick";
-import { showsTypingIndicator } from "./lib/typing-dots";
+import { rowsWhileLive, showsTypingIndicator } from "./lib/typing-dots";
 import { shouldApplyAnchorCorrection } from "./lib/transcript-anchor";
 import {
   completeTranscriptGlideFrame,
@@ -551,6 +556,7 @@ import { ShimmerText } from "@/components/ui/shimmer-text";
 import { MorphText } from "@/components/ui/morph-text";
 import { DoubleConfirmAction } from "@/components/ui/double-confirm-action";
 import { ClearFindingsButton } from "@/components/clear-findings-button";
+import { AutoReportRow, SEV_DOT, SEV_LABEL, relTime } from "@/components/auto-report-row";
 import {
   Dialog,
   DialogContent,
@@ -6155,9 +6161,29 @@ export function App() {
     },
     [navigate, keepHostSearch],
   );
+  // Session references in rendered messages open through this page route.
+  // The list is read through a ref so a click sees the latest sessions.
+  const sessionsForRefs = useRef<Session[]>(sessions);
+  sessionsForRefs.current = sessions;
+  useEffect(() => {
+    registerSessionRefHandlers({
+      navigate: openSessionPage,
+      peekSessions: () => sessionsForRefs.current,
+    });
+    return () => registerSessionRefHandlers(null);
+  }, [openSessionPage]);
   const closeSessionPage = useCallback(() => {
     void navigate({ to: "/", search: keepHostSearch });
   }, [navigate, keepHostSearch]);
+  // `/threads/<id>` is one thread, open (`/threads/new` for an empty one).
+  const openThreadId = pathnameToThreadId(pathname);
+  const openThreadPage = useCallback(
+    (id: string) => {
+      if (!id) return;
+      void navigate({ to: threadToPath(id), search: keepHostSearch });
+    },
+    [navigate, keepHostSearch],
+  );
   const selectedBotConversationId = selectedBotId ? routeSearch.conversation ?? null : null;
   // A terminal is on screen — as the Terminal tab, or pulled up over any tab.
   // Both need the same soft-keyboard treatment: the shell pinned to the visible
@@ -9547,6 +9573,9 @@ export function App() {
             aria-hidden={!workspaceVisible}
           >
             <LiveView
+              threadViewer={botUnreadIdentity}
+              openThreadId={openThreadId}
+              onOpenThread={openThreadPage}
               openSessionId={openSessionId}
               onOpenSessionPage={openSessionPage}
               onCloseSessionPage={closeSessionPage}
@@ -9729,7 +9758,7 @@ export function App() {
               autoAgents={projectScopedAutoAgents}
               onOpenReport={setOpenReport}
               onDismissFinding={(finding) => void dismissFinding(finding)}
-              onTriageFindings={() => void launchAutoTriage(projectScopedFindings)}
+              onTriageFindings={(targets) => void launchAutoTriage(targets ?? projectScopedFindings)}
               autoTriageBusy={autoTriageBusy}
               onClearFindings={(targets) => void clearAllFindings(targets)}
               clearFindingsBusy={clearFindingsBusy}
@@ -11879,6 +11908,9 @@ function LiveView({
   // unconditionally below (the original `findings.length` crash site). The fetch
   // layer already guards these to [], but default here too so any future caller
   // passing `undefined` degrades to an empty render instead of crashing the view.
+  openThreadId = null,
+  onOpenThread,
+  threadViewer = "",
   openSessionId = null,
   onOpenSessionPage,
   onCloseSessionPage,
@@ -11945,6 +11977,11 @@ function LiveView({
   shippedReview?: Session | null;
   /** The session `/sessions/<id>` names, or null on the plain list. */
   openSessionId?: string | null;
+  /** The open thread (`/threads/<id>`), or null. */
+  openThreadId?: string | null;
+  /** Who writes in a thread from this browser; see lib/threads.ts. */
+  threadViewer?: string;
+  onOpenThread?: (id: string) => void;
   onOpenSessionPage?: (sid: string) => void;
   onCloseSessionPage?: () => void;
   liveSessionIds: string[];
@@ -11999,7 +12036,7 @@ function LiveView({
   /** Open the report sheet for one agent's open findings. */
   onOpenReport: (agentId: string) => void;
   onDismissFinding: (f: AutoFinding) => void;
-  onTriageFindings: () => void;
+  onTriageFindings: (targets?: AutoFinding[]) => void;
   autoTriageBusy?: boolean;
   /** Dismiss every finding passed in. Takes the list rather than reading it
    *  back, so the confirmation count and the rows cleared cannot diverge. */
@@ -12139,6 +12176,13 @@ function LiveView({
     [onOpenSessionPage],
   );
 
+  // Threads: people-first chat, above the sessions on both layouts.
+  const { threads } = useThreads();
+  const openThreadTask = useCallback(
+    (sid: string) => onOpenSessionPage?.(sid),
+    [onOpenSessionPage],
+  );
+
   // Same grouping the rail uses, from the same helper, so the two lists cannot
   // drift apart again.
   const originalProjectGroups = useMemo(
@@ -12205,12 +12249,22 @@ function LiveView({
     !working.length &&
     !idle.length &&
     !findings.length &&
-    !shippedReview
+    !shippedReview &&
+    !threads.length &&
+    !openThreadId
   ) {
     return (
       <div className="flex flex-col gap-5">
         {coach}
-        <RuntimeEmptyState />
+        <PullToThread onStart={() => onOpenThread?.(NEW_THREAD_ID)}>
+          <ThreadRailSection
+            threads={threads}
+            activeId={null}
+            onOpen={(id) => onOpenThread?.(id)}
+            onNew={() => onOpenThread?.(NEW_THREAD_ID)}
+          />
+          <RuntimeEmptyState />
+        </PullToThread>
       </div>
     );
   }
@@ -12316,6 +12370,12 @@ function LiveView({
   if (isWide) {
     return (
       <RailStage
+        threads={threads}
+        threadViewer={threadViewer}
+        openThreadId={openThreadId}
+        onOpenThread={onOpenThread}
+        onCloseThread={onCloseSessionPage}
+        onOpenThreadTask={openThreadTask}
         sessions={sessions}
         shippedReview={shippedReview}
         users={users}
@@ -12445,6 +12505,14 @@ function LiveView({
           transcript lives on the session's own page. */}
       <OverviewToolbar prefs={overviewPrefs} count={overviewGroups.reduce((n,g) => n+g.count,0)} project={projectFilter !== "__all" ? shortProject(projectFilter) : undefined} onClearProject={() => onProjectChange?.("__all")} />
       {!overviewGroups.length && <p role="status" className="px-4 py-6 text-sm text-muted-foreground">Geen gesprekken gevonden. Pas je zoekopdracht of filters aan.</p>}
+      {/* Pull the list down past the top to start a thread, as on iOS. */}
+      <PullToThread onStart={() => onOpenThread?.(NEW_THREAD_ID)}>
+        <ThreadRailSection
+          threads={threads}
+          activeId={openThreadId}
+          onOpen={(id) => onOpenThread?.(id)}
+          onNew={() => onOpenThread?.(NEW_THREAD_ID)}
+        />
       <SessionGroups
         groups={overviewGroups}
         pinnedNodes={[]}
@@ -12453,6 +12521,7 @@ function LiveView({
         onProjectChange={onProjectChange}
         renderItem={renderMobileItem}
       />
+      </PullToThread>
     </div>
     {/* Open findings live behind a pill, not at the end of the list. A group
         of them there put more work under a list that is already about work,
@@ -12477,7 +12546,7 @@ function LiveView({
           <AutoTriageButton
             count={findings.length}
             busy={autoTriageBusy}
-            onClick={onTriageFindings}
+            onClick={() => onTriageFindings()}
             compact
           />
         </span>
@@ -12492,6 +12561,11 @@ function LiveView({
             setFindingsOpen(false);
             onOpenReport(report.agentId);
           }}
+          onTriage={() => {
+            setFindingsOpen(false);
+            onTriageFindings(report.findings);
+          }}
+          triageBusy={autoTriageBusy}
         />
       ))}
     </FindingsSheet>
@@ -12524,6 +12598,24 @@ function LiveView({
         onClose={() => onCloseSessionPage?.()}
       />
     ) : null}
+    {/* An open thread is a page over the list, at the session sheet's layer
+        (z-90, above the bottom composer) and portalled to <body> for the same
+        reason: a host's stacking context must not clip it. */}
+    {openThreadId
+      ? createPortal(
+          <div className="fixed inset-0 z-[90] flex bg-background pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
+            <ThreadChat
+              threadId={openThreadId}
+              viewer={threadViewer}
+              repos={repos}
+              onCreated={(id) => onOpenThread?.(id)}
+              onOpenTask={openThreadTask}
+              onBack={() => onCloseSessionPage?.()}
+            />
+          </div>,
+          document.body,
+        )
+      : null}
     </>
   );
 }
@@ -12588,7 +12680,21 @@ function RailStage({
   workspaceComposer,
   stageOverride = null,
   hostSettingsInMenu = false,
+  threads = [],
+  threadViewer = "",
+  openThreadId = null,
+  onOpenThread,
+  onCloseThread,
+  onOpenThreadTask,
 }: {
+  threadViewer?: string;
+  /** Threads, listed above the sessions; see components/threads.tsx. */
+  threads?: ThreadSummary[];
+  /** The open thread fills the stage while it is open. */
+  openThreadId?: string | null;
+  onOpenThread?: (id: string) => void;
+  onCloseThread?: () => void;
+  onOpenThreadTask?: (sid: string) => void;
   sessions: Session[];
   shippedReview?: Session | null;
   users: User[];
@@ -12641,7 +12747,7 @@ function RailStage({
   nameFor: (id: string) => string;
   /** Open the report sheet for one agent's open findings. */
   onOpenReport: (agentId: string) => void;
-  onTriageFindings: () => void;
+  onTriageFindings: (targets?: AutoFinding[]) => void;
   autoTriageBusy?: boolean;
   onClearFindings: (targets: AutoFinding[]) => void;
   clearFindingsBusy?: boolean;
@@ -12756,7 +12862,7 @@ function RailStage({
   // Mirror of the workspace list's scroll offset, restored when the workspace
   // becomes visible again (some engines drop it under display:none).
   const workspaceListScrollRef = useRef(0);
-  const workspaceUp = !!workspaceComposer && railSurface === "sessions" && !stageMode;
+  const workspaceUp = !!workspaceComposer && railSurface === "sessions" && !stageMode && !openThreadId;
 
   const bySid = useMemo(() => {
     const m = new Map<string, Session>();
@@ -13067,12 +13173,14 @@ function RailStage({
       // stage is showing the schedule list, and a preview set underneath it
       // would be an open session nobody can see.
       if (railSurface === "auto") onOpenSessions();
+      // A session picked while a thread fills the stage replaces the thread.
+      if (openThreadId) onCloseThread?.();
       // Board mode shows one session beside the board, pinned or not.
       setStageMode(true);
       if (railSurface !== "board" && validPinned.includes(sid)) return; // already a persistent column
       setPreview(sid);
     },
-    [validPinned, railSurface, onOpenSessions],
+    [validPinned, railSurface, onOpenSessions, openThreadId, onCloseThread],
   );
   // Arriving on the Board shows the board alone; whatever Live was previewing
   // is not what you came to look at.
@@ -13817,7 +13925,7 @@ function RailStage({
               <AutoTriageButton
                 count={findings.length}
                 busy={autoTriageBusy}
-                onClick={onTriageFindings}
+                onClick={() => onTriageFindings()}
                 compact
               />
               <button
@@ -13838,6 +13946,8 @@ function RailStage({
                 report={report}
                 agentName={nameFor(report.agentId)}
                 onOpen={() => onOpenReport(report.agentId)}
+                onTriage={() => onTriageFindings(report.findings)}
+                triageBusy={autoTriageBusy}
               />
             ))}
           </div>
@@ -13900,7 +14010,10 @@ function RailStage({
         ? boardStageColumns
         : stageColumns;
   // The board pane counts toward the grid shape.
-  const stagePaneCount = activeStageColumns.length + (railSurface === "board" ? 1 : 0);
+  // An open thread takes the whole stage.
+  const stagePaneCount = openThreadId && railSurface === "sessions"
+    ? 1
+    : activeStageColumns.length + (railSurface === "board" ? 1 : 0);
 
   // The bot list is the session list's sibling, not a page: same rail, same
   // rows, same click-to-open-a-column behaviour. A bot row IS a session row —
@@ -14065,6 +14178,8 @@ function RailStage({
         listScrollMemory={workspaceListScrollRef}
         active={workspaceUp}
       >
+        <ThreadRailSection threads={threads} activeId={openThreadId}
+          onOpen={(id) => onOpenThread?.(id)} onNew={() => onOpenThread?.(NEW_THREAD_ID)} />
         {!overviewGroups.length ? (
           <p role="status" className="px-3 py-6 text-sm text-muted-foreground">
             Geen gesprekken gevonden. Pas je zoekopdracht of filters aan.
@@ -14204,6 +14319,14 @@ function RailStage({
         ) : null}
         <div data-overview-density={railSurface !== "chat" ? overviewPrefs.density : undefined} className="session-overview session-list-scroll min-h-0 flex-1 overflow-y-auto px-1.5 py-2">
           {railSurface === "chat" ? botRailList : <>
+          {!railCollapsed && railSurface === "sessions" ? (
+            <ThreadRailSection
+              threads={threads}
+              activeId={openThreadId}
+              onOpen={(id) => onOpenThread?.(id)}
+              onNew={() => onOpenThread?.(NEW_THREAD_ID)}
+            />
+          ) : null}
           {/* Leads the list, the way New bot leads the roster: it belongs to
               the thing it adds to, under the switch bar that says which list
               that is. It used to sit in the chrome above, sharing a row with
@@ -14399,7 +14522,18 @@ function RailStage({
               : "grid-cols-2 grid-rows-2",
         )}
       >
-        {railSurface === "auto" ? (
+        {openThreadId && railSurface === "sessions" ? (
+          <div className="h-full min-h-0 min-w-0 overflow-hidden rounded-xl border border-border">
+            <ThreadChat
+              threadId={openThreadId}
+              viewer={threadViewer}
+              repos={repos}
+              onCreated={(id) => onOpenThread?.(id)}
+              onOpenTask={(sid) => onOpenThreadTask?.(sid)}
+              onBack={onCloseThread}
+            />
+          </div>
+        ) : railSurface === "auto" ? (
           <div className="h-full min-h-0 overflow-y-auto px-2 pt-2">{stageOverride}</div>
         ) : railSurface === "board" ? (
           <>
@@ -15636,26 +15770,6 @@ function BotRailContextMenu({
   );
 }
 
-const SEV_DOT: Record<AutoFinding["severity"], string> = {
-  high: "bg-destructive",
-  med: "bg-warning",
-  low: "bg-muted-foreground",
-};
-const SEV_LABEL: Record<AutoFinding["severity"], string> = {
-  high: "High",
-  med: "Medium",
-  low: "Low",
-};
-function relTime(ts: number): string {
-  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
-  if (s < 60) return "now";
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h`;
-  return `${Math.floor(h / 24)}d`;
-}
-
 function AutoFindingCard({
   finding,
   agentName,
@@ -16866,8 +16980,32 @@ function SessionChatBody({
   // frames, and the optimistic updates in the card actions bridge the second
   // until the next frame.
   const [heldQueue, setHeldQueue] = useState<OmgQueueMessage[]>([]);
+  // Queue-mode sends the composer has painted as cards before the server
+  // answered. Kept apart from heldQueue because every queue frame replaces
+  // that list wholesale, and a frame that predates the send would erase the
+  // card. The send response swaps each one for the real held row.
+  //
+  // The live queue frame usually beats the send response. A local card is
+  // hidden as soon as a server row with its text appears that was not already
+  // held when the card was painted (`knownIds`), so the two never show at
+  // once. Matching is one server row per local card.
+  const [localHeld, setLocalHeld] = useState<(OmgQueueMessage & { knownIds: string[] })[]>([]);
+  const heldCards = useMemo(() => {
+    if (!localHeld.length) return heldQueue;
+    const claimed = new Set<string>();
+    const unanswered = localHeld.filter((local) => {
+      const match = heldQueue.find(
+        (row) => !claimed.has(row.id) && !local.knownIds.includes(row.id) && row.text.trim() === local.text.trim(),
+      );
+      if (!match) return true;
+      claimed.add(match.id);
+      return false;
+    });
+    return unanswered.length ? [...heldQueue, ...unanswered] : heldQueue;
+  }, [heldQueue, localHeld]);
   useEffect(() => {
     setHeldQueue([]);
+    setLocalHeld([]);
     if (!sid) return;
     let cancelled = false;
     void api<{ queue: OmgQueueMessage[] }>(`/api/sessions/${encodeURIComponent(sid)}/queue`, {
@@ -17180,11 +17318,31 @@ function SessionChatBody({
     // lapse, or the indicator outlives the message it was announcing and
     // briefly reads as "still typing" beside their delivered turn.
     if (sid) onTyping?.(sid, false);
+    // Paint the held card now. The server decides whether the text is held,
+    // and that answer (plus any upload still in flight) is a round trip the
+    // person should not have to watch an empty composer for.
+    const localHeldId = holdOnServer
+      ? `${LOCAL_HELD_ID_PREFIX}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+      : null;
+    if (localHeldId) {
+      const knownIds = heldQueue.map((row) => row.id);
+      setLocalHeld((current) => [
+        ...current,
+        { id: localHeldId, text, status: "held", createdAt: Date.now(), knownIds },
+      ]);
+    }
     try {
       // Uploads started when the files were attached; this normally resolves
       // immediately and only actually waits for bytes still in flight.
       const uploaded = files.length ? await Promise.all(files.map(resolveUpload)) : [];
       const outgoingText = composeAttachmentMessage(text, uploaded);
+      // The server holds the text with its attachment links, so the local
+      // card has to carry the same text for the queue frame to claim it.
+      if (localHeldId && outgoingText !== text) {
+        setLocalHeld((current) =>
+          current.map((item) => (item.id === localHeldId ? { ...item, text: outgoingText } : item)),
+        );
+      }
       // Pulse the composer so the send visibly launches into the transcript.
       setLaunching(true);
       window.setTimeout(() => setLaunching(false), 480);
@@ -17199,11 +17357,28 @@ function SessionChatBody({
           }),
         });
         setPromptStashStatus(stashed?.id, "sent");
+        setLocalHeld((current) => current.filter((item) => item.id !== localHeldId));
         if (res.msg?.status === "held") {
           const held = res.msg;
           setHeldQueue((current) =>
             current.some((item) => item.id === held.id) ? current : [...current, held],
           );
+        } else if (res.msg?.text) {
+          // The turn ended before the send landed, so the server delivered it
+          // instead of holding it. Swap the card for an ordinary pending bubble
+          // now; the queue frame that follows claims it by text.
+          const [bubble] = omgMessagesToUIMessages([
+            {
+              id: `local-send-${localHeldId}`,
+              role: "user",
+              kind: "text",
+              text: res.msg.text,
+              html: escapeHtml(res.msg.text).replace(/\n/g, "<br>"),
+              ts: Date.now(),
+              pending: true,
+            },
+          ]);
+          if (bubble) setMessages((current) => [...current, bubble]);
         }
         for (const q of sessionQuestions) void answerInSession(q, text);
         for (const att of files) {
@@ -17233,26 +17408,23 @@ function SessionChatBody({
         await onRefresh();
         return;
       }
-      void ownedChatStreams
-        .run(sid, () =>
-          sendChatMessage(
-            {
+      void sendIntoChat(
+        {
+          text: outgoingText,
+          metadata: {
+            omgMessage: {
+              role: "user",
+              kind: "text",
               text: outgoingText,
-              metadata: {
-                omgMessage: {
-                  role: "user",
-                  kind: "text",
-                  text: outgoingText,
-                  html: escapeHtml(outgoingText).replace(/\n/g, "<br>"),
-                  ts: Date.now(),
-                  pending: true,
-                  queued: queuedBehindTurn,
-                },
-              },
+              html: escapeHtml(outgoingText).replace(/\n/g, "<br>"),
+              ts: Date.now(),
+              pending: true,
+              queued: queuedBehindTurn,
             },
-            { body: { mode } },
-          ),
-        )
+          },
+        },
+        mode,
+      )
         .then(() => setPromptStashStatus(stashed?.id, "sent"))
         .catch((err) => {
           setPromptStashStatus(stashed?.id, "draft");
@@ -17275,6 +17447,7 @@ function SessionChatBody({
         onError(err instanceof Error ? err.message : String(err));
       });
     } catch (err) {
+      if (localHeldId) setLocalHeld((current) => current.filter((item) => item.id !== localHeldId));
       setPromptStashStatus(stashed?.id, "draft");
       onError(err instanceof Error ? err.message : String(err));
       setMessageTextState((current) => current || text);
@@ -17293,35 +17466,72 @@ function SessionChatBody({
     }
   }
 
+  // One way into the chat for a composer or held-card send.
+  //
+  // A turn this chat did not start (another device, a server-released queue
+  // row, a reload mid-turn) is drawn by the passive transcript listener. A
+  // send used to open a live stream and claim ownership in the middle of that
+  // turn: the passive listener stopped drawing it, the new stream only knew the
+  // text from that moment on, and the reply collapsed to a fragment starting
+  // mid-word, with the final row then dropped for not extending it. Joining a
+  // running turn therefore sends passively and leaves the listener in charge.
+  const sendIntoChat = useCallback(
+    (message: Parameters<typeof sendChatMessage>[0], mode: ComposerSendMode) => {
+      if (!sid) return Promise.resolve();
+      if (chatBusy && !ownedChatStreams.owns(sid)) {
+        return sendChatMessage(message, { body: { mode, passive: true } });
+      }
+      return ownedChatStreams.run(sid, () => sendChatMessage(message, { body: { mode } }));
+    },
+    [chatBusy, ownedChatStreams, sendChatMessage, sid],
+  );
+
   // A held card's send-now: steer this text only. Do not reuse sendMessage —
   // that path also clears the composer and would attach whatever is still in
   // the box.
+  //
+  // The bubble paints before `release` (the held row's DELETE) goes out, so
+  // the text moves from the card to the transcript in one frame instead of
+  // vanishing for a round trip. It is a local placeholder until the release
+  // succeeds, because the send must not start before the row has left the
+  // queue: a release that fails means the server may already have sent it.
   const steerHeldText = useCallback(
-    (text: string) => {
+    async (text: string, release: () => Promise<void>) => {
       const outgoingText = text.trim();
       if (!sid || !outgoingText) return;
-      void ownedChatStreams
-        .run(sid, () =>
-          sendChatMessage(
-            {
-              text: outgoingText,
-              metadata: {
-                omgMessage: {
-                  role: "user",
-                  kind: "text",
-                  text: outgoingText,
-                  html: escapeHtml(outgoingText).replace(/\n/g, "<br>"),
-                  ts: Date.now(),
-                  pending: true,
-                },
-              },
-            },
-            { body: { mode: "steer" } },
-          ),
-        )
-        .catch((err) => onError(err instanceof Error ? err.message : String(err)));
+      const omgMessage = {
+        role: "user",
+        kind: "text",
+        text: outgoingText,
+        html: escapeHtml(outgoingText).replace(/\n/g, "<br>"),
+        ts: Date.now(),
+        pending: true,
+      };
+      const placeholderId = `held-steer-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+      const [placeholder] = omgMessagesToUIMessages([{ ...omgMessage, id: placeholderId }]);
+      if (placeholder) setMessages((current) => [...current, placeholder]);
+      const dropPlaceholder = () =>
+        setMessages((current) => current.filter((message) => message.id !== placeholderId));
+      try {
+        await release();
+      } catch (err) {
+        dropPlaceholder();
+        throw err;
+      }
+      // Swap the placeholder for the real send in one tick. `files: []` keeps
+      // AbstractChat's push synchronous (it awaits a file conversion
+      // otherwise), so no frame paints without the bubble.
+      dropPlaceholder();
+      void sendIntoChat(
+        {
+          text: outgoingText,
+          files: [],
+          metadata: { omgMessage: { ...omgMessage, renderKey: placeholderId } },
+        },
+        "steer",
+      ).catch((err) => onError(err instanceof Error ? err.message : String(err)));
     },
-    [onError, ownedChatStreams, sendChatMessage, sid],
+    [onError, sendIntoChat, setMessages, sid],
   );
 
   // Re-queue a failed send. The next queue event repaints the bubble as
@@ -17419,10 +17629,10 @@ function SessionChatBody({
           {/* Held sends rise out of the bar as a narrow island docked to its
               top edge: the next one to go is always visible, the rest fold
               behind a count until tapped. */}
-          {sid && heldQueue.length ? (
+          {sid && heldCards.length ? (
             <HeldQueueCards
               sessionId={sid}
-              items={heldQueue}
+              items={heldCards}
               busy={chatBusy}
               onChange={setHeldQueue}
               onError={onError}
@@ -19962,10 +20172,13 @@ const ChatStream = memo(function ChatStream({
   );
   // Queued turns are pinned below the live turn instead of sitting in timestamp
   // order — see splitQueuedRenderItems.
-  const { items, queued: queuedItems } = useMemo(
+  const { items: foldedItems, queued: queuedItems } = useMemo(
     () => splitQueuedRenderItems(buildChatRenderItems(visibleMessages)),
     [visibleMessages],
   );
+  // An empty live draft after a run of work is left out, so the work row stays
+  // live and says what the agent is doing (see rowsWhileLive).
+  const items = useMemo(() => rowsWhileLive(busy, foldedItems), [busy, foldedItems]);
   const speakers = useMemo(() => items.map(chatRenderItemSpeaker), [items]);
   // Only the active tail can stand in for the typing dots (see typing-dots):
   // old reasoning or an old tool run must not make a newly-busy session look
@@ -27228,57 +27441,6 @@ function FindingSheet({ onClose, ...props }: FindingDetailProps & { onClose: () 
         </AutoAgentPage>
       )}
     />
-  );
-}
-
-// One row per agent in the Auto section. The dot is the agent's worst open
-// severity, the pill is how many findings it is sitting on, the caption is
-// the one to read first. Tapping opens the agent's report, not a finding —
-// one row per finding put five "Fleet Health" rows in a list meant for
-// sessions, each distinguishable only by a truncated title.
-function AutoReportRow({
-  report,
-  agentName,
-  onOpen,
-}: {
-  report: AgentReport<AutoFinding>;
-  agentName: string;
-  onOpen: () => void;
-}) {
-  const count = report.findings.length;
-  const lead = report.findings[0];
-  return (
-    <button
-      type="button"
-      onClick={onOpen}
-      className="flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left hover:bg-muted"
-    >
-      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="flex min-w-0 items-center gap-1.5">
-          <span className="truncate text-sm font-medium leading-tight">{agentName}</span>
-          {count > 1 ? (
-            <span
-              className="shrink-0 rounded-full bg-primary/12 px-1.5 py-px text-[10px] font-semibold tabular-nums text-primary"
-              aria-label={`${count} open findings`}
-            >
-              {count}
-            </span>
-          ) : null}
-        </span>
-        <span className="truncate text-xs leading-tight text-muted-foreground">{lead.title}</span>
-      </span>
-      {/* Severity sits where a session row puts its unread dot: same size,
-          same slot, right of the text and left of the time. One place for
-          "this needs you" across the list, coloured by how badly. */}
-      <span
-        role="status"
-        aria-label={`${SEV_LABEL[report.severity]} severity`}
-        className={cn("inline-block size-2 shrink-0 rounded-full", SEV_DOT[report.severity])}
-      />
-      <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground/70">
-        {relTime(report.latestAt)}
-      </span>
-    </button>
   );
 }
 
