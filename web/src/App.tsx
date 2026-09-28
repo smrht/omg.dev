@@ -1394,7 +1394,9 @@ type SlashSkillState = {
   query: string;
 };
 
-const CLAUDE_MODELS = ["opus", "fable", "sonnet", "haiku"];
+// Same order as the server's CLAUDE_MODELS (agent-catalog.ts): newest release
+// first, with the Sonnet 5.5 pin until the `sonnet` alias lands on it.
+const CLAUDE_MODELS = ["claude-sonnet-5-5", "opus", "fable", "sonnet", "haiku"];
 const CODEX_MODELS = [
   "gpt-6-astra",
   "gpt-5.6-sol",

@@ -98,8 +98,9 @@ export function parseOmgModel(id: string | null | undefined): OmgModelInfo | nul
  * Claude CLI family aliases and the release each one lands on today. The
  * alias stays the wire value (the CLI, the Agent SDK and `/model` all speak
  * it); the picker shows the release so a reader can tell WHICH opus they get.
- * Measured on claude 2.1.280 (2026-09-22). Bump when Anthropic moves an alias.
- * Full ids fall through to claudeModelLabel.
+ * Measured on claude 2.1.284 (2026-09-28): `sonnet` still lands on Sonnet 5;
+ * Sonnet 5.5 is the pinned `claude-sonnet-5-5` row. Bump when Anthropic moves
+ * an alias. Full ids fall through to claudeModelLabel.
  */
 export const CLAUDE_ALIAS_LABELS: Record<string, string> = {
   opus: "Opus 5.5",

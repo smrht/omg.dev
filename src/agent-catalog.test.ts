@@ -401,9 +401,10 @@ test("omg thinking levels follow the model: effort where OpenRouter honours it, 
   expect(item.thinkingLevelsByModel?.["omg/qwen/qwen3-coder-next"]).toBeUndefined();
 });
 
-test("claude pickers carry one row per family alias, no pinned duplicates", () => {
+test("claude pickers carry one row per family alias plus the Sonnet 5.5 pin", () => {
   for (const list of [CLAUDE_MODELS, AISDK_MODELS]) {
-    expect(list).toEqual(["opus", "fable", "sonnet", "haiku"]);
+    // Newest release first; the `sonnet` alias sorts on Sonnet 5, where it lands.
+    expect(list).toEqual(["claude-sonnet-5-5", "opus", "fable", "sonnet", "haiku"]);
     expect(list.filter((m) => m.includes("fable"))).toHaveLength(1);
   }
 });

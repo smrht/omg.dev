@@ -2445,6 +2445,9 @@ export function modelAlias(id: string | null | undefined): string | null {
   // Agentbox: one row per family (see CLAUDE_MODELS). `opus` lands on 5.5 and
   // the picker labels it so, so a pinned 5.5 id folds to the alias too.
   if (m.includes("opus")) return "opus";
+  // Sonnet 5.5 has its own picker row while `sonnet` still lands on Sonnet 5.
+  // Collapsing it would highlight Sonnet 5 as the live model and resume there.
+  if (/sonnet-5[-.]5/.test(m)) return "claude-sonnet-5-5";
   if (m.includes("sonnet")) return "sonnet";
   if (m.includes("haiku")) return "haiku";
   // Since claude 2.1.280 the `fable` alias lands on Fable 5.1 itself, so every
