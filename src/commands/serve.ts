@@ -1,3 +1,4 @@
+import { inspectIdleChild } from "../omg-idle-child.ts";
 import { createNoProjectWorkspace, NO_PROJECT } from "../no-project-chat.ts";
 import { readinessBootstrap } from "../bootstrap-readiness.ts";
 import { mkdir, open, readdir, realpath, stat } from "node:fs/promises";
@@ -11121,7 +11122,7 @@ a{color:#60a5fa}
       {
         const m = path.match(/^\/api\/sessions\/([0-9a-fA-F-]{36})\/close$/);
         if (m && req.method === "POST") {
-          const body = (await req.json().catch(() => null)) as { source?: unknown } | null;
+          const body = (await req.json().catch(() => null)) as { source?: unknown; expectedIdle?: unknown } | null;
           const rawSource = typeof body?.source === "string" ? body.source.trim() : "";
           const source = rawSource ? rawSource.slice(0, 80) : "unknown";
           const closeLog = {
@@ -11138,6 +11139,12 @@ a{color:#60a5fa}
             managed: sess?.managed,
           });
           if (!sess) return err(404, "session not found");
+          if (body?.expectedIdle !== undefined) {
+            const freshRows = await listSessions();
+            const fresh = freshRows.find(s => s.sessionId === m[1]);
+            if (fresh?.pid !== sess.pid || !inspectIdleChild(fresh, body.expectedIdle, freshRows, findAisdkEntryByAnyId(m[1]), PATHS.data))
+              return err(409, "Idle subagent changed or is protected");
+          }
           const outcome = await closeLiveSession(sess, m[1], closeLog);
           if (!outcome.ok) return err(outcome.status, outcome.reason);
           // Closed by the user = gone from the Live list, as the archive
@@ -11148,6 +11155,9 @@ a{color:#60a5fa}
         }
       }
 
+      if (path === "/api/agentbox/idle-child-policy" && req.method === "GET") {
+        return json({ version: 1, orphanIdleSeconds: 300, childIdleSeconds: 1800 });
+      }
       if (path === "/api/live/status") {
         noteListSessionsClientActivity();
         const ids = (url.searchParams.get("ids") ?? "")
