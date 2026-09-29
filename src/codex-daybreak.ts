@@ -387,6 +387,95 @@ export const TOOLLESS_THREAD_CONFIG: Record<string, unknown> = {
 };
 
 // ---------------------------------------------------------------------------
+// Trusted argv: persistent tools-enabled app-server sessions
+// ---------------------------------------------------------------------------
+
+const TOML_BARE_KEY_RE = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * Encode one config VALUE as a TOML literal (the `--config key=VALUE` side).
+ * Mirrors the codex-sdk encoder: strings as basic strings (JSON.stringify's
+ * escaping is exactly TOML basic-string escaping), finite numbers, booleans,
+ * arrays, and nested objects as inline tables whose keys are quoted whenever
+ * they are not bare — quoting is SAFE inside a value (live-probed, see
+ * codexAppServerArgv). Null and non-finite numbers throw: fail closed rather
+ * than emit a silently different config.
+ */
+export function codexConfigTomlValue(value: unknown, path: string): string {
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new CodexDaybreakError("config-unsafe", `config override at ${path} is not a finite number`);
+    }
+    return `${value}`;
+  }
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (Array.isArray(value)) {
+    return `[${value.map((item, index) => codexConfigTomlValue(item, `${path}[${index}]`)).join(", ")}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    const parts: string[] = [];
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      if (!key) throw new CodexDaybreakError("config-unsafe", "config override keys must be non-empty strings");
+      if (child === undefined) continue;
+      parts.push(`${TOML_BARE_KEY_RE.test(key) ? key : tomlQuotedKey(key)} = ${codexConfigTomlValue(child, `${path}.${key}`)}`);
+    }
+    return `{${parts.join(", ")}}`;
+  }
+  throw new CodexDaybreakError("config-unsafe", `unsupported config override value at ${path}: ${value === null ? "null" : typeof value}`);
+}
+
+/**
+ * Flatten a config object into `dotted.path=toml-value` override strings —
+ * the same shape the codex-sdk passes as `--config`. PATH segments must be
+ * bare keys: the CLI's dotted path is not quote-aware (live-probed against
+ * 0.157.1 — `mcp_servers."omg".enabled=false` is fatal at startup), so a
+ * segment that cannot be written bare throws instead of producing an argv
+ * that would kill the child before the first turn.
+ */
+export function flattenCodexConfigOverrides(config: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const walk = (value: unknown, prefix: string): void => {
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+        if (child === undefined) continue;
+        if (!TOML_BARE_KEY_RE.test(key)) {
+          throw new CodexDaybreakError(
+            "config-unsafe",
+            `config key "${key}" cannot ride a dotted --config path (bare [A-Za-z0-9_-] only); refusing to spawn`,
+          );
+        }
+        walk(child, prefix ? `${prefix}.${key}` : key);
+      }
+      return;
+    }
+    out.push(`${prefix}=${codexConfigTomlValue(value, prefix)}`);
+  };
+  walk(config, "");
+  return out;
+}
+
+/**
+ * The app-server argv for a PERSISTENT tools-enabled session: plain
+ * `app-server --stdio` plus one `--config key=value` per flattened trusted
+ * override (OMG MCP layer, service tier, model provider config — whatever the
+ * caller derived through the same codexSdkOptionsForModel layer the SDK path
+ * uses). Unlike codexAppServerArgv this disables NOTHING and overrides no
+ * MCP servers: the model runs its server tools itself under the thread's
+ * danger-full-access / approval-never policy.
+ */
+export function codexAppServerTrustedArgv(
+  bin: string,
+  config?: { [key: string]: unknown },
+): string[] {
+  const argv = [bin, "app-server", "--stdio"];
+  for (const override of flattenCodexConfigOverrides(config ?? {})) {
+    argv.push("--config", override);
+  }
+  return argv;
+}
+
+// ---------------------------------------------------------------------------
 // Transport: line-delimited JSON-RPC over the child's stdio
 // ---------------------------------------------------------------------------
 
@@ -547,8 +636,23 @@ export class CodexAppServerClient {
     transport.onClose(this.closeListener);
   }
 
-  onNotification(method: string, handler: (params: unknown) => void): void {
+  onNotification(method: string, handler: (params: unknown) => void): () => void {
     this.notificationHandlers.set(method, [...(this.notificationHandlers.get(method) ?? []), handler]);
+    return () => this.offNotification(method, handler);
+  }
+
+  /**
+   * Drop one notification handler. A persistent client that registers
+   * per-turn handlers must unsubscribe at turn end, or every finished turn
+   * leaves its closures (and their captured buffers) attached to the
+   * connection for the child's lifetime.
+   */
+  offNotification(method: string, handler: (params: unknown) => void): void {
+    const handlers = this.notificationHandlers.get(method);
+    if (!handlers) return;
+    const next = handlers.filter((existing) => existing !== handler);
+    if (next.length) this.notificationHandlers.set(method, next);
+    else this.notificationHandlers.delete(method);
   }
 
   /** Called once when the connection ends, from a close, a protocol abort, or close(). */

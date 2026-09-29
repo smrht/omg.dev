@@ -48,6 +48,7 @@ export type ManagedSession = {
   model?: string;
   /** Reasoning effort selected for subsequent turns, when the agent supports it. */
   thinkingLevel?: string;
+  cyberAccessProgram?: import("./model-discovery.ts").CyberAccessProgram;
   /** Codex account service tier selected when this session launched. */
   serviceTier?: CodexServiceTier | null;
   /** Provider-native low-latency mode, independent from reasoning effort. */

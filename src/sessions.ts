@@ -449,6 +449,8 @@ export type Session = {
   // without a live effort control or older sessions launched before it was
   // tracked.
   thinkingLevel?: string | null;
+  cyberAccessProgram?: import("./model-discovery.ts").CyberAccessProgram | null;
+  cyberAccessProgramControl?: boolean;
   /** Fast when Codex launched on its higher-throughput account service tier. */
   serviceTier?: "fast" | null;
   fastMode?: boolean;
@@ -3301,6 +3303,8 @@ export async function listSessions(): Promise<Session[]> {
       // be explicit about intent.
       model: publicAgent === "aisdk" || isPi ? modelAlias(e.model) : e.model,
       thinkingLevel: e.thinkingLevel ?? managedRec?.thinkingLevel ?? null,
+      cyberAccessProgram: e.cyberAccessProgram ?? managedRec?.cyberAccessProgram ?? null,
+      cyberAccessProgramControl: e.cyberAccessProgramControl === true,
       serviceTier: e.serviceTier ?? managedRec?.serviceTier ?? null,
       fastMode:
         e.fastMode ??
@@ -3676,6 +3680,7 @@ export type ResumableSession = {
   resumeHandle?: string | null;
   model?: string | null;
   thinkingLevel?: string | null;
+  cyberAccessProgram?: import("./model-discovery.ts").CyberAccessProgram | null;
   serviceTier?: "fast" | null;
   fastMode?: boolean;
   assignedUser?: string | null;

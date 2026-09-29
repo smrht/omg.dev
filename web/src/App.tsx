@@ -103,6 +103,16 @@ import { groupNodesByProject, type ProjectGroup } from "./lib/session-groups";
 import { pathnameToSessionId, pathnameToThreadId, sessionToPath, threadToPath } from "./lib/app-search";
 import { NEW_THREAD_ID, ThreadChat, ThreadRailSection, useTypingReport, type ThreadComposerProps } from "./components/threads";
 import { PullToThread } from "./components/pull-to-thread";
+import { DaybreakProgramSelect, SessionDaybreakSubmenu } from "./components/session-daybreak-control";
+import {
+  cyberAccessProgramsFor,
+  daybreakLabel,
+  offersDaybreak,
+  parseCyberAccessProgram,
+  resolveLaunchProgram,
+  setSessionCyberAccessProgram,
+  type CyberAccessProgram,
+} from "./lib/session-daybreak";
 import { useThreads } from "./lib/threads";
 import { THREAD_MENTIONS, threadPreview, type ThreadMentionOption, type ThreadSummary } from "../../packages/protocol/src/threads";
 import {
@@ -916,6 +926,18 @@ export type Session = {
   status?: "ok" | "blocked";
   statusReason?: "model_unavailable" | "out_of_credits" | "provider_auth" | "provider_error" | "restart_recovered" | "interrupted" | "out_of_memory" | null;
   statusDetail?: string | null;
+  /**
+   * Cyber access program (Daybreak) this session runs with, when the backend
+   * set one. Null/absent = no explicit program (automatic). UI choice stays
+   * per-session: no global default is remembered.
+   */
+  cyberAccessProgram?: string | null;
+  /**
+   * False when this session's harness predates the Daybreak toggle — the
+   * session must be resumed before it can be changed. Absent on a box that
+   * predates the feature entirely.
+   */
+  cyberAccessProgramControl?: boolean;
   // Live "working" flag from the list call (backend computes it from the tmux
   // pane / aisdk registry). Lets a collapsed card show working/idle without
   // holding open a transcript stream — the stream only overrides this while the
@@ -1238,6 +1260,13 @@ type ModelCatalogItem = {
   models: string[];
   thinkingLevels: string[];
   thinkingLevelsByModel?: Record<string, string[]>;
+  /**
+   * Discovered per-model capability metadata (reasoning efforts, cyber access
+   * programs) for the codex-family providers. Absent when discovery carried
+   * none. Preserved into AgentModelCatalog so the Daybreak picker advertises
+   * only what the connected account's live catalog offered.
+   */
+  modelCapabilities?: Record<string, { reasoningEfforts?: string[]; cyberAccessPrograms?: string[] }>;
   session: boolean;
   auto: boolean;
   visible?: boolean;
@@ -1565,6 +1594,8 @@ type AgentModelCatalog = {
   defaults: Record<AgentKind, string>;
   thinkingLevels: Record<AgentKind, string[]>;
   thinkingLevelsByModel: Record<AgentKind, Record<string, string[]>>;
+  /** Live per-model capability metadata; only codex-family keys are filled. */
+  modelCapabilities: Partial<Record<AgentKind, Record<string, { reasoningEfforts?: string[]; cyberAccessPrograms?: string[] }>>>;
 };
 
 function buildAgentModelCatalog(items?: ModelCatalogItem[] | null): AgentModelCatalog {
@@ -1578,14 +1609,18 @@ function buildAgentModelCatalog(items?: ModelCatalogItem[] | null): AgentModelCa
   const thinkingLevelsByModel = Object.fromEntries(
     Object.keys(AGENT_MODELS).map((key) => [key, {}]),
   ) as Record<AgentKind, Record<string, string[]>>;
+  const modelCapabilities: AgentModelCatalog["modelCapabilities"] = {};
   for (const item of items ?? []) {
     if (!AGENT_MODELS[item.key] || !item.models?.length) continue;
     models[item.key] = item.models;
     defaults[item.key] = item.defaultModel || defaults[item.key];
     thinkingLevels[item.key] = item.thinkingLevels ?? thinkingLevels[item.key];
     thinkingLevelsByModel[item.key] = item.thinkingLevelsByModel ?? {};
+    if (item.modelCapabilities && Object.keys(item.modelCapabilities).length) {
+      modelCapabilities[item.key] = item.modelCapabilities;
+    }
   }
-  return { models, defaults, thinkingLevels, thinkingLevelsByModel };
+  return { models, defaults, thinkingLevels, thinkingLevelsByModel, modelCapabilities };
 }
 
 const AgentModelCatalogContext = createContext<AgentModelCatalog>(
@@ -18313,6 +18348,7 @@ function SessionActionsMenu({
   } = useSessionActions({ session, users, onRefresh, onRemove, onError });
   const transcriptView = useContext(TranscriptViewContext);
   const openTerminal = useContext(SessionTerminalContext);
+  const catalog = useAgentModelCatalog();
 
   // The sheet swaps sessions in place (swipe / arrow keys). Close the panel
   // rather than silently repointing it at another session's checkout.
@@ -18443,6 +18479,17 @@ function SessionActionsMenu({
           <SessionThinkingLevelSubmenu
             session={session}
             onRefresh={onRefresh}
+            onError={onError}
+          />
+          <SessionDaybreakSubmenu
+            session={session}
+            offered={cyberAccessProgramsFor(catalog, session.agent, session.model ?? undefined)}
+            busy={busy}
+            onSave={(program) =>
+              session.sessionId
+                ? setSessionCyberAccessProgram(session.sessionId, program).then(() => onRefresh())
+                : Promise.resolve()
+            }
             onError={onError}
           />
           {onTogglePin ? (
@@ -19359,6 +19406,11 @@ function ForkSessionDialog({
   const sid = session.sessionId;
   const models = catalog.models[agent] ?? AGENT_MODELS[agent];
   const thinkingLevels = useAgentThinkingLevels(agent, model);
+  const programs = cyberAccessProgramsFor(catalog, agent, model);
+  const [forkProgram, setForkProgram] = useState<CyberAccessProgram | null>(() =>
+    resolveLaunchProgram(parseCyberAccessProgram(session.cyberAccessProgram), cyberAccessProgramsFor(catalog, defaultAgent, localStorage.getItem(`lfg_fork_model_${defaultAgent}`) || defaultModelFor(defaultAgent))),
+  );
+  useEffect(() => { setForkProgram((current) => resolveLaunchProgram(current, programs)); }, [agent, model, programs]);
   const selectedLaunchId =
     agent === "aisdk" && claudeAccountId ? `aisdk:${claudeAccountId}` : agent;
   // Same composer plumbing as the new-session composer: eager uploads, drag &
@@ -19426,6 +19478,7 @@ function ForkSessionDialog({
             model,
             thinkingLevel: thinkingLevels.length ? thinkingLevel : undefined,
             claudeAccountId: agent === "aisdk" ? claudeAccountId || undefined : undefined,
+            cyberAccessProgram: resolveLaunchProgram(forkProgram, programs) ?? undefined,
             archiveSource: continuing || undefined,
           }),
         });
@@ -19542,6 +19595,8 @@ function ForkSessionDialog({
             />
 
             <ModelPicker value={model} models={models} onChange={setModel} width="max-w-28" />
+
+            {offersDaybreak(programs) ? <DaybreakProgramSelect automatic value={forkProgram} programs={programs} onChange={setForkProgram} /> : null}
 
             <ThinkingLevelPill
               agent={agent}
@@ -23859,6 +23914,12 @@ function NewSessionDialog({
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(
     () => savedThinkingLevel(),
   );
+  // Daybreak (cyber access program) for codex-aisdk launches. Null means the
+  // payload omits the field entirely (automatic); an explicit pick — including
+  // "Uit" — always sends a real value. Deliberately NOT remembered across
+  // launches: there is no global default, and the choice belongs to the model
+  // it was made for.
+  const [daybreakProgram, setDaybreakProgram] = useState<CyberAccessProgram | null>(null);
   const [fastMode, setFastModeState] = useState(() => readFastMode(localStorage, agent));
   const [tiboMode, setTiboModeState] = useState(() => readTiboMode(localStorage));
   // Default the owner to the active profile, falling back to the first known user
@@ -24331,6 +24392,9 @@ function NewSessionDialog({
 
   const models = catalog.models[agent] ?? AGENT_MODELS[agent];
   const thinkingLevels = useAgentThinkingLevels(agent, model);
+  // Live Daybreak vocabulary for the current backend + model; empty unless
+  // codex-aisdk offers a nonstandard program for exactly this model.
+  const daybreakPrograms = cyberAccessProgramsFor(catalog, agent, model);
   const { favorites: favoriteModels, toggle: toggleFavorite } = useModelFavorites(agent, models, model);
   // Hidden by the box (or the viewer's role) means off. A saved "on" in
   // localStorage must not launch fast mode through a pill nobody can see.
@@ -24338,7 +24402,7 @@ function NewSessionDialog({
   const fastModeEnabled = fastMode && fastModeAvailable;
   const tiboModeAvailable = canUseTiboMode({ agent, model, thinkingLevels });
   const tiboModeActive =
-    tiboMode && tiboModeAvailable && fastModeEnabled && thinkingLevel === "high";
+    tiboMode && daybreakProgram == null && tiboModeAvailable && fastModeEnabled && thinkingLevel === "high";
   // When the live view is filtered to a specific project, lock new sessions to
   // that project's repo (and hide the picker below). Falls back to the normal
   // localStorage/first-repo default when viewing "All projects" or when the
@@ -24421,6 +24485,14 @@ function NewSessionDialog({
       setThinkingLevel(thinkingLevels.includes("high") ? "high" : thinkingLevels[0]);
     }
   }, [thinkingLevel, thinkingLevels]);
+  // A pending Daybreak choice never travels to a different backend or model:
+  // switching either resets it, and so does a catalog refresh that drops the
+  // program. The submit-time resolveLaunchProgram guard is the second lock.
+  useEffect(() => {
+    setDaybreakProgram(
+      (current) => (current && daybreakPrograms.includes(current) ? current : null),
+    );
+  }, [agent, model, daybreakPrograms]);
   useEffect(() => {
     setFastModeState(readFastMode(localStorage, agent));
   }, [agent]);
@@ -24432,6 +24504,7 @@ function NewSessionDialog({
     setTiboModeState(enabled);
     writeTiboMode(localStorage, enabled);
     if (enabled && tiboModeAvailable) {
+      setDaybreakProgram(null);
       setFastModeState(true);
       writeFastMode(localStorage, agent, true);
       setThinkingLevel("high");
@@ -24549,7 +24622,7 @@ function NewSessionDialog({
     const launchUser = resolveRosterUser(user, users) || null;
     const launchAgent = agent;
     const tiboLaunch = resolveTiboLaunch({
-      enabled: tiboMode,
+      enabled: tiboMode && daybreakProgram == null,
       available: tiboModeAvailable,
       model,
       thinkingLevel: overrideThinking ?? thinkingLevel,
@@ -24558,6 +24631,13 @@ function NewSessionDialog({
     const launchThinkingLevel = tiboLaunch.thinkingLevel as ThinkingLevel;
     const launchFastMode = fastModeEnabled || tiboLaunch.fastMode === true;
     const launchClaudeAccountId = launchAgent === "aisdk" ? claudeAccountId || undefined : undefined;
+    // Stale-flag lock: the program rides along only when the model actually
+    // being launched still offers it. An explicit Daybreak choice takes
+    // precedence over the Tibo preset without rewriting its saved setting.
+    const launchDaybreak = resolveLaunchProgram(
+      daybreakProgram,
+      cyberAccessProgramsFor(catalog, launchAgent, launchModel),
+    );
     const stashed = stagePromptSend({
       contextKey: "new-session",
       source: "new-session",
@@ -24634,6 +24714,7 @@ function NewSessionDialog({
             agent: launchAgent,
             model: launchModel,
             thinkingLevel: thinkingLevels.length ? launchThinkingLevel : undefined,
+            cyberAccessProgram: launchDaybreak ?? undefined,
             fastMode: launchFastMode,
             claudeAccountId: launchClaudeAccountId,
             overLimit: overLimit || undefined,
@@ -24830,6 +24911,20 @@ function NewSessionDialog({
           immersive
         />
       )}
+
+      {/* Daybreak shows only where the selected codex-aisdk model offers a
+          nonstandard program. The default is omitted/automatic; an explicit
+          pick — including "Uit" — always launches with a real value, and the
+          choice resets with the backend/model instead of a global default. */}
+      {offersDaybreak(daybreakPrograms) ? (
+        <DaybreakProgramSelect
+          automatic
+          value={daybreakProgram}
+          programs={daybreakPrograms}
+          onChange={setDaybreakProgram}
+          flat={variant === "inline"}
+        />
+      ) : null}
 
       {fastModeAvailable && !tiboModeActive ? (
         <FastModePill
@@ -25071,6 +25166,21 @@ function NewSessionDialog({
             : null
         }
         tibo={tiboModeAvailable ? { enabled: tiboModeActive, onToggle: () => setTiboMode(!tiboMode) } : null}
+        daybreak={
+          offersDaybreak(daybreakPrograms)
+            ? {
+                options: [
+                  { id: "", label: "Automatisch", selected: daybreakProgram == null },
+                  ...daybreakPrograms.map((program) => ({
+                    id: program,
+                    label: daybreakLabel(program),
+                    selected: program === daybreakProgram,
+                  })),
+                ],
+                onPick: (id) => setDaybreakProgram(id === "" ? null : (id as CyberAccessProgram)),
+              }
+            : null
+        }
         thinking={
           !tiboModeActive && agentSupportsThinking(agent)
             ? {
@@ -25091,12 +25201,13 @@ function NewSessionDialog({
       />
     ) : null;
 
-  // The inline summary line: agent · model · thinking, mirroring what the
-  // picker below it will change.
+  // The inline summary line: agent · model · thinking (· Daybreak),
+  // mirroring what the picker below it will change.
   const pickerSummary = [
     agentHeaderLabel,
     view.showComposerModels ? pickerModelDisplay(model).label || "Model" : null,
     agentSupportsThinking(agent) ? pickerThinkingLabel(thinkingLevelLabel(thinkingLevel)) : null,
+    daybreakProgram ? `Daybreak: ${daybreakLabel(daybreakProgram)}` : null,
   ]
     .filter(Boolean)
     .join(" · ");

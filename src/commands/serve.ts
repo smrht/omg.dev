@@ -1,3 +1,4 @@
+import { resolveSessionCyberAccessProgram, applySessionCyberAccessProgram } from "../session-cyber-access.ts";
 import { inspectIdleChild } from "../omg-idle-child.ts";
 import { createNoProjectWorkspace, NO_PROJECT } from "../no-project-chat.ts";
 import { readinessBootstrap } from "../bootstrap-readiness.ts";
@@ -1870,6 +1871,7 @@ function persistManagedResume(session: Session): void {
     backend: backend ?? undefined,
     model: session.model,
     thinkingLevel: session.thinkingLevel,
+    cyberAccessProgram: session.cyberAccessProgram,
     serviceTier: session.serviceTier,
     fastMode: session.fastMode === true || session.serviceTier === "fast",
     assignedUser: session.assignedUser,
@@ -9438,6 +9440,7 @@ a{color:#60a5fa}
             launchState: "launching",
             model: resumeModel,
             thinkingLevel: cachedResume.thinkingLevel ?? undefined,
+            cyberAccessProgram: cachedResume.cyberAccessProgram ?? undefined,
             serviceTier: cachedResume.serviceTier ?? undefined,
             fastMode: cachedResume.fastMode ?? cachedResume.serviceTier === "fast",
             ...(cachedResume.backend === "aisdk"
@@ -9471,6 +9474,7 @@ a{color:#60a5fa}
             prompt,
             model: resumeModel,
             thinkingLevel: cachedResume.thinkingLevel ?? undefined,
+            cyberAccessProgram: cachedResume.cyberAccessProgram ?? undefined,
             serviceTier: cachedResume.serviceTier ?? undefined,
             fastMode: cachedResume.fastMode ?? cachedResume.serviceTier === "fast",
             sessionId,
@@ -9791,6 +9795,7 @@ a{color:#60a5fa}
             user?: string;
             model?: string;
             thinkingLevel?: string;
+            cyberAccessProgram?: unknown;
             archiveSource?: boolean;
             claudeAccountId?: string;
             agent?: "claude" | "codex" | "aisdk" | "codex-aisdk" | "opencode" | "omg" | "grok" | "cursor" | "hermes" | "pi" | "jcode";
@@ -9845,6 +9850,7 @@ a{color:#60a5fa}
               agent: body?.agent,
               model: body?.model,
               thinkingLevel: body?.thinkingLevel,
+              cyberAccessProgram: body?.cyberAccessProgram,
               claudeAccountId: body?.claudeAccountId,
             }),
           });
@@ -9891,6 +9897,7 @@ a{color:#60a5fa}
           worktree?: boolean;
           model?: string;
           thinkingLevel?: string;
+          cyberAccessProgram?: unknown;
           fastMode?: unknown;
           serviceTier?: unknown;
           claudeAccountId?: string;
@@ -9997,6 +10004,9 @@ a{color:#60a5fa}
             return err(400, `unknown thinking level "${thinkingLevel}" for ${agent} (expected one of ${allowed.join(", ")})`);
         }
         const resolvedModel = resolveModelForAgent(agent, model, thinkingLevel);
+        const cyberChoice = resolveSessionCyberAccessProgram({ agent, model: resolvedModel ?? "gpt-5.5", requested: body?.cyberAccessProgram });
+        if (!cyberChoice.ok) return err(400, cyberChoice.error);
+        const cyberAccessProgram = cyberChoice.program;
         const fastModeResult = resolveSessionFastMode({
           requested: body?.fastMode,
           legacyServiceTier: body?.serviceTier,
@@ -10157,6 +10167,7 @@ a{color:#60a5fa}
               : undefined,
           launchState: "launching",
           model: launchModel,
+          cyberAccessProgram,
           thinkingLevel,
           serviceTier,
           fastMode,
@@ -10187,6 +10198,7 @@ a{color:#60a5fa}
           cwd,
           prompt,
           model: launchModel,
+          cyberAccessProgram,
           thinkingLevel,
           serviceTier,
           fastMode,
@@ -11282,6 +11294,19 @@ a{color:#60a5fa}
           }
           const msg = enqueueMessage(m[1], `/model ${model}`);
           return json({ ok: true, msg });
+        }
+      }
+
+      {
+        const match = path.match(/^\/api\/sessions\/([0-9a-fA-F-]{36})\/cyber-access-program$/);
+        if (match && req.method === "POST") {
+          const body = await req.json().catch(() => null) as { cyberAccessProgram?: unknown } | null;
+          const sess = (await listSessions()).find(s => s.sessionId === match[1] || s.nativeSessionId === match[1]);
+          const result = applySessionCyberAccessProgram({ session: sess, entry: sess ? findAisdkEntryByAnyId(match[1]) : null,
+            requested: body?.cyberAccessProgram, append: appendAisdkCmd, patchEntry: patchAisdkEntry, patchManaged });
+          if (!result.ok) return err(result.status, result.error);
+          invalidateListSessionsCache();
+          return json({ ok: true, cyberAccessProgram: result.program, appliesTo: "next-turn" });
         }
       }
 

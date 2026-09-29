@@ -1252,6 +1252,7 @@ export function spawnManagedAisdkSession(opts: ManagedAisdkSessionOptions): Mana
 // than a deterministic --session id — codex assigns its thread id only after the
 // first turn, so the key is all we know up front (see the harness header).
 export type ManagedCodexAisdkSessionOptions = {
+  cyberAccessProgram?: import("./model-discovery.ts").CyberAccessProgram;
   name: string;
   cwd: string;
   prompt?: string;
@@ -1283,6 +1284,7 @@ export function managedCodexAisdkSessionArgv(opts: ManagedCodexAisdkSessionOptio
   ];
   if (opts.thinkingLevel) argv.push("--thinking-level", opts.thinkingLevel);
   if (opts.serviceTier) argv.push("--service-tier", opts.serviceTier);
+  if (opts.cyberAccessProgram) argv.push("--cyber-access-program", opts.cyberAccessProgram);
   if (opts.resume) argv.push("--resume", opts.resume);
   if (opts.recoveredAt) argv.push("--recovered-at", String(opts.recoveredAt));
   const prompt = launchEnvelope(opts.prompt);

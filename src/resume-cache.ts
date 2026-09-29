@@ -141,6 +141,7 @@ type Row = {
   resume_handle: string | null;
   model: string | null;
   thinking_level: string | null;
+  cyber_access_program: import("./model-discovery.ts").CyberAccessProgram | null;
   service_tier: string | null;
   fast_mode: number;
   assigned_user: string | null;
@@ -277,6 +278,9 @@ function init(): Database {
       );
     }
   }
+  if (!d.query<{ name: string }, []>("PRAGMA table_info(resumable_sessions)").all().some(c => c.name === "cyber_access_program")) {
+    d.exec("ALTER TABLE resumable_sessions ADD COLUMN cyber_access_program TEXT");
+  }
   initialized = true;
   return d;
 }
@@ -304,6 +308,7 @@ function toSession(row: Row): ResumableSession {
     resumeHandle: row.resume_handle,
     model: row.model,
     thinkingLevel: row.thinking_level,
+    cyberAccessProgram: row.cyber_access_program,
     serviceTier: row.service_tier === "fast" ? "fast" : null,
     fastMode: row.fast_mode === 1 || row.service_tier === "fast",
     assignedUser: row.assigned_user,
@@ -373,11 +378,11 @@ export function upsertResumableRows(rows: ResumableCacheRow[]): void {
   const stmt = d.query(`
     INSERT INTO resumable_sessions
       (session_id, cwd, project, title, last_user_text, last_activity_at, agent, path, mtime_ms,
-       backend, resume_handle, model, thinking_level, service_tier, fast_mode,
+       backend, resume_handle, model, thinking_level, service_tier, fast_mode, cyber_access_program,
        assigned_user, managed, resumable, roster_hidden,
        parent_session_id, spawned_by, bot_id, originator, source_kind, launch_contract,
        scheduled, archived_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(session_id) DO UPDATE SET
       cwd = excluded.cwd,
       project = excluded.project,
@@ -391,6 +396,7 @@ export function upsertResumableRows(rows: ResumableCacheRow[]): void {
       resume_handle = excluded.resume_handle,
       model = excluded.model,
       thinking_level = excluded.thinking_level,
+      cyber_access_program = COALESCE(excluded.cyber_access_program, resumable_sessions.cyber_access_program),
       service_tier = excluded.service_tier,
       fast_mode = excluded.fast_mode,
       assigned_user = COALESCE(excluded.assigned_user, resumable_sessions.assigned_user),
@@ -433,6 +439,7 @@ export function upsertResumableRows(rows: ResumableCacheRow[]): void {
         r.thinkingLevel ?? null,
         r.serviceTier ?? null,
         r.fastMode ? 1 : 0,
+        r.cyberAccessProgram ?? null,
         r.assignedUser ?? null,
         r.managed ? 1 : 0,
         r.resumable === false ? 0 : 1,
@@ -515,7 +522,7 @@ export function getCachedResumableSession(sessionId: string): ResumableSession |
   const row = d
     .query<Row, [string]>(`
       SELECT session_id, cwd, project, title, last_user_text, last_activity_at, agent, path, mtime_ms,
-             backend, resume_handle, model, thinking_level, service_tier, fast_mode,
+             backend, resume_handle, model, thinking_level, service_tier, fast_mode, cyber_access_program,
              assigned_user, managed, resumable, scheduled, archived_at
       FROM resumable_sessions
       WHERE session_id = ? AND resumable = 1
@@ -1000,7 +1007,7 @@ export function queryResumableCache(opts: ResumableQuery = {}): ResumableQueryRe
   const rows = d
     .query<Row, (string | number)[]>(`
       SELECT session_id, cwd, project, title, last_user_text, last_activity_at, agent, path, mtime_ms,
-             backend, resume_handle, model, thinking_level, service_tier, fast_mode,
+             backend, resume_handle, model, thinking_level, service_tier, fast_mode, cyber_access_program,
              assigned_user, managed, resumable, scheduled, archived_at
       FROM resumable_sessions
       ${whereSql}
@@ -1073,7 +1080,7 @@ export function queryHistoricalCache(opts: HistoricalQuery = {}): HistoricalQuer
   const rows = d
     .query<Row, (string | number)[]>(`
       SELECT session_id, cwd, project, title, last_user_text, last_activity_at, agent, path, mtime_ms,
-             backend, resume_handle, model, thinking_level, service_tier, fast_mode,
+             backend, resume_handle, model, thinking_level, service_tier, fast_mode, cyber_access_program,
              assigned_user, managed, resumable, scheduled, archived_at
       FROM resumable_sessions
       ${whereSql}

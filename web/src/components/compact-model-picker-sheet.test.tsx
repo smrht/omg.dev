@@ -197,3 +197,37 @@ test("an empty favorites list explains how to pin a model", () => {
   renderSheet({ favorites: [] });
   expect(body().textContent).toContain("Voeg via Alle modellen een favoriet toe.");
 });
+
+test("the daybreak row is an explicitly labeled native select over the passed choices", () => {
+  const onPick = mock((_id: string) => {});
+  renderSheet({
+    daybreak: {
+      options: [
+        { id: "", label: "Automatisch", selected: true },
+        { id: "standard", label: "Uit", selected: false },
+        { id: "daybreakBlue", label: "Blue", selected: false },
+      ],
+      onPick,
+    },
+  });
+  const select = body().querySelector('[data-testid="compact-model-picker"] select') as HTMLSelectElement;
+  expect(select).not.toBeNull();
+  const label = document.body.querySelector(`label[for="${select.id}"]`);
+  expect(label?.textContent).toContain("Daybreak");
+  expect([...select.querySelectorAll("option")].map((o) => o.textContent)).toEqual([
+    "Automatisch",
+    "Uit",
+    "Blue",
+  ]);
+  expect(select.value).toBe("");
+  act(() => {
+    select.value = "daybreakBlue";
+    select.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }));
+  });
+  expect(onPick.mock.calls).toEqual([["daybreakBlue"]]);
+});
+
+test("without daybreak choices the picker shows no daybreak select", () => {
+  renderSheet();
+  expect(body().querySelector('[data-testid="compact-model-picker"] select')).toBeNull();
+});

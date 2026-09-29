@@ -241,6 +241,7 @@ export function launchRecovered(
       resume: entry.threadId,
       thinkingLevel: entry.thinkingLevel ?? undefined,
       serviceTier: managed.serviceTier ?? entry.serviceTier ?? undefined,
+      cyberAccessProgram: entry.cyberAccessProgram ?? managed.cyberAccessProgram ?? undefined,
     });
   }
   if (entry.agent === "opencode" || entry.agent === "omg") {

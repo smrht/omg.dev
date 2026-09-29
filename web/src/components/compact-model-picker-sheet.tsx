@@ -55,6 +55,7 @@ export function CompactModelPickerSheet({
   onToggleFavorite,
   renderModels,
   thinking,
+  daybreak,
   fast,
   tibo,
   usage,
@@ -78,6 +79,12 @@ export function CompactModelPickerSheet({
   /** The searchable model list. `done` returns to the root page. */
   renderModels?: (done: () => void) => ReactNode;
   thinking?: { options: PickerChoice[]; onPick: (id: string) => void } | null;
+  /**
+   * Daybreak (cyber access program) for codex-aisdk models that offer one.
+   * Rendered as a native select with an explicit label, so the mobile picker
+   * and the desktop pill expose the same control.
+   */
+  daybreak?: { options: PickerChoice[]; onPick: (id: string) => void } | null;
   fast?: { enabled: boolean; onToggle: () => void } | null;
   tibo?: { enabled: boolean; onToggle: () => void } | null;
   usage?: { summary: string; details?: ReactNode } | null;
@@ -85,6 +92,7 @@ export function CompactModelPickerSheet({
   const [page, setPage] = useState<"root" | "models" | "profiles" | "usage">("root");
   const [agentsOpen, setAgentsOpen] = useState(false);
   const agentsListId = useId();
+  const daybreakSelectId = useId();
   useEffect(() => {
     if (!open) {
       setPage("root");
@@ -368,6 +376,26 @@ export function CompactModelPickerSheet({
                         </button>
                       ))}
                     </div>
+                  </div>
+                ) : null}
+
+                {daybreak?.options.length ? (
+                  <div className="flex min-h-11 items-center justify-between gap-2 border-t border-border py-1">
+                    <label htmlFor={daybreakSelectId} className="shrink-0 text-[13px] font-medium">
+                      Daybreak
+                    </label>
+                    <select
+                      id={daybreakSelectId}
+                      value={daybreak.options.find((option) => option.selected)?.id ?? ""}
+                      onChange={(event) => daybreak.onPick(event.target.value)}
+                      className="min-h-11 min-w-0 flex-1 max-w-[60%] truncate rounded-xl bg-muted px-3 text-xs font-medium text-foreground outline-none"
+                    >
+                      {daybreak.options.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
                   </div>
                 ) : null}
 

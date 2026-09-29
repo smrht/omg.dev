@@ -24,6 +24,7 @@ import type { CodexServiceTier } from "./service-tier.ts";
 import type { SandboxMode } from "./sandbox/bwrap.ts";
 
 export type CodingAgentLaunchRequest = {
+  cyberAccessProgram?: import("./model-discovery.ts").CyberAccessProgram;
   agent: ActiveSessionAgentKind;
   name: string;
   cwd: string;
@@ -111,6 +112,7 @@ export const ACTIVE_CODING_AGENT_PROVIDERS = {
       prompt: request.prompt,
       model: request.model ?? "gpt-5.5",
       key: request.sessionId,
+      cyberAccessProgram: request.cyberAccessProgram,
       thinkingLevel: request.thinkingLevel,
       serviceTier: request.serviceTier,
       omgSessionId: request.sessionId,

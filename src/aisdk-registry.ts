@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { PATHS } from "./config.ts";
 import { removeCursor } from "./agents/backends/cmd-tail.ts";
 import type { CodexServiceTier } from "./service-tier.ts";
+import type { CyberAccessProgram } from "./model-discovery.ts";
 
 // Resolved per call, not captured at import. Tests point PATHS.data at a temp
 // dir after this module loads; a captured constant made them read and write the
@@ -95,6 +96,15 @@ export type AisdkEntry = {
   // The Claude harness leaves this undefined — the deterministic sessionId
   // already IS its transcript id.
   threadId?: string | null;
+  // Explicit cyber access program chosen for a managed codex-aisdk session.
+  // null/absent = automatic (the account default, which is standard). "off"
+  // does not exist as a state: the control plane sends an explicit "standard".
+  cyberAccessProgram?: CyberAccessProgram | null;
+  // Marker written ONLY by harness builds that understand the
+  // set_cyber_access_program command. Older codex harnesses omit it; the
+  // control plane reads this to reject program changes with an upgrade hint
+  // instead of silently dropping the command on the floor.
+  cyberAccessProgramControl?: boolean;
   // Pending interactive question for headless harnesses (OpenCode `question`
   // tool). Live-ws publishes this as a session `prompt` event; answer/dismiss
   // route through the command file. Null/absent when no question is open.
@@ -111,7 +121,12 @@ export type AisdkCommand =
   // OpenCode (and future headless) interactive questions — option index is the
   // 0-based index into the registry prompt.options array.
   | { type: "answer"; index: number }
-  | { type: "dismiss" };
+  | { type: "dismiss" }
+  // Explicit cyber access program for a codex-aisdk session. Validated by the
+  // harness against live discovery metadata; an incompatible value is
+  // surfaced visibly and never silently downgraded. Takes effect on the NEXT
+  // turn, so an in-flight request keeps the program it froze.
+  | { type: "set_cyber_access_program"; cyberAccessProgram: CyberAccessProgram };
 
 function entryPath(sessionId: string): string {
   return join(dir(), `${sessionId}.json`);

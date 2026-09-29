@@ -39,6 +39,15 @@ import {
   withCodexServiceTierConfig,
   type CodexServiceTier,
 } from "../../service-tier.ts";
+import {
+  codexAppServerTrustedArgv,
+  CodexDaybreakError,
+  resolveCyberAccessProgram,
+  type CyberAccessProgram,
+} from "../../codex-daybreak.ts";
+import { readModelDiscoveryCacheSync, type CodexModelCapabilities } from "../../model-discovery.ts";
+import { isMuseCodexModel } from "./codex-muse.ts";
+import { CodexAppServerThread, type CodexBridgeEvents } from "./codex-app-server-session.ts";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { initialCmdOffset, readNewCmdLines, writeCursor } from "./cmd-tail.ts";
 import {
@@ -155,6 +164,66 @@ function omgMcpConfig(serviceTier?: CodexServiceTier): { config?: { [key: string
   return config ? { config } : {};
 }
 
+// ---------------------------------------------------------------------------
+// Cyber access program routing (Daybreak on ordinary managed sessions)
+// ---------------------------------------------------------------------------
+
+/** Live per-model metadata for the codex family — the only program source. */
+function codexAisdkCapabilities(): Record<string, CodexModelCapabilities> | undefined {
+  return readModelDiscoveryCacheSync()?.providers?.["codex-aisdk"]?.modelCapabilities;
+}
+
+/**
+ * Validate the `--cyber-access-program` launch arg BEFORE the harness boots.
+ * Same rule as every explicit program request: unknown names, missing
+ * metadata, or a program this account does not offer abort startup visibly —
+ * no silent fallback to the automatic default.
+ */
+export function parseCyberAccessProgramArg(
+  raw: string | undefined,
+  capabilities: Record<string, CodexModelCapabilities> | undefined,
+  model: string,
+): { cyberAccessProgram: CyberAccessProgram | null } {
+  if (raw == null || raw === "") return { cyberAccessProgram: null };
+  const { cyberAccessProgram } = resolveCyberAccessProgram({ model, requested: raw, capabilities });
+  return { cyberAccessProgram: cyberAccessProgram ?? null };
+}
+
+/**
+ * Which engine drives this turn. An explicit program needs the app-server
+ * bridge (the SDK has no wire for it), and once a session has bridged, later
+ * turns keep the bridge even on explicit "standard" — that preserves the
+ * SAME persistent thread instead of forking the conversation between engines.
+ */
+export function resolveCodexBridgePlan(input: {
+  program: CyberAccessProgram | null;
+  bridgeThreadId: string | null;
+}): "bridge" | "sdk" {
+  return input.program != null || input.bridgeThreadId != null ? "bridge" : "sdk";
+}
+
+/**
+ * The trusted app-server argv for one bridged turn: the SAME config layer a
+ * normal SDK turn gets (OMG MCP session binding + service tier, muse refused
+ * below), flattened into `--config key=value` TOML by the safe encoder. Muse
+ * models never bridge: their provider config belongs to the SDK path, and a
+ * program request for them was already rejected at validation.
+ */
+export function buildCodexAppServerBridgeArgv(input: {
+  model: string;
+  serviceTier?: CodexServiceTier;
+  codexPath: string;
+  codexConfig?: Record<string, unknown> | null;
+}): string[] {
+  if (isMuseCodexModel(input.model)) {
+    throw new CodexDaybreakError("program-not-offered", `"${input.model}" runs on the Muse provider; cyber access programs need a Codex-native model`);
+  }
+  const options = codexSdkOptionsForModel(input.model, omgMcpConfig(input.serviceTier), {
+    ...(input.codexConfig !== undefined ? { codexConfig: input.codexConfig } : {}),
+  });
+  return codexAppServerTrustedArgv(input.codexPath, options.config);
+}
+
 // Shared thread options for both the interactive harness and the one-shot
 // runner: full access + never-approve mirrors the tmux codex session's
 // `--sandbox danger-full-access --ask-for-approval never`.
@@ -206,7 +275,7 @@ function codexCompletedItemMessage(item: Record<string, unknown>, turnNonce: str
   }
   if (type === "command_execution") {
     const command = typeof item.command === "string" ? item.command : "";
-    const output = stringifyValue(item.output ?? item.stdout ?? item.stderr).trim();
+    const output = stringifyValue(item.output ?? item.aggregated_output ?? item.stdout ?? item.stderr).trim();
     const text = compactText([command ? `$ ${command}` : "command_execution", output].filter(Boolean).join("\n"));
     return { id, role: "assistant", kind: "tool_use", text, ts };
   }
@@ -319,6 +388,21 @@ export async function cmdCodexAisdkSession(argv: string[]): Promise<void> {
   const recoveredAt = Number(arg(argv, "--recovered-at")) || null;
   // Resuming a closed codex session: the rollout's threadId is known up front.
   const resumeThreadId = arg(argv, "--resume");
+  // Explicit cyber access program (Daybreak) for this session. Validated
+  // BEFORE the harness boots: an incompatible request exits visibly instead
+  // of silently degrading to the automatic default.
+  const programArg = arg(argv, "--cyber-access-program");
+  let requestedProgram: CyberAccessProgram | null = null;
+  try {
+    requestedProgram = parseCyberAccessProgramArg(programArg, codexAisdkCapabilities(), model).cyberAccessProgram;
+  } catch (error) {
+    console.error(`codex-aisdk-session: --cyber-access-program: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
+  // Once a turn rode the app-server bridge, EVERY later turn keeps it —
+  // including explicit "standard" or no program — so the conversation stays
+  // on one persistent thread instead of forking between engines.
+  let bridgeThreadId: string | null = null;
   // Everything after `--` is the initial prompt.
   const dashI = argv.indexOf("--");
   const initialPrompt = dashI >= 0 ? argv.slice(dashI + 1).join(" ").trim() : "";
@@ -369,6 +453,11 @@ export async function cmdCodexAisdkSession(argv: string[]): Promise<void> {
     sessionId: key,
     agent: "codex",
     threadId,
+    // Marker this harness build understands set_cyber_access_program; the
+    // control plane reads it to reject changes on legacy harnesses instead
+    // of queueing commands nothing would consume.
+    cyberAccessProgramControl: true,
+    cyberAccessProgram: requestedProgram,
     harnessPid: process.pid,
     tmuxName,
     supervisor: "process",
@@ -400,6 +489,10 @@ export async function cmdCodexAisdkSession(argv: string[]): Promise<void> {
   const publishDraft = makeDraftPublisher(key);
 
   async function runTurn(prompt: string, signal: AbortSignal): Promise<void> {
+    // Freeze the program request synchronously, before the first await: a
+    // set_cyber_access_program command that lands mid-turn changes the NEXT
+    // turn, never the one already in flight.
+    const frozenProgram = requestedProgram;
     // Codex turns are explicit request/response — no streaming-input merge —
     // so per-turn busy handling in drain() below cannot drift.
     // Unique per turn AND per harness process, so item_N ids never collide
@@ -408,21 +501,61 @@ export async function cmdCodexAisdkSession(argv: string[]): Promise<void> {
     indexSessionMessagesDirect(key, [
       { id: crypto.randomUUID(), role: "user", kind: "text", text: prompt, ts: Date.now() },
     ]);
+    // Set for the bridge branch: disposed in the finally below so no idle
+    // app-server child survives the turn.
+    let bridgeAdapter: CodexAppServerThread | null = null;
     try {
-      // Thread options are fixed on a Codex SDK Thread. Recreate the handle
-      // only after an effort change; once the first turn has supplied its id,
-      // resume preserves the same persisted conversation.
-      if (threadNeedsRebuild || thinkingLevel !== threadThinkingLevel) {
-        const opts = threadOptions(model, cwd, thinkingLevel ?? undefined);
-        thread = threadId ? codex.resumeThread(threadId, opts) : codex.startThread(opts);
-        threadThinkingLevel = thinkingLevel;
-        threadNeedsRebuild = false;
+      // SDK path: thread options are fixed on a Codex SDK Thread; recreate
+      // the handle only after an effort change or a stall, resuming the same
+      // persisted conversation once the first turn supplied its id.
+      const plan = resolveCodexBridgePlan({ program: frozenProgram, bridgeThreadId });
+      let streamSource: {
+        runStreamed: (
+          input: ReturnType<typeof codexInputForPrompt>,
+          options: { signal: AbortSignal },
+        ) => Promise<{ events: CodexBridgeEvents }>;
+      };
+      if (plan === "bridge") {
+        // Validate the frozen program against LIVE metadata before anything
+        // spawns; an incompatible request fails visibly right here, without
+        // touching the queued messages or falling back to the SDK path.
+        const { cyberAccessProgram } = resolveCyberAccessProgram({
+          model,
+          ...(frozenProgram ? { requested: frozenProgram } : {}),
+          capabilities: codexAisdkCapabilities(),
+        });
+        bridgeAdapter = new CodexAppServerThread({
+          argv: buildCodexAppServerBridgeArgv({
+            model,
+            serviceTier,
+            codexPath: requireCodexPathOverride(),
+            codexConfig: readCodexConfig(codexConfigPath()),
+          }),
+          // After the first bridged turn (explicit standard/off included)
+          // every turn resumes the SAME persistent thread id; a session that
+          // bridged mid-conversation carries its SDK thread id over, because
+          // both engines address the same ~/.codex/sessions rollout.
+          resumeThreadId: bridgeThreadId ?? threadId ?? resumeThreadId ?? null,
+          model,
+          cwd,
+          ...(thinkingLevel ? { effort: thinkingLevel } : {}),
+          ...(cyberAccessProgram ? { cyberAccessProgram, daybreakEnabled: cyberAccessProgram !== "standard" } : {}),
+        });
+        streamSource = bridgeAdapter;
+      } else {
+        if (threadNeedsRebuild || thinkingLevel !== threadThinkingLevel) {
+          const opts = threadOptions(model, cwd, thinkingLevel ?? undefined);
+          thread = threadId ? codex.resumeThread(threadId, opts) : codex.startThread(opts);
+          threadThinkingLevel = thinkingLevel;
+          threadNeedsRebuild = false;
+        }
+        streamSource = thread;
       }
       // Starting the turn is itself a stream wait: the SDK resolves and spawns
       // its codex binary here, so a broken install hangs on this line.
       lastSdkEventAt = Date.now();
       const input = codexInputForPrompt(prompt);
-      const { events } = await stallGate.race(thread.runStreamed(input, { signal }));
+      const { events } = await stallGate.race(streamSource.runStreamed(input, { signal }));
       publishDraft("", true);
       // Manual iteration so each wait for the NEXT event can be interrupted.
       // `for await` offers no way to break out of a hung next().
@@ -491,6 +624,21 @@ export async function cmdCodexAisdkSession(argv: string[]): Promise<void> {
         },
       ]);
     } finally {
+      if (bridgeAdapter) {
+        // One bridge child per turn: dispose it now so no idle app-server
+        // survives between turns. The persistent thread id rides the adapter
+        // and the next bridged turn (explicit standard/off included) resumes
+        // the SAME thread.
+        const bridgeId = bridgeAdapter.id;
+        if (bridgeId && bridgeId !== bridgeThreadId) {
+          bridgeThreadId = bridgeId;
+          if (bridgeId !== threadId) {
+            threadId = bridgeId;
+            patchEntry(key, { threadId });
+          }
+        }
+        await bridgeAdapter.close();
+      }
       publishDraft("", true);
     }
   }
@@ -549,6 +697,32 @@ export async function cmdCodexAisdkSession(argv: string[]): Promise<void> {
         fastMode: cmd.enabled,
         serviceTier: cmd.enabled ? "fast" : null,
       });
+    } else if (cmd.type === "set_cyber_access_program") {
+      // Visible validation, never a silent downgrade: an incompatible
+      // program is reported in the transcript, the queued user messages stay
+      // queued, and the session keeps its previous program for the next turn.
+      try {
+        const { cyberAccessProgram } = resolveCyberAccessProgram({
+          model,
+          requested: cmd.cyberAccessProgram,
+          capabilities: codexAisdkCapabilities(),
+        });
+        requestedProgram = cyberAccessProgram ?? null;
+        patchEntry(key, { cyberAccessProgram: requestedProgram });
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        console.error(`codex-aisdk-session: set_cyber_access_program rejected: ${msg}`);
+        indexSessionMessagesDirect(key, [
+          {
+            id: `${Date.now().toString(36)}cyber_rejected`,
+            role: "assistant",
+            kind: "text",
+            text: `⚠️ Cyber access program not changed: ${msg.slice(0, 800)}`,
+            ts: Date.now(),
+            apiError: true,
+          },
+        ]);
+      }
     } else if (cmd.type === "close") {
       shutdown();
     }
