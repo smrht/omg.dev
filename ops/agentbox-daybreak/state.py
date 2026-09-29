@@ -45,7 +45,8 @@ if sys.argv[1]=='capture':
 else:
  old=json.loads((w/'before-state.json').read_text());now=capture()
  version=json.loads((h/'omg/package.json').read_text())['version']
- expected=str(h/'.local/lib/omg-private/releases/06143-daybreak-sessions-20260929') if version=='0.6.143' else None
+ release='06143-daybreak-sessions-20260929' if (h/'omg/src/session-cyber-access.ts').is_file() else '06143-agentbox-20260929'
+ expected=str(h/'.local/lib/omg-private/releases'/release) if version=='0.6.143' else None
  assert now['private']==expected,'unexpected private preservation pointer'
  assert now['quiet']==old['quiet'],'routine quiet settings changed'
  for cat in ['settings','configs','routines','pids']:
