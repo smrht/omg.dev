@@ -10,6 +10,10 @@ manifest=module.read_manifest(backup)
 assert module.sha256_file(backup/manifest['releaseArchive'])==manifest['releaseSha256']
 old=pathlib.Path((backup/'private-before.txt').read_text().strip());private=pathlib.Path.home()/'.local/lib/omg-private'
 with module.update_lock(cfg):
+ safety=pathlib.Path.home()/'.local/lib/agentbox-isolation'
+ saved=pathlib.Path((backup/'safety-before.txt').read_text().strip())
+ assert saved.is_dir() and saved.parent==safety/'releases','unexpected safety rollback pointer'
+ link=safety/'current.rollback-06143';link.symlink_to(saved);link.replace(safety/'current')
  marker=backup/'codex-override.txt'
  if marker.is_file():
   dropin=pathlib.Path(marker.read_text().strip())

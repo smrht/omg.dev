@@ -4,6 +4,11 @@ h=pathlib.Path.home();w=h/'.cache/agent-tmp/omg-update-06143';live=h/'omg';priva
 codex=h/'.local/lib/codex-0159/node_modules/.bin/codex'
 dropin=h/'.config/systemd/user/omg.service.d/90-codex-06143.conf'
 codex_config=f'[Service]\nEnvironment=LFG_CODEX_PATH={codex}\n'
+isolation=h/'.local/lib/agentbox-isolation'
+old_safety=isolation/'releases/12dc864f45d6114a8380'
+new_safety=isolation/'releases/06143-thread-chat-20260929'
+def safety_point(target):
+ p=isolation/'current.next-06143';p.symlink_to(target);p.replace(isolation/'current')
 def run(*args):subprocess.run(list(map(str,args)),check=True)
 def point(target):
  p=private/'current.next-06143';p.symlink_to(target);p.replace(private/'current')
@@ -21,6 +26,8 @@ def hashfile(p):
 mode=sys.argv[1]
 if mode=='preflight':
  assert (private/'current').resolve()==old,'private layer changed during preparation'
+ assert (isolation/'current').resolve()==old_safety,'safety layer changed during preparation'
+ run('python3',new_safety/'omg_isolation_source.py',w/'candidate/src','--check')
  assert not dropin.exists() or dropin.read_text()==codex_config,'unreviewed Codex service override'
  assert subprocess.check_output([str(codex),'--version'],text=True).strip()=='codex-cli 0.159.0'
  run('python3',new/'preserve.py',w/'candidate')
@@ -32,6 +39,7 @@ elif mode=='restart':
  assert version in ['0.6.138','0.6.143']
  target=new if version=='0.6.143' else old
  run('python3',target/'preserve.py',live)
+ safety_point(new_safety if version=='0.6.143' else old_safety)
  if version=='0.6.143':
   assert dropin.read_text()==codex_config,'Codex override missing'
  elif dropin.exists():
@@ -58,6 +66,7 @@ elif mode=='health':
 elif mode=='activate':
  assert os.environ.get('OMG_SAFE_UPDATE')=='1','use the safe-update wrapper'
  assert (private/'current').resolve()==old,'private layer changed during preparation'
+ assert (isolation/'current').resolve()==old_safety,'safety layer changed during preparation'
  run('python3',old/'preserve.py',live)
  run('python3',new/'preserve.py',w/'candidate')
  # Verify the wrapper-created backup BEFORE touching runtime files.
@@ -78,6 +87,18 @@ elif mode=='activate':
  (backup/'private-before.txt').write_text(str(old)+'\n')
  (backup/'safety-before.txt').write_text(str((h/'.local/lib/agentbox-isolation/current').resolve())+'\n')
  shutil.copy2(w/'before-state.json',backup/'setup-before.json')
+ # Refresh only the account catalog proven with the new CLI. Preserve every
+ # other provider entry and the full-refresh scheduling timestamp.
+ catalog=live/'data/model-catalog.json'
+ fresh=json.loads((w/'probe-data/model-catalog.json').read_text())
+ current=json.loads(catalog.read_text())
+ shutil.copy2(catalog,backup/'model-catalog.before.json')
+ for key in ['codex','codex-aisdk']:
+  value=fresh['providers'][key]
+  assert value['ok'] and 'gpt-6.1-sol' in value['models'],'unverified Codex discovery'
+  current['providers'][key]=value
+ tmp=catalog.with_name('model-catalog.update-06143.json')
+ tmp.write_text(json.dumps(current,indent=2)+'\n');tmp.chmod(0o600);tmp.replace(catalog)
  # Only the restarted server selects the versioned CLI. Existing agent
  # processes and the global binary/config/auth remain untouched.
  assert not dropin.exists(),'new Codex drop-in appeared during preparation'
@@ -91,6 +112,7 @@ elif mode=='activate':
   if target.exists() or target.is_symlink():target.rename(archive/item.name)
   item.rename(target)
  point(new)
+ safety_point(new_safety)
  # Keep the reviewed health gate and safety wrapper persistent.
  for name in ['omg-safe-update','omg-pilot-check']:
   shutil.copy2(h/'bin'/name,backup/(name+'.before'))
