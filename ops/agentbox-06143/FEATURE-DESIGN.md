@@ -2,8 +2,8 @@
 
 Sam heeft deze routes bevestigd: eigen verbonden agent/model in Threads;
 ChatGPT/OpenAI, Google Flow en KIE voor media; Sol 6.1 en Daybreak waar het account
-die aanbiedt. Implementatie staat lokaal klaar voor verificatie en activatie;
-de Agentbox is nog niet bijgewerkt.
+die aanbiedt. De update en keuzefuncties zijn live op de Agentbox.
+Directe API-media wacht nog op prijsconfiguratie en de KIE-sleutel.
 
 ## Threads
 
@@ -51,5 +51,6 @@ inference. Een procescrash precies tussen commit en callback heeft geen bewezen
 exactly-once delivery-garantie; die claim wordt niet gemaakt.
 
 Scope is de Agentbox webinterface op desktop en mobiel. De native iOS-app vergt
-een eigen apprelease. Live accounts/prijzen/route zijn nog niet gecontroleerd door
-de verplichte Tailscale SSH-verificatie.
+een eigen apprelease. Eigen Codex-account, Sol 6.1, Daybreak Blue-aanvraag, een echt
+Thread-antwoord en handmatige media via upload/artifact/Thread zijn live bewezen.
+Betaalde OpenAI/KIE-generatie is niet uitgevoerd.

@@ -1,15 +1,19 @@
 # Agentbox update 0.6.143
 
-Status op 29 september 2026: lokaal voorbereid, NIET LIVE. Tailscale SSH vraagt
-gebruikersverificatie. Er zijn in deze run geen wijzigingen op de Agentbox gedaan.
-De publieke bootstrap meldde nog 0.6.138, 18 sessies en 26 settings.
+Status op 29 september 2026: **0.6.143 LIVE EN GEVERIFIEERD**. De veilige
+update heeft een gecontroleerde back-up en terugvalpad. 26 instellingen,
+82 routines, 22 sessies bij de omschakeling en drie Computer-processen zijn
+vergeleken en behouden. Zie LIVE-VERIFICATION.md voor bewijs en resterende
+API-media-configuratie.
 
 ## Behoud en activatie
 
 Lees vóór staging de actuele private pointer, manifest, configuratie, service-
-instellingen, sessies, routines en Computer-processen opnieuw. `deploy.py` verwacht
-`06138-threads-grouplabel-20260928`; een nieuwere live customization moet eerst in de
-bron worden opgenomen. Neem de actuele safety wrapper en pilot checker over,
+instellingen, sessies, routines en Computer-processen opnieuw. De voorafgaande laag was
+`06138-threads-grouplabel-20260928`. De nieuwe private laag is
+`06143-agentbox-20260929`; de onafhankelijke veiligheidslaag is
+`06143-thread-chat-20260929`. Voer deze eenmalige migratie niet opnieuw uit.
+Nieuwere live aanpassingen moeten eerst in de bron worden opgenomen. Neem de actuele safety wrapper en pilot checker over,
 behoud hun wijzigingen en voeg alleen 0.6.143 toe aan de ondersteunde versies.
 
 Officiële Linux-release SHA256:
@@ -27,8 +31,9 @@ de Linux-kandidaat slagen; Mac-tests vervangen die niet.
 
 De globale Mac-CLI is ongewijzigd. Een aparte tijdelijke CLI 0.159.0 gaf via dezelfde
 ChatGPT-login echte korte antwoorden op Sol 6.1 en Sol 6 met Daybreak Blue. De oude
-Mac-CLI 0.157.1 weigerde Sol 6.1; app-server 0.159.0 werkte. Dit is accountbewijs op
-de Mac, nog geen bewijs op de Agentbox.
+Mac-CLI 0.157.1 weigerde Sol 6.1; app-server 0.159.0 werkte. Dezelfde modellen en aanvragen zijn inmiddels ook op de Agentbox via het eigen
+account getest. OMG gebruikt daar de aparte CLI 0.159.0; de globale CLI 0.156.0
+is behouden.
 
 Controleer op de Agentbox eerst de werkelijk gebruikte `LFG_CODEX_PATH`/CLI,
 installatiemethode, versie en accountstatus. Bewaar de oude executable en rollback-
