@@ -55,23 +55,33 @@ export async function boundedText(stream: ReadableStream<Uint8Array>, limit: num
   } finally { reader.releaseLock(); }
 }
 
-export async function isolatedAutoBackend(agent: unknown, prompt: string, cwd: string, onLog: (s: string) => void, mode = "auto"): Promise<string> {
-  const deadline = Date.now() + 10 * 60_000;
+/**
+ * One isolated worker run, shared by every caller so the concurrency slot and
+ * the systemd containment stay identical. `capacityWaitMs` bounds how long a
+ * chat reply may queue behind pressure; auto agents wait minutes, chat must
+ * fail fast and visibly instead.
+ */
+async function isolatedWorkerRun(
+  payload: unknown,
+  input: { task: string; mode: string; cwd: string; capacityWaitMs: number },
+  onLog: (s: string) => void,
+): Promise<string> {
+  const deadline = Date.now() + input.capacityWaitMs;
   let announced = false;
   while (active >= 3 || pressureHigh()) {
     if (!announced) { onLog("[isolation] waiting for background capacity or memory pressure to clear"); announced = true; }
-    if (Date.now() >= deadline) throw new Error("Background run deferred: memory pressure or capacity persisted for 10 minutes");
+    if (Date.now() >= deadline) throw new Error(input.mode === "chat"
+      ? "Thread reply deferred: memory pressure or capacity persisted"
+      : "Background run deferred: memory pressure or capacity persisted for 10 minutes");
     await Bun.sleep(2000);
   }
   active++;
   try {
-    const task = typeof agent === "object" && agent !== null && "id" in agent && typeof agent.id === "string"
-      ? agent.id.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 40) : mode;
-    const name = `omg-auto-${task}-${crypto.randomUUID()}`;
+    const name = `omg-${input.mode}-${input.task}-${crypto.randomUUID()}`;
     onLog(`[isolation] worker=${name}.service`);
-    const cmd = workerCommand([process.execPath, join(import.meta.dir, "omg-isolation-worker.ts")], name, cwd);
-    const proc = Bun.spawn(cmd, { cwd, env: process.env, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
-    proc.stdin.write(JSON.stringify({ agent, prompt, cwd, mode }));
+    const cmd = workerCommand([process.execPath, join(import.meta.dir, "omg-isolation-worker.ts")], name, input.cwd);
+    const proc = Bun.spawn(cmd, { cwd: input.cwd, env: process.env, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    proc.stdin.write(JSON.stringify(payload));
     await proc.stdin.end();
     let result: string;
     let pending = "";
@@ -93,12 +103,42 @@ export async function isolatedAutoBackend(agent: unknown, prompt: string, cwd: s
       throw error;
     }
     const code = await proc.exited;
-    if (code !== 0) throw new Error(`Isolated backend failed (exit ${code}); inspect its unit journal`);
     const line = result.split("\n").findLast(s => s.startsWith("OMG_ISOLATION_RESULT "));
     if (!line) throw new Error("Missing isolated backend result");
     const packet = JSON.parse(line.slice("OMG_ISOLATION_RESULT ".length));
     for (const line of packet.logs ?? []) onLog(line);
+    // A chat reply that failed carries its own trimmed reason out of the
+    // worker; the exit code alone would hide it from the thread.
+    if (typeof packet.error === "string" && packet.error) throw new Error(packet.error);
+    if (code !== 0) throw new Error(`Isolated backend failed (exit ${code}); inspect its unit journal`);
     if (typeof packet.result !== "string") throw new Error("Invalid isolated backend result");
     return packet.result;
   } finally { active--; }
+}
+
+export async function isolatedAutoBackend(agent: unknown, prompt: string, cwd: string, onLog: (s: string) => void, mode = "auto"): Promise<string> {
+  const task = typeof agent === "object" && agent !== null && "id" in agent && typeof agent.id === "string"
+    ? agent.id.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 40) : mode;
+  return isolatedWorkerRun({ agent, prompt, cwd, mode }, { task, mode, cwd, capacityWaitMs: 10 * 60_000 }, onLog);
+}
+
+/**
+ * A thread's one-shot chat completion, contained on Linux like an auto run:
+ * same slice, same memory/task caps, same cgroup-wide cleanup of the CLI
+ * subtree an adapter spawns. The wait for capacity is short because a chat
+ * reply that queues for minutes is a failure the thread should see, not hide.
+ */
+export async function isolatedChatCompletion(input: {
+  agent: string;
+  model: string;
+  thinkingLevel?: string | null;
+  system: string;
+  user: string;
+  cwd?: string | null;
+}, onLog: (s: string) => void = () => {}): Promise<string> {
+  return isolatedWorkerRun(
+    { mode: "chat", completion: input },
+    { task: input.agent.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 40), mode: "chat", cwd: input.cwd || process.cwd(), capacityWaitMs: 30_000 },
+    onLog,
+  );
 }

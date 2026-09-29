@@ -53,7 +53,8 @@ function deps(overrides: Partial<ThreadDeps> = {}): ThreadDeps & { started: stri
   return {
     started,
     told,
-    complete: async () => null,
+    // A task comes from a valid decision, never from a failed completion.
+    complete: async () => '{"action":"task","title":"Fix it","prompt":"Fix the build."}',
     tellTask: async ({ sessionId, text }) => {
       told.push({ sessionId, text });
     },

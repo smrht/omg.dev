@@ -330,6 +330,56 @@ describe("Codex model catalog", () => {
     expect(curateCodexModels(["gpt-5.6-sol"])).toEqual(["gpt-6-astra", "gpt-5.6-sol"]);
   });
 
+  // The slug set `codex debug models` returned on the box that had Daybreak
+  // Blue, in discovery order. No version digits in the name, so no /^gpt-\d/
+  // family filter ever matched it — curation silently deleted a model the
+  // account was entitled to. The bug this pins.
+  const CODEX_DISCOVERED = [
+    "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-daybreak-blue-latest",
+    "gpt-5.5",
+  ];
+
+  test("keeps a discovered model whose name carries no version digits", () => {
+    const out = curateCodexModels(CODEX_DISCOVERED);
+    expect(out).toContain("gpt-daybreak-blue-latest");
+    // The curated block and its order are unchanged; the new model follows it.
+    expect(out.slice(0, 7)).toEqual([
+      "gpt-6-astra",
+      "gpt-6-sol",
+      "gpt-6-luna",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.5",
+    ]);
+    // A newly offered model never becomes the default.
+    expect(defaultModelForCatalogItem("codex", out, true)).toBe("gpt-5.6-sol");
+  });
+
+  test("keeps version-tied siblings of a new release, not just the latest one", () => {
+    // addLatest collapses a version tie to one localeCompare winner, which
+    // dropped gpt-6.1-luna while gpt-6.1-sol survived. Both are separate
+    // families of one release and both stay selectable.
+    const out = curateCodexModels([...CODEX_DISCOVERED, "gpt-6.1-sol", "gpt-6.1-luna"]);
+    expect(out).toContain("gpt-6.1-sol");
+    expect(out).toContain("gpt-6.1-luna");
+  });
+
+  test("offers a new release only through discovery, never from the static fallback", () => {
+    // Entitlement comes from the account's live discovery/cache. The static
+    // list and its default must not gain models the box never discovered.
+    expect(CODEX_MODELS).not.toContain("gpt-daybreak-blue-latest");
+    expect(CODEX_MODELS).not.toContain("gpt-6.1-sol");
+    expect(MODEL_OPTIONS.codex.defaultModel).toBe("gpt-5.6-sol");
+    expect(curateCodexModels(["gpt-5.6-sol"])).not.toContain("gpt-daybreak-blue-latest");
+  });
+
   test("muse-spark joins the codex-aisdk list only while a Muse subscription credential exists", () => {
     expect(withCodexMuseModels(["gpt-6-astra", "gpt-5.6-sol"], true)).toEqual(["gpt-6-astra", "gpt-5.6-sol", "muse-spark-1.3", "muse-spark-1.2"]);
     expect(withCodexMuseModels(["gpt-6-astra", "gpt-5.6-sol"], false)).toEqual(["gpt-6-astra", "gpt-5.6-sol"]);

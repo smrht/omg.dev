@@ -6,11 +6,13 @@
  * file per thread, because nothing else stores them: there is no session
  * transcript behind a thread.
  *
- * omg only acts when a message mentions `@omg`:
- *   - A quick question gets a one-shot reply from the hosted model
- *     (the same endpoint session titles use). Nothing keeps running.
+ * omg only acts when a message mentions `@omg` (or replies where omg speaks):
+ *   - A quick question gets a one-shot reply from the agent and model the
+ *     thread chose (threadSelection), on this box's own connected account —
+ *     never the hosted model. No choice: the box defaults apply.
  *   - A request for real work starts a TASK: an ordinary coding session in the
- *     thread's project, attached to the thread as an `execution` runtime.
+ *     thread's project, attached to the thread as an `execution` runtime, with
+ *     the same agent/model pair the reply used.
  * When a task finishes a turn, the fleet watcher's completion event posts its
  * result back into the thread as a message from omg (`bridgeTaskCompletion`).
  * A task that needs a decision asks through the normal `/api/ask` path, and
@@ -44,6 +46,7 @@ import {
   THREAD_TYPING_TTL_MS,
   type ThreadMedia,
   type ThreadPerson,
+  type ThreadSelection,
   type ThreadAuthor,
   type ThreadTyping,
   type ThreadMessage,
@@ -53,7 +56,7 @@ import {
 } from "../packages/protocol/src/threads.ts";
 
 export { mentionsOmg };
-export type { ThreadAuthor, ThreadMessage, ThreadSummary, ThreadTaskEvent, ThreadTaskRow };
+export type { ThreadAuthor, ThreadMessage, ThreadSelection, ThreadSummary, ThreadTaskEvent, ThreadTaskRow };
 
 const TITLE_MAX = 60;
 /**
@@ -353,6 +356,7 @@ export function summarizeThread(conversation: Conversation): ThreadSummary {
     createdAt: conversation.createdAt,
     updatedAt: conversation.updatedAt,
     project: conversation.threadProject ?? null,
+    selection: conversation.threadSelection ?? null,
     lastMessage: last ? { author: last.author, text: last.text, ts: last.ts, ...(last.media?.length ? { media: last.media } : {}) } : null,
   };
 }
@@ -462,7 +466,7 @@ export function threadAuthor(threadId: string, identity: string, name?: string |
   return { kind: "human", participantId, name: display };
 }
 
-export function startThread(input: { identity: string; name?: string | null; title?: string | null }): Conversation {
+export function startThread(input: { identity: string; name?: string | null; title?: string | null; selection?: ThreadSelection | null }): Conversation {
   const thread = createThreadConversation({ ...input, name: threadDisplayName(input.identity, input.name) });
   rememberPerson(thread.id, threadParticipantId(input.identity), input.identity);
   return thread;
@@ -557,36 +561,47 @@ export function taskInReplies(messages: readonly ThreadMessage[], rootId: string
 }
 
 /**
- * Parse the model's JSON. Anything unreadable becomes a task when omg was
- * asked by name, and silence when it was not: an unasked omg must never
- * start work on a guess.
+ * Parse the model's JSON. Strict: null when the text is unreadable or not a
+ * decision. The lenient `parseOmgDecision` below keeps the legacy fallbacks.
  */
-export function parseOmgDecision(raw: string | null | undefined, request: string, unmentioned = false): OmgDecision {
+export function parseOmgDecisionStrict(raw: string | null | undefined): OmgDecision | null {
   const text = (raw ?? "").replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
   const json = text.match(/\{[\s\S]*\}/)?.[0];
-  if (json) {
-    try {
-      const value = JSON.parse(json) as { action?: unknown; text?: unknown; title?: unknown; prompt?: unknown; ack?: unknown };
-      if (value.action === "none") return { action: "none" };
-      if (value.action === "tell_task" && typeof value.text === "string" && value.text.trim()) {
-        const ack = typeof value.ack === "string" ? value.ack.trim().slice(0, 140) : "";
-        return { action: "tell_task", text: value.text.trim(), ...(ack ? { ack } : {}) };
-      }
-      if (value.action === "reply" && typeof value.text === "string" && value.text.trim()) {
-        return { action: "reply", text: value.text.trim() };
-      }
-      if (value.action === "task" && typeof value.prompt === "string" && value.prompt.trim()) {
-        const title = typeof value.title === "string" && value.title.trim() ? value.title.trim() : request;
-        return { action: "task", title: title.slice(0, 80), prompt: value.prompt.trim() };
-      }
-    } catch {
-      // fall through
+  if (!json) return null;
+  try {
+    const value = JSON.parse(json) as { action?: unknown; text?: unknown; title?: unknown; prompt?: unknown; ack?: unknown };
+    if (value.action === "none") return { action: "none" };
+    if (value.action === "tell_task" && typeof value.text === "string" && value.text.trim()) {
+      const ack = typeof value.ack === "string" ? value.ack.trim().slice(0, 140) : "";
+      return { action: "tell_task", text: value.text.trim(), ...(ack ? { ack } : {}) };
     }
+    if (value.action === "reply" && typeof value.text === "string" && value.text.trim()) {
+      return { action: "reply", text: value.text.trim() };
+    }
+    if (value.action === "task" && typeof value.prompt === "string" && value.prompt.trim()) {
+      const title = typeof value.title === "string" && value.title.trim() ? value.title.trim() : "";
+      return { action: "task", title, prompt: value.prompt.trim() };
+    }
+  } catch {
+    // fall through
+  }
+  return null;
+}
+
+/**
+ * Parse the model's JSON. Anything unreadable becomes a task when omg was
+ * asked by name, and silence when it was not: an unasked omg must never
+ * start work on a guess. (The reply path itself is stricter: a failed or
+ * unreadable completion is an honest failure, never this fallback.)
+ */
+export function parseOmgDecision(raw: string | null | undefined, request: string, unmentioned = false): OmgDecision {
+  const strict = parseOmgDecisionStrict(raw);
+  if (strict) {
+    return strict.action === "task" && !strict.title ? { ...strict, title: request.slice(0, 80) } : strict;
   }
   if (unmentioned) return { action: "none" };
   return { action: "task", title: request.slice(0, 80), prompt: request };
 }
-
 /**
  * The whole thread as omg reads it, oldest first: every top-level message,
  * each followed by its replies (indented), so a reply is read in the place it
@@ -630,15 +645,65 @@ export function taskPromptFromThread(prompt: string, messages: readonly ThreadMe
   ].join("\n");
 }
 
+/**
+ * The agent/model pair one message runs with: the short reply's, and the
+ * started task's. Owned by thread-model.ts; carried here so deps stay testable.
+ * A cyber access program, when set, applies to the REPLY only: a task cannot
+ * carry it, so a task decision under one is refused visibly, not rerouted.
+ */
+export type ThreadTurnPair = {
+  completion: { agent: string; model: string; thinkingLevel?: string | null; cyberAccessProgram?: string | null };
+  task: { agent: string; model: string | null; thinkingLevel: string | null };
+};
+
 export type ThreadDeps = {
-  /** One-shot model call. Returns the raw text, or null when no model is reachable. */
-  complete: (system: string, user: string) => Promise<string | null>;
+  /**
+   * Turn the frozen stored selection plus an optional mentioned agent into the
+   * pair this message runs with. Throws with a reason an explicit-but-
+   * unavailable choice must show. Absent in old tests: no pair, and complete
+   * decides on its own.
+   */
+  resolveTurn?: (stored: ThreadSelection | null, mentioned: { key: string; handle?: string } | null) => Promise<ThreadTurnPair>;
+  /**
+   * One-shot model call on the box's own connected account. Returns the raw
+   * text, or null when no model is reachable. Which agent/model it uses is the
+   * resolved pair; null means none was resolved.
+   */
+  complete: (system: string, user: string, pair: ThreadTurnPair["completion"] | null) => Promise<string | null>;
   /** Start a coding session. Returns its id. */
   /** `agent` is a coding agent's key when someone asked it by name; otherwise Settings' default runs. */
-  startTask: (input: { prompt: string; title: string; cwd: string | null; user: string; agent?: string | null }) => Promise<string>;
+  startTask: (input: { prompt: string; title: string; cwd: string | null; user: string; agent?: string | null; model?: string | null; thinkingLevel?: string | null }) => Promise<string>;
   /** Send a follow-up to a running task, as its next turn. */
   tellTask: (input: { sessionId: string; text: string; user: string }) => Promise<void>;
 };
+
+/**
+ * omg's replies to one thread run one at a time, in the order the messages
+ * arrived. The caller freezes the thread's stored selection BEFORE enqueueing,
+ * so a selection changed while a reply is in flight applies to the next
+ * message, never the one already being answered. Returns the queued job, so
+ * the caller can log a failure it would otherwise only see as a crash.
+ */
+const threadAnswerQueues = new Map<string, Promise<unknown>>();
+
+export function queueThreadAnswer(threadId: string, run: () => Promise<unknown>): Promise<unknown> {
+  const prev = threadAnswerQueues.get(threadId) ?? Promise.resolve();
+  const job = prev.then(run, run);
+  const tail = job.then(
+    () => {},
+    () => {},
+  );
+  threadAnswerQueues.set(threadId, tail);
+  void tail.then(() => {
+    if (threadAnswerQueues.get(threadId) === tail) threadAnswerQueues.delete(threadId);
+  });
+  return job;
+}
+
+/** How many threads have an answer queued or running (for tests and a future status line). */
+export function busyThreadAnswers(): number {
+  return threadAnswerQueues.size;
+}
 
 /**
  * Answer a message that wakes omg (see omgWake): an @omg mention, or a reply
@@ -657,6 +722,8 @@ export async function answerMention(
   unmentioned = false,
   /** A coding agent asked by name (`@codex`): the work is a task, and it runs with that agent. */
   agent: { key: string; handle: string } | null = null,
+  /** The thread's stored selection, frozen before this call was queued. */
+  storedSelection: ThreadSelection | null = null,
 ): Promise<ThreadMessage | null> {
   // What omg reads: the whole thread, every reply thread included.
   const context = readThreadMessages(threadId, 5_000);
@@ -666,10 +733,15 @@ export async function answerMention(
   // it may say nothing, and dots that end in silence would read as a lost reply.
   if (!unmentioned) setTyping(threadId, { kind: "omg" }, true, rootId);
   try {
-    return await decideAndAnswer(threadId, cleaned, identity, deps, rootId, context, unmentioned, agent);
+    return await decideAndAnswer(threadId, cleaned, identity, deps, rootId, context, unmentioned, agent, storedSelection);
   } finally {
     if (!unmentioned) setTyping(threadId, { kind: "omg" }, false);
   }
+}
+
+/** The one honest label for a pair, in the messages that name it. */
+function pairLabel(pair: ThreadTurnPair["completion"] | null): string {
+  return pair ? `${pair.agent} (${pair.model})` : "the reply model";
 }
 
 async function decideAndAnswer(
@@ -681,7 +753,25 @@ async function decideAndAnswer(
   context: ThreadMessage[],
   unmentioned: boolean,
   agent: { key: string; handle: string } | null,
+  storedSelection: ThreadSelection | null,
 ): Promise<ThreadMessage | null> {
+  let turn: ThreadTurnPair | null = null;
+  if (deps.resolveTurn) {
+    try {
+      turn = await deps.resolveTurn(storedSelection, agent);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      if (unmentioned) {
+        console.log(`[threads] omg could not resolve its model in ${threadId}: ${reason}`);
+        return null;
+      }
+      return appendThreadMessage(threadId, {
+        author: { kind: "omg" },
+        text: `I could not use this thread's agent choice: ${reason}`,
+        replyTo: rootId,
+      });
+    }
+  }
   const runningTask = taskInReplies(context, rootId);
   const system = [
     OMG_THREAD_SYSTEM_PROMPT,
@@ -690,32 +780,59 @@ async function decideAndAnswer(
     ...(unmentioned && runningTask ? [OMG_UNMENTIONED_TASK_RULE] : []),
     ...(agent ? [omgAgentRule(agent.handle)] : []),
   ].join("\n\n");
-  const raw = await deps
-    .complete(
+  let raw: string | null = null;
+  let failure: string | null = null;
+  try {
+    raw = await deps.complete(
       system,
       `The whole thread, oldest first:\n${transcriptForModel(context)}\n\n${unmentioned ? "The new reply" : "The message that mentioned you"}: ${cleaned}`,
-    )
-    .catch(() => null);
-  const parsed = parseOmgDecision(raw, cleaned, unmentioned && !agent);
-  // Asked by name, an agent always gets the work: omg only writes its brief.
+      turn?.completion ?? null,
+    );
+  } catch (error) {
+    failure = error instanceof Error ? error.message : String(error);
+  }
+  // A failed or unreadable completion is an honest failure. It never becomes a
+  // task and never switches provider: the person sees what did not answer.
+  const parsed = parseOmgDecisionStrict(raw);
+  if (failure !== null || !parsed) {
+    if (unmentioned) {
+      console.log(
+        `[threads] omg read an unmentioned reply in ${threadId}: ${failure !== null ? "completion failed, stayed quiet" : raw === null || raw === undefined ? "model unreachable, stayed quiet" : "unreadable answer, stayed quiet"}`,
+      );
+      return null;
+    }
+    const reason = failure !== null
+      ? failure
+      : raw === null || raw === undefined
+        ? "no answer came back"
+        : "the answer was unreadable";
+    return appendThreadMessage(threadId, {
+      author: { kind: "omg" },
+      text: `I could not get an answer from ${pairLabel(turn?.completion ?? null)}: ${reason}.`,
+      replyTo: rootId,
+    });
+  }
   const decision: OmgDecision =
-    agent && (parsed.action === "reply" || parsed.action === "none")
+    parsed.action === "task" && !parsed.title ? { ...parsed, title: cleaned.slice(0, 80) } : parsed;
+  // Asked by name, an agent always gets the work: omg only writes its brief.
+  const finalDecision: OmgDecision =
+    agent && (decision.action === "reply" || decision.action === "none")
       ? { action: "task", title: cleaned.slice(0, 80), prompt: cleaned }
-      : parsed;
-  if (unmentioned) {
+      : decision;
+  if (finalDecision.action === "none") {
     // A silence is a decision, not an error: say which, so a missed reply can be traced.
-    console.log(`[threads] omg read an unmentioned reply in ${threadId}: ${raw === null ? "model unreachable, stayed quiet" : decision.action}`);
+    if (unmentioned) console.log(`[threads] omg read an unmentioned reply in ${threadId}: none`);
+    return null;
   }
-  if (decision.action === "none") return null;
-  if (decision.action === "reply") {
-    return appendThreadMessage(threadId, { author: { kind: "omg" }, text: decision.text, replyTo: rootId });
+  if (finalDecision.action === "reply") {
+    return appendThreadMessage(threadId, { author: { kind: "omg" }, text: finalDecision.text, replyTo: rootId });
   }
-  if (decision.action === "tell_task") {
+  if (finalDecision.action === "tell_task") {
     if (!runningTask) return null;
     try {
-      await deps.tellTask({ sessionId: runningTask, text: decision.text, user: identity });
+      await deps.tellTask({ sessionId: runningTask, text: finalDecision.text, user: identity });
       // A few words back, in omg's own voice, so the person knows they were heard.
-      return appendThreadMessage(threadId, { author: { kind: "omg" }, text: decision.ack || "Passed that to the task.", replyTo: rootId });
+      return appendThreadMessage(threadId, { author: { kind: "omg" }, text: finalDecision.ack || "Passed that to the task.", replyTo: rootId });
     } catch (error) {
       return appendThreadMessage(threadId, {
         author: { kind: "omg" },
@@ -726,21 +843,38 @@ async function decideAndAnswer(
   }
   const conversation = getConversation(threadId);
   const project = conversation?.threadProject ?? null;
+  const taskPair = turn?.task ?? null;
+  // A NONSTANDARD cyber access program is chat-only: the normal coding routes
+  // cannot transmit it, so a task decision under one is refused visibly
+  // instead of silently started without the access the person chose. The
+  // standard program is the account's own default, so it refuses nothing.
+  const chatOnlyProgram = turn?.completion.cyberAccessProgram && turn.completion.cyberAccessProgram !== "standard"
+    ? turn.completion.cyberAccessProgram
+    : null;
+  if (chatOnlyProgram) {
+    return appendThreadMessage(threadId, {
+      author: { kind: "omg" },
+      text: `This needs a task, but ${chatOnlyProgram} is a chat-only access choice and a task cannot carry it. Remove that access choice for this thread, then ask again.`,
+      replyTo: rootId,
+    });
+  }
   try {
     const sessionId = await deps.startTask({
-      prompt: withThreadTaskEnvelope(taskPromptFromThread(decision.prompt, context), {
+      prompt: withThreadTaskEnvelope(taskPromptFromThread(finalDecision.prompt, context), {
         threadTitle: conversation ? summarizeThread(conversation).title : null,
       }),
-      title: decision.title,
+      title: finalDecision.title,
       cwd: project?.cwd ?? null,
       user: identity,
-      agent: agent?.key ?? null,
+      agent: taskPair?.agent ?? agent?.key ?? null,
+      ...(taskPair?.model ? { model: taskPair.model } : {}),
+      ...(taskPair?.thinkingLevel ? { thinkingLevel: taskPair.thinkingLevel } : {}),
     });
     attachRuntimeSession({ conversationId: threadId, sessionId, kind: "execution" });
     return appendThreadMessage(threadId, {
       author: { kind: "omg" },
       text: `Started a ${agent ? `${agent.handle} ` : ""}task${project ? ` in ${project.name}` : ""}.`,
-      task: { sessionId, event: "started", title: decision.title, project: project?.name ?? null },
+      task: { sessionId, event: "started", title: finalDecision.title, project: project?.name ?? null },
       replyTo: rootId,
     });
   } catch (error) {
@@ -863,11 +997,18 @@ export function threadTasks(
 
 export function threadUpdate(
   id: string,
-  patch: { title?: string | null; project?: { cwd: string; name: string } | null; archived?: boolean },
+  patch: {
+    title?: string | null;
+    project?: { cwd: string; name: string } | null;
+    /** Validated by the caller (the HTTP route); stored as given here. */
+    selection?: ThreadSelection | null;
+    archived?: boolean;
+  },
 ): Conversation | null {
   return patchThreadConversation(id, {
     ...(patch.title !== undefined ? { title: patch.title?.trim() || null } : {}),
     ...(patch.project !== undefined ? { threadProject: patch.project } : {}),
+    ...(patch.selection !== undefined ? { threadSelection: patch.selection } : {}),
     ...(patch.archived !== undefined ? { archivedAt: patch.archived ? Date.now() : null } : {}),
   });
 }

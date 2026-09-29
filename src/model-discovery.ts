@@ -10,6 +10,42 @@ type ProviderKey = CodingAgentKind;
 
 export type ModelPricing = { input: number; cached: number; output: number };
 
+/**
+ * The cyber access programs the Codex app-server protocol names
+ * (TurnStartParams.cyberAccessProgram, codex-cli 0.157.1 schema): the request
+ * flag for a ChatGPT-authenticated turn. Authorization stays server-owned —
+ * requesting a program never grants it.
+ */
+export const CYBER_ACCESS_PROGRAMS = ["standard", "daybreakBlue", "daybreakRed"] as const;
+export type CyberAccessProgram = (typeof CYBER_ACCESS_PROGRAMS)[number];
+
+const CYBER_ACCESS_PROGRAM_SET: ReadonlySet<string> = new Set(CYBER_ACCESS_PROGRAMS);
+
+/**
+ * Normalize one catalog value to the protocol enum. The CLI catalog
+ * (`codex debug models`) spells them snake_case (`daybreak_blue`); the
+ * app-server `model/list` already answers camelCase (`daybreakBlue`). Both are
+ * accepted; anything else is dropped, never guessed.
+ */
+export function normalizeCyberAccessProgram(raw: string): CyberAccessProgram | null {
+  const camel = raw.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+  return CYBER_ACCESS_PROGRAM_SET.has(camel) ? (camel as CyberAccessProgram) : null;
+}
+
+/**
+ * Authoritative per-model capability metadata from Codex discovery. This is
+ * the only source for what an account may request: `cyberAccessPrograms` is
+ * undefined when the catalog carried no access-program metadata at all, which
+ * forbids advertising any program — not even `standard` — for that model.
+ */
+export type CodexModelCapabilities = {
+  /** Reasoning efforts the model advertises, in catalog order. */
+  reasoningEfforts: string[];
+  defaultReasoningEffort?: string;
+  /** Explicit cyber access programs the account may request for this model. */
+  cyberAccessPrograms?: CyberAccessProgram[];
+};
+
 export type DiscoveredModelProvider = {
   key: ProviderKey;
   ok: boolean;
@@ -20,6 +56,12 @@ export type DiscoveredModelProvider = {
   variants?: Record<string, string[]>;
   /** Per-model thinking levels, such as Devin's variant suffixes. */
   thinkingLevelsByModel?: Record<string, string[]>;
+  /**
+   * Per-model capability metadata (reasoning efforts, cyber access programs)
+   * for the codex-family providers. Mirrored wholesale into `codex-aisdk`.
+   * Absent when discovery carried no metadata — never statically seeded.
+   */
+  modelCapabilities?: Record<string, CodexModelCapabilities>;
   /** USD per 1M tokens per raw variant uid (Devin's cost_summary), for usage estimates. */
   pricing?: Record<string, ModelPricing>;
   error?: string;
@@ -38,7 +80,13 @@ export type ModelDiscoveryCache = {
   providers: Partial<Record<ProviderKey, DiscoveredModelProvider>>;
 };
 
-const CACHE_PATH = join(PATHS.data, "model-catalog.json");
+/**
+ * Resolved per read/write so tests (and a runtime data-dir change) are not
+ * frozen to the directory this module was first imported under.
+ */
+function cachePath(): string {
+  return join(PATHS.data, "model-catalog.json");
+}
 const DEFAULT_REFRESH_CRON = "0 8 * * *";
 /** Every provider a full refresh probes. `codex-aisdk` is mirrored from `codex`. */
 const REFRESH_KEYS: ProviderKey[] = ["claude", "aisdk", "codex", "grok", "cursor", "fx", "opencode", "jcode", "devin", "muse"];
@@ -107,7 +155,8 @@ function userHome(): string {
   return process.env.HOME || homedir();
 }
 
-function codexPath(): string | null {
+/** Resolve the codex CLI binary the same way discovery does. */
+export function codexCliPath(): string | null {
   if (process.env.LFG_CODEX_PATH) return process.env.LFG_CODEX_PATH;
   const home = userHome();
   return which("codex", [`${home}/.bun/bin/codex`, `${home}/.local/bin/codex`, "/usr/local/bin/codex"]);
@@ -183,7 +232,7 @@ function devinPath(): string | null {
 
 function commandFor(key: ProviderKey): string[] | null {
   if (key === "codex" || key === "codex-aisdk") {
-    const bin = codexPath();
+    const bin = codexCliPath();
     return bin ? [bin, "debug", "models"] : null;
   }
   if (key === "grok") {
@@ -237,18 +286,92 @@ function addModel(
   if (cleanLabel && cleanLabel !== id) labels[id] = cleanLabel;
 }
 
-export function parseCodexModels(text: string): { models: string[]; labels: Record<string, string> } {
+/**
+ * Capability metadata per model, accepting both catalog spellings:
+ * `codex debug models` rows (snake_case `supported_reasoning_levels`,
+ * `available_access_programs.cyber`) and app-server `model/list` rows
+ * (camelCase `supportedReasoningEfforts`, `availableAccessPrograms.cyber`).
+ * Only called for rows that already passed the visibility gate.
+ */
+function codexModelCapabilitiesFrom(item: Record<string, unknown>): CodexModelCapabilities | null {
+  const effortsRaw =
+    item.supported_reasoning_levels ?? item.supportedReasoningEfforts;
+  const efforts: string[] = [];
+  if (Array.isArray(effortsRaw)) {
+    for (const entry of effortsRaw) {
+      const effort =
+        typeof entry === "string"
+          ? entry
+          : entry && typeof entry === "object"
+            ? ((entry as Record<string, unknown>).effort ?? (entry as Record<string, unknown>).reasoningEffort)
+            : null;
+      if (typeof effort === "string" && effort.trim() && !efforts.includes(effort)) {
+        efforts.push(effort);
+      }
+    }
+  }
+  const defaultEffort = item.default_reasoning_level ?? item.defaultReasoningEffort;
+  const programsRaw = item.available_access_programs ?? item.availableAccessPrograms;
+  const cyberRaw = programsRaw && typeof programsRaw === "object" && !Array.isArray(programsRaw)
+    ? (programsRaw as Record<string, unknown>).cyber
+    : undefined;
+  let cyberAccessPrograms: CyberAccessProgram[] | undefined;
+  if (Array.isArray(cyberRaw)) {
+    // An explicitly empty array means "no explicit program offered"; that is
+    // real metadata and stays []. A missing array means no metadata at all.
+    const programs: CyberAccessProgram[] = [];
+    for (const raw of cyberRaw) {
+      if (typeof raw !== "string") continue;
+      const program = normalizeCyberAccessProgram(raw);
+      if (program && !programs.includes(program)) programs.push(program);
+    }
+    cyberAccessPrograms = programs;
+  }
+  if (!efforts.length && cyberAccessPrograms === undefined) return null;
+  return {
+    ...(efforts.length ? { reasoningEfforts: efforts } : { reasoningEfforts: [] }),
+    ...(typeof defaultEffort === "string" && defaultEffort ? { defaultReasoningEffort: defaultEffort } : {}),
+    ...(cyberAccessPrograms ? { cyberAccessPrograms } : {}),
+  };
+}
+
+export function parseCodexModels(text: string): {
+  models: string[];
+  labels: Record<string, string>;
+  modelCapabilities?: Record<string, CodexModelCapabilities>;
+} {
   const ids: string[] = [];
   const labels: Record<string, string> = {};
-  const parsed = JSON.parse(text) as { models?: Array<{ slug?: unknown; display_name?: unknown; visibility?: unknown }> };
-  for (const item of parsed.models ?? []) {
-    if (typeof item.slug !== "string") continue;
+  const modelCapabilities: Record<string, CodexModelCapabilities> = {};
+  const parsed = JSON.parse(text) as {
+    models?: Array<Record<string, unknown>>;
+    data?: Array<Record<string, unknown>>;
+  };
+  // `codex debug models` answers {models:[...]}; app-server model/list answers
+  // {data:[...]}. Same rows modulo spelling, so one parser owns both.
+  for (const item of parsed.models ?? parsed.data ?? []) {
+    if (!item || typeof item !== "object") continue;
+    const slug = item.slug ?? item.id;
+    if (typeof slug !== "string") continue;
     // Codex marks unlisted models `visibility: "hide"` (gpt-reserve,
     // codex-auto-review); "list" is the only value its own picker shows.
+    // The app-server shape spells the same gate `hidden: true`.
     if (item.visibility === "hide" || item.visibility === "hidden" || item.visibility === "internal") continue;
-    addModel(ids, labels, cleanId(item.slug), typeof item.display_name === "string" ? item.display_name : undefined);
+    if (item.hidden === true) continue;
+    const id = cleanId(slug);
+    if (!id) continue;
+    const displayName = item.display_name ?? item.displayName;
+    addModel(ids, labels, id, typeof displayName === "string" ? displayName : undefined);
+    if (ids.at(-1) === id) {
+      const capabilities = codexModelCapabilitiesFrom(item);
+      if (capabilities) modelCapabilities[id] = capabilities;
+    }
   }
-  return { models: ids, labels };
+  return {
+    models: ids,
+    labels,
+    ...(Object.keys(modelCapabilities).length ? { modelCapabilities } : {}),
+  };
 }
 
 function parseBulletModels(text: string): { models: string[]; labels: Record<string, string> } {
@@ -363,6 +486,7 @@ function parseModels(key: ProviderKey, text: string): {
   labels: Record<string, string>;
   variants?: Record<string, string[]>;
   thinkingLevelsByModel?: Record<string, string[]>;
+  modelCapabilities?: Record<string, CodexModelCapabilities>;
   pricing?: Record<string, ModelPricing>;
 } {
   if (key === "codex" || key === "codex-aisdk") return parseCodexModels(text);
@@ -753,6 +877,10 @@ async function discoverProvider(key: ProviderKey): Promise<DiscoveredModelProvid
         parsed.thinkingLevelsByModel && Object.keys(parsed.thinkingLevelsByModel).length
           ? parsed.thinkingLevelsByModel
           : undefined,
+      modelCapabilities:
+        parsed.modelCapabilities && Object.keys(parsed.modelCapabilities).length
+          ? parsed.modelCapabilities
+          : undefined,
       pricing: parsed.pricing && Object.keys(parsed.pricing).length ? parsed.pricing : undefined,
       refreshedAt,
       durationMs: Math.round((performance.now() - started) * 1000) / 1000,
@@ -772,7 +900,7 @@ async function discoverProvider(key: ProviderKey): Promise<DiscoveredModelProvid
 
 function readCacheFile(): ModelDiscoveryCache | null {
   try {
-    return JSON.parse(readFileSync(CACHE_PATH, "utf8")) as ModelDiscoveryCache;
+    return JSON.parse(readFileSync(cachePath(), "utf8")) as ModelDiscoveryCache;
   } catch {
     return null;
   }
@@ -780,7 +908,7 @@ function readCacheFile(): ModelDiscoveryCache | null {
 
 async function writeCache(cache: ModelDiscoveryCache): Promise<void> {
   mkdirSync(PATHS.data, { recursive: true });
-  await Bun.write(CACHE_PATH, JSON.stringify(cache, null, 2));
+  await Bun.write(cachePath(), JSON.stringify(cache, null, 2));
 }
 
 export function readModelDiscoveryCacheSync(): ModelDiscoveryCache | null {

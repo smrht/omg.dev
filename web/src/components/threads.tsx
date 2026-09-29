@@ -1,5 +1,5 @@
-import { createContext, useContext, useMemo, useRef, useState, useEffect, type ComponentProps, type KeyboardEvent, type ReactNode } from "react";
-import { Archive, ArrowUp, ChevronLeft, Folder, Info, MessageSquare, MoreVertical, Paperclip, Pencil, Plus, X } from "lucide-react";
+import { createContext, useContext, useId, useMemo, useRef, useState, useEffect, type ComponentProps, type KeyboardEvent, type ReactNode } from "react";
+import { Archive, ArrowUp, ChevronLeft, Folder, ImagePlus, Info, MessageSquare, MoreVertical, Paperclip, Pencil, Plus, X } from "lucide-react";
 import type { ConversationParticipant } from "../../../src/conversation-contract";
 import { ConversationParticipantRow } from "./conversation-presence";
 import { MessageResponse } from "./ai-elements/message";
@@ -22,6 +22,8 @@ import {
   mentionFromHref,
   threadMentionOptions,
   type ThreadMentionOption,
+  type ThreadSelection,
+  type ThreadSelectionOption,
   topLevelMessages,
   typingIn,
   typingLabel,
@@ -33,7 +35,15 @@ import {
   type ThreadMessage,
   type ThreadSummary,
 } from "../../../packages/protocol/src/threads";
-import { createThread, sendThreadMessage, sendThreadTyping, updateThread, useThread, type ThreadAttachment } from "@/lib/threads";
+import {
+  createThread,
+  sendThreadMessage,
+  sendThreadTyping,
+  updateThread,
+  useThread,
+  useThreadSelectionOptions,
+  type ThreadAttachment,
+} from "@/lib/threads";
 import { useAsk, SessionQuestionPanel } from "./ask-center";
 import {
   DropdownMenu,
@@ -47,6 +57,7 @@ import {
   DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
+import { OwnMediaPanel } from "./own-media";
 import { cn } from "@/lib/utils";
 import { agentIconSrc, CodingAgentsContext } from "@/lib/session-ui";
 
@@ -369,6 +380,196 @@ export function TypingLine({ label, testId }: { label: string | null; testId: st
   );
 }
 
+/**
+ * The agent, model, thinking level and access program this thread's @omg
+ * replies and tasks use: compact labelled selects in one row, above the chat
+ * bar. "Automatisch" stores no choice, so the machine's own default applies.
+ * Everything here runs on this machine's own connected accounts — a
+ * subscription where the agent has one, an API key where it does not
+ * (OpenCode can be either) — which is why nothing claims more.
+ */
+export function ThreadSelectionBar({
+  selection,
+  options,
+  loading,
+  error,
+  onSelect,
+  testId = "thread-selection",
+}: {
+  selection: ThreadSelection | null;
+  options: readonly ThreadSelectionOption[];
+  loading: boolean;
+  error: string | null;
+  /** Store the next choice; null clears it back to "Automatisch". */
+  onSelect: (next: ThreadSelection | null) => void;
+  testId?: string;
+}) {
+  const id = useId();
+  const agent = selection ? options.find((row) => row.key === selection.agent) : undefined;
+  const staleAgent = !!selection && !agent;
+  // The model can be stale WITHIN a live agent: kept visible, flagged, never swapped.
+  const staleModel = !!selection && !!agent && !agent.models.includes(selection.model);
+  const stale = staleAgent || staleModel;
+  const levels = agent && selection ? agent.thinkingLevelsByModel?.[selection.model] ?? agent.thinkingLevels : [];
+  const allPrograms = agent && selection ? agent.cyberAccessProgramsByModel?.[selection.model] ?? [] : [];
+  // The control exists only when a NONSTANDARD program is offered: "standard"
+  // alone changes nothing. When it does exist, every offered program is
+  // listed, Standard included, each under its plain name.
+  const nonstandard = allPrograms.filter((program) => program !== "standard");
+  const programs = nonstandard.length ? allPrograms : [];
+  if (loading && !options.length && !stale) {
+    return (
+      <p data-testid={`${testId}-loading`} className="px-4 pt-2 text-[12px] text-muted-foreground">
+        Modellen laden…
+      </p>
+    );
+  }
+  if (!options.length && !stale) return null;
+  const selectClass =
+    "min-w-0 max-w-full rounded-lg border border-border bg-card px-2 py-1 text-[12px] text-foreground disabled:text-muted-foreground";
+  const labelClass = "text-[11px] font-medium text-muted-foreground";
+  const keepSupported = (next: ThreadSelection): ThreadSelection => {
+    // A model switch keeps the level and the program ONLY where the new model
+    // still supports them; both are dropped instead of silently carried.
+    let kept = next;
+    if (kept.thinkingLevel) {
+      const nextLevels = agent?.thinkingLevelsByModel?.[kept.model] ?? agent?.thinkingLevels ?? [];
+      if (!nextLevels.includes(kept.thinkingLevel)) kept = { ...kept, thinkingLevel: null };
+    }
+    if (kept.cyberAccessProgram) {
+      const nextPrograms = agent?.cyberAccessProgramsByModel?.[kept.model] ?? [];
+      if (!nextPrograms.includes(kept.cyberAccessProgram)) kept = { ...kept, cyberAccessProgram: null };
+    }
+    return kept;
+  };
+  const PROGRAM_LABELS: Record<string, string> = {
+    standard: "Standard",
+    daybreakBlue: "Daybreak Blue",
+    daybreakRed: "Daybreak Red",
+  };
+  return (
+    <div data-testid={testId} className="flex flex-wrap items-end gap-x-3 gap-y-1 px-4 pt-2">
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <label htmlFor={`${id}-agent`} className={labelClass}>
+          Agent
+        </label>
+        <select
+          id={`${id}-agent`}
+          data-testid={`${testId}-agent`}
+          value={selection?.agent ?? ""}
+          onChange={(event) => {
+            const next = options.find((row) => row.key === event.target.value);
+            onSelect(next ? { agent: next.key, model: next.defaultModel } : null);
+          }}
+          className={selectClass}
+        >
+          <option value="">Automatisch</option>
+          {options.map((row) => (
+            <option key={row.key} value={row.key}>
+              {row.label}
+            </option>
+          ))}
+          {/* A stored choice this box can no longer run stays visible instead of vanishing. */}
+          {staleAgent && selection ? <option value={selection.agent}>{selection.agent} (niet beschikbaar)</option> : null}
+        </select>
+      </div>
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <label htmlFor={`${id}-model`} className={labelClass}>
+          Model
+        </label>
+        <select
+          id={`${id}-model`}
+          data-testid={`${testId}-model`}
+          value={selection?.model ?? ""}
+          disabled={!agent || agent.models.length < 2}
+          onChange={(event) => {
+            if (!selection) return;
+            onSelect(keepSupported({ ...selection, model: event.target.value }));
+          }}
+          className={selectClass}
+        >
+          {(() => {
+            // Live models first; a stored model that disappeared stays listed,
+            // flagged, so the stale choice is visible instead of blank.
+            const list = agent
+              ? [...agent.models, ...(staleModel && selection ? [selection.model] : [])]
+              : staleModel && selection
+                ? [selection.model]
+                : [];
+            return list.map((model) => (
+              <option key={model} value={model}>
+                {staleModel && model === selection?.model ? `${model} (niet beschikbaar)` : model}
+              </option>
+            ));
+          })()}
+        </select>
+      </div>
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <label htmlFor={`${id}-level`} className={labelClass}>
+          Denkniveau
+        </label>
+        <select
+          id={`${id}-level`}
+          data-testid={`${testId}-level`}
+          value={selection?.thinkingLevel ?? ""}
+          disabled={!agent || levels.length < 1}
+          onChange={(event) => {
+            if (!selection) return;
+            const level = event.target.value;
+            onSelect({ ...selection, ...(level ? { thinkingLevel: level } : { thinkingLevel: null }) });
+          }}
+          className={selectClass}
+        >
+          <option value="">Standaard</option>
+          {levels.map((level) => (
+            <option key={level} value={level}>
+              {level}
+            </option>
+          ))}
+        </select>
+      </div>
+      {programs.length ? (
+        <div className="flex min-w-0 flex-col gap-0.5">
+          <label htmlFor={`${id}-program`} className={labelClass}>
+            Toegang
+          </label>
+          <select
+            id={`${id}-program`}
+            data-testid={`${testId}-program`}
+            value={selection?.cyberAccessProgram === "standard" ? "" : selection?.cyberAccessProgram ?? ""}
+            onChange={(event) => {
+              if (!selection) return;
+              const program = event.target.value;
+              onSelect({ ...selection, ...(program ? { cyberAccessProgram: program } : { cyberAccessProgram: null }) });
+            }}
+            className={selectClass}
+            /* Truthful scope: an explicit Daybreak TASK is refused, not silently run standard. */
+            title="Alleen korte chatantwoorden in dit gesprek. Een taak met Daybreak wordt geweigerd, niet stilletjes standaard uitgevoerd."
+          >
+            <option value="">Automatisch</option>
+            {programs.map((program) => (
+              <option key={program} value={program}>
+                {PROGRAM_LABELS[program] ?? program}
+              </option>
+            ))}
+          </select>
+        </div>
+      ) : null}
+      {stale ? (
+        <p role="status" className="w-full text-[12px] text-amber-600 dark:text-amber-400">
+          Deze keuze is op deze machine niet meer beschikbaar; @omg zegt dit zichtbaar tot je een nieuwe kiest.
+        </p>
+      ) : null}
+      {error ? (
+        <p role="alert" className="w-full text-[12px] text-destructive">
+          {error}
+        </p>
+      ) : null}
+      <p className="w-full text-[11px] text-muted-foreground">Draait op je eigen verbonden account.</p>
+    </div>
+  );
+}
+
 /** A plain field, used only where no chat bar is supplied (tests). */
 function Composer({ placeholder, onSend, autoFocus, testId, onTyping }: ThreadComposerProps) {
   const [text, setText] = useState("");
@@ -454,6 +655,9 @@ export function ThreadChat({
   const isNew = threadId === NEW_THREAD_ID;
   const { detail, refresh } = useThread(isNew ? null : threadId, viewer);
   const { questions } = useAsk();
+  // A new thread's model choice rides along in the create payload; an existing
+  // one is stored on the thread itself.
+  const [draftSelection, setDraftSelection] = useState<ThreadSelection | null>(null);
   return (
     <ThreadChatView
       threadId={threadId}
@@ -461,12 +665,17 @@ export function ThreadChat({
       renderComposer={renderComposer}
       detail={isNew ? null : detail}
       repos={repos}
+      selection={isNew ? draftSelection : detail?.thread.selection ?? null}
+      onSelectSelection={isNew ? async (next) => setDraftSelection(next) : async (next) => {
+        await updateThread(threadId, { selection: next });
+        await refresh();
+      }}
       openAskSessionIds={questions.map((q) => q.sessionId)}
       questionPanel={(sessionIds) => (sessionIds.length ? <SessionQuestionPanel sessionIds={sessionIds} /> : null)}
       typing={isNew ? undefined : (on, replyTo) => sendThreadTyping(threadId, on, viewer, replyTo)}
       send={async (text, replyTo, attachments) => {
         if (isNew) {
-          onCreated((await createThread(text, viewer, attachments)).id);
+          onCreated((await createThread(text, viewer, attachments, draftSelection)).id);
           return null;
         }
         const message = await sendThreadMessage(threadId, text, viewer, replyTo, attachments);
@@ -477,6 +686,7 @@ export function ThreadChat({
         await updateThread(threadId, { projectCwd: cwd });
         await refresh();
       }}
+      refresh={refresh}
       onRename={async (title) => {
         await updateThread(threadId, { title });
         await refresh();
@@ -498,6 +708,9 @@ export function ThreadChatView({
   renderComposer,
   detail,
   repos,
+  selection,
+  onSelectSelection,
+  refresh: reloadThread,
   openAskSessionIds,
   questionPanel,
   send,
@@ -515,6 +728,12 @@ export function ThreadChatView({
   renderComposer?: (props: ThreadComposerProps) => ReactNode;
   detail: ThreadDetail | null;
   repos: ReadonlyArray<{ name: string; cwd: string }>;
+  /** The thread's stored model choice (its own for an existing thread, the draft for a new one). */
+  selection: ThreadSelection | null;
+  /** Store a new choice, or null to go back to the machine default. */
+  onSelectSelection: (next: ThreadSelection | null) => Promise<void>;
+  /** Reload the thread (used when a media result lands in it). */
+  refresh?: () => Promise<void>;
   /** Tasks with a question waiting on a person. */
   openAskSessionIds: ReadonlyArray<string | null | undefined>;
   /** The open questions from these tasks, drawn in their replies. */
@@ -535,12 +754,59 @@ export function ThreadChatView({
   const [rootHint, setRootHint] = useState<ThreadMessage | null>(null);
   const [error, setError] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  // The model choice: optimistic while a save is in flight, the stored value
+  // once it lands, and an inline error when the machine refuses it. Saves are
+  // chained (no overtaking on the wire), and each save only clears the draft
+  // it owns: a LATER choice is never clobbered by an EARLIER completion.
+  const { options, loading: optionsLoading } = useThreadSelectionOptions();
+  const [selectionDraft, setSelectionDraft] = useState<ThreadSelection | null | undefined>(undefined);
+  const [selectionError, setSelectionError] = useState<string | null>(null);
+  const saveChain = useRef<Promise<unknown>>(Promise.resolve());
+  const selectionSave = useRef<Promise<unknown>>(Promise.resolve());
+  const saveSeq = useRef(0);
+  // Eigen media: a compact, explicit action in the header. The panel is a
+  // dialog, so the thread's own layout never changes; a finished result is
+  // posted by the machine and picked up by the thread's normal reload.
+  const [mediaOpen, setMediaOpen] = useState(false);
 
   useEffect(() => {
     setPending([]);
     setOpenRoot(initialReplies);
     setError(null);
   }, [threadId, initialReplies]);
+
+  useEffect(() => {
+    setSelectionDraft(undefined);
+    setSelectionError(null);
+    // A different thread must not inherit the previous one's save chain.
+    saveChain.current = Promise.resolve();
+    selectionSave.current = Promise.resolve();
+    saveSeq.current += 1;
+  }, [threadId]);
+
+  const shownSelection = selectionDraft !== undefined ? selectionDraft : selection;
+  const chooseSelection = (next: ThreadSelection | null) => {
+    setSelectionDraft(next);
+    setSelectionError(null);
+    const seq = ++saveSeq.current;
+    const save = saveChain.current.then(() => onSelectSelection(next));
+    selectionSave.current = save;
+    saveChain.current = save.then(
+      () => {},
+      () => {},
+    );
+    void save.then(
+      () => {
+        if (saveSeq.current === seq) setSelectionDraft(undefined);
+      },
+      (e) => {
+        if (saveSeq.current === seq) {
+          setSelectionDraft(undefined);
+          setSelectionError(e instanceof Error ? e.message : String(e));
+        }
+      },
+    );
+  };
 
   const messages = useMemo(() => {
     const stored = detail?.messages ?? [];
@@ -583,6 +849,13 @@ export function ThreadChatView({
   }, [openRoot, replies.length, !!root]);
 
   const post = async (text: string, replyTo: string | null, attachments: ThreadAttachment[] = []) => {
+    // A fast Send must wait for the selected model to persist. A failed save
+    // keeps the message unsent instead of quietly using the previous model.
+    let saved: Promise<unknown>;
+    do {
+      saved = selectionSave.current;
+      await saved;
+    } while (saved !== selectionSave.current);
     const localId = `local-${Date.now()}`;
     if (!isNew) {
       setPending((rows) => [
@@ -701,10 +974,23 @@ export function ThreadChatView({
           <span className="truncate text-[15px] font-semibold leading-tight">{isNew ? "New thread" : detail?.thread.title ?? "Thread"}</span>
         </button>
         {isNew ? null : (
-          <ConversationParticipantRow
-            participants={(detail?.participants ?? []) as ConversationParticipant[]}
-            typingIds={(detail?.typing ?? []).flatMap((row) => (row.author.kind === "human" ? [row.author.participantId] : []))}
-          />
+          <>
+            <button
+              type="button"
+              data-testid="thread-media-button"
+              onClick={() => setMediaOpen(true)}
+              title="Eigen media maken en hier delen"
+              aria-label="Eigen media maken"
+              className="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-border px-2 text-[12px] text-muted-foreground transition hover:bg-muted hover:text-foreground"
+            >
+              <ImagePlus className="size-3.5" />
+              <span className="hidden sm:inline">Media</span>
+            </button>
+            <ConversationParticipantRow
+              participants={(detail?.participants ?? []) as ConversationParticipant[]}
+              typingIds={(detail?.typing ?? []).flatMap((row) => (row.author.kind === "human" ? [row.author.participantId] : []))}
+            />
+          </>
         )}
         {isNew ? null : (
           <DropdownMenu>
@@ -765,6 +1051,19 @@ export function ThreadChatView({
           }}
         />
       ) : null}
+      {mediaOpen ? (
+        <Dialog open={mediaOpen} onOpenChange={setMediaOpen}>
+          <DialogContent data-testid="thread-media-dialog" className="max-h-[85vh] max-w-lg overflow-y-auto">
+            <DialogTitle>Eigen media in dit gesprek</DialogTitle>
+            <OwnMediaPanel
+              threadId={threadId}
+              onJob={(job) => {
+                if (job.status === "succeeded") void reloadThread?.();
+              }}
+            />
+          </DialogContent>
+        </Dialog>
+      ) : null}
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
         {isNew || (detail && !top.length) ? (
@@ -782,6 +1081,17 @@ export function ThreadChatView({
       </div>
       {error ? <p className="px-4 text-[12px] text-destructive">{error}</p> : null}
       <TypingLine testId="thread-typing" label={typingLabel(typingIn(detail?.typing, null), detail?.participants)} />
+      {/* The choice sits with the composer it applies to: the replies' when
+          they are open, otherwise the main one. One group on screen at a time. */}
+      {!root && (!isNew || optionsLoading || options.length) ? (
+        <ThreadSelectionBar
+          selection={shownSelection}
+          options={options}
+          loading={optionsLoading}
+          error={selectionError}
+          onSelect={chooseSelection}
+        />
+      ) : null}
       <ComposerSlot
         render={renderComposer}
         onTyping={mainTyping}
@@ -854,6 +1164,14 @@ export function ThreadChatView({
         </div>
         {questionPanel ? questionPanel([...new Set(replyTasks)]) : null}
         <TypingLine testId="thread-reply-typing" label={typingLabel(typingIn(detail?.typing, root.id), detail?.participants)} />
+        <ThreadSelectionBar
+          selection={shownSelection}
+          options={options}
+          loading={optionsLoading}
+          error={selectionError}
+          onSelect={chooseSelection}
+          testId="thread-reply-selection"
+        />
         <ComposerSlot render={renderComposer} onTyping={replyTyping} mentions={mentionOptions} testId="thread-reply-input" placeholder="Reply…" onSend={(text, attachments) => post(text, root.id, attachments)} autoFocus />
       </aside>
     </div>

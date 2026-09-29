@@ -33,6 +33,12 @@ export type Conversation = {
   kind?: "thread";
   /** The project a thread's tasks run in. Null runs them as chats without a project. */
   threadProject?: { cwd: string; name: string } | null;
+  /**
+   * The thread's explicit agent/model/thinkingLevel choice for @omg replies
+   * and its tasks. Null: no choice was made, so the box defaults apply.
+   * Shaped like ThreadSelection in packages/protocol/src/threads.ts.
+   */
+  threadSelection?: { agent: string; model: string; thinkingLevel?: string | null; cyberAccessProgram?: string | null } | null;
   /** When a thread was archived. Archived threads are not listed. */
   archivedAt?: number | null;
   title?: string | null;

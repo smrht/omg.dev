@@ -19,7 +19,7 @@ import { PATHS, appVersion, installInfo, localServeBaseUrl } from "../config.ts"
 import { desktopRuntimeReadyPayload } from "../desktop-parent.ts";
 import { handleServerAccessRequest } from "../server-access.ts";
 import { CloudAccountError, createCloudAccount } from "../cloud-account.ts";
-import { generateSessionTitle, omgChatCompletionsEndpoint } from "../session-auto-title.ts";
+import { generateSessionTitle } from "../session-auto-title.ts";
 import {
   answerMention,
   appendThreadMessage,
@@ -47,7 +47,10 @@ import {
   threadUpdate,
   type ThreadDeps,
 } from "../threads.ts";
-import { mentionAgents, mentionedAgent, threadPreview, type ThreadMedia } from "../../packages/protocol/src/threads.ts";
+import { mentionAgents, mentionedAgent, threadPreview, type ThreadMedia, type ThreadSelection } from "../../packages/protocol/src/threads.ts";
+import { checkThreadSelectionForStore, resolveThreadTurn, threadSelectionOptions, type ThreadCatalogItem, type ThreadTurnPair } from "../thread-model.ts";
+import { codexFamilyCapabilities, dispatchThreadCompletion, visibleCompletionError } from "../thread-completion.ts";
+import { queueThreadAnswer } from "../threads.ts";
 import { COMPUTER_KIOSK_PATH } from "../../packages/protocol/src/computer-kiosk.ts";
 import { buildContinueSessionPrompt } from "../session-continue-prompt.ts";
 import { regenerateSessionTitle } from "../session-title-regenerate.ts";
@@ -1268,47 +1271,71 @@ function renderReportHtml(raw: string): string {
     .replace(/<\/table>/g, "</table></div>");
 }
 
-// ---------- legacy: pre-agents flat reports ----------
+// ---------- threads ----------
 
-/** Model used for a thread's quick @omg answers. */
-const THREAD_REPLY_MODEL = "anthropic/claude-sonnet-4.6";
+/**
+ * omg's thread replies run on the box's own connected accounts (one-shot,
+ * tool-less adapters in thread-completion.ts). The hosted omg.dev chat
+ * endpoint is deliberately NOT here, and there is no fallback to it: a pair
+ * that cannot answer is an error the thread shows.
+ */
+async function threadTurnFor(stored: ThreadSelection | null, mentioned: { key: string } | null): Promise<ThreadTurnPair> {
+  const codingAgents = await listCodingAgentsCached().catch(() => []);
+  const options = threadSelectionOptions(
+    listModelCatalog(codingAgents) as ThreadCatalogItem[],
+    codingAgents,
+    codexFamilyCapabilities(readModelDiscoveryCacheSync()),
+  );
+  const { defaultAgent, defaultModel } = getGlobalSettingsSync();
+  const turn = resolveThreadTurn({
+    stored,
+    options,
+    defaultAgent: defaultAgent?.trim() || null,
+    defaultModel: defaultModel?.trim() || null,
+    mentioned,
+  });
+  if (turn.kind === "error") throw new Error(turn.reason);
+  return { completion: turn.completion, task: turn.task };
+}
+
+/**
+ * A selection a client wants to store: null clears it, an object must name a
+ * connected thread-capable agent, one of its models, a level that model
+ * supports, and an access program the live metadata offers. Anything else is
+ * a 400, never a silently corrected choice.
+ */
+async function threadSelectionFromBody(
+  value: unknown,
+): Promise<{ ok: true; selection: ThreadSelection | null } | { ok: false; reason: string }> {
+  if (value === null || value === undefined) return { ok: true, selection: null };
+  const codingAgents = await listCodingAgentsCached().catch(() => []);
+  const options = threadSelectionOptions(
+    listModelCatalog(codingAgents) as ThreadCatalogItem[],
+    codingAgents,
+    codexFamilyCapabilities(readModelDiscoveryCacheSync()),
+  );
+  const checked = checkThreadSelectionForStore(value, options);
+  return checked.ok ? { ok: true, selection: checked.selection } : { ok: false, reason: checked.reason };
+}
 
 const threadDeps: ThreadDeps = {
-  complete: async (system, user) => {
-    const endpoint = omgChatCompletionsEndpoint();
-    if (!endpoint) return null;
-    const response = await fetch(endpoint.url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(endpoint.token ? { Authorization: `Bearer ${endpoint.token}` } : {}),
-      },
-      body: JSON.stringify({
-        model: THREAD_REPLY_MODEL,
-        max_tokens: 900,
-        temperature: 0.3,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
-      }),
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!response.ok) return null;
-    const body = await response.json().catch(() => null) as { choices?: Array<{ message?: { content?: unknown } }> } | null;
-    const content = body?.choices?.[0]?.message?.content;
-    return typeof content === "string" ? content : null;
+  resolveTurn: threadTurnFor,
+  complete: async (system, user, pair) => {
+    if (!pair) throw new Error("no connected agent is available for thread replies");
+    try {
+      return await dispatchThreadCompletion({ ...pair, system, user });
+    } catch (error) {
+      throw new Error(visibleCompletionError(error));
+    }
   },
   // Through the normal creation route, so a task gets every rule a session
   // started from the composer gets: admission, worktree, user tag, title.
-  startTask: async ({ prompt, title, cwd, user, agent }) => {
-    // Settings' "Default agent and model". The creation route picks the agent
-    // from it on its own, but the model is applied by the clients, so a task
-    // with no client has to pass the pair itself.
+  startTask: async ({ prompt, title, cwd, user, agent, model, thinkingLevel }) => {
+    // The thread's frozen pair names the agent and model when it resolved one;
+    // otherwise Settings' "Default agent and model" applies, as it always did.
     const { defaultAgent, defaultModel } = getGlobalSettingsSync();
-    // Asked by name (`@codex`), that agent runs, with its own default model.
     const agentChoice = agent
-      ? { agent }
+      ? { agent, ...(model ? { model } : {}), ...(thinkingLevel ? { thinkingLevel } : {}) }
       : defaultAgent?.trim()
         ? { agent: defaultAgent.trim(), ...(defaultModel?.trim() ? { model: defaultModel.trim() } : {}) }
         : {};
@@ -1404,9 +1431,15 @@ function threadAttachmentsFrom(value: unknown): { path: string; name: string | n
 async function handleThreadRequest(req: Request, url: URL, path: string): Promise<Response | null> {
   if (path === "/api/threads" && req.method === "GET") return json({ threads: listThreads() });
   if (path === "/api/threads" && req.method === "POST") {
-    const body = (await req.json().catch(() => null)) as { text?: unknown; title?: unknown; user?: unknown; attachments?: unknown } | null;
+    const body = (await req.json().catch(() => null)) as { text?: unknown; title?: unknown; user?: unknown; attachments?: unknown; selection?: unknown } | null;
     const viewer = threadViewer(req, typeof body?.user === "string" ? body.user : url.searchParams.get("user"));
-    const thread = startThread({ ...viewer, title: typeof body?.title === "string" ? body.title : null });
+    const selection = await threadSelectionFromBody(body?.selection);
+    if (selection && !selection.ok) return err(400, selection.reason);
+    const thread = startThread({
+      ...viewer,
+      title: typeof body?.title === "string" ? body.title : null,
+      ...(selection?.ok ? { selection: selection.selection } : {}),
+    });
     const text = typeof body?.text === "string" ? body.text.trim() : "";
     const attachments = threadAttachmentsFrom(body?.attachments);
     if (text || attachments.length) {
@@ -1443,7 +1476,7 @@ async function handleThreadRequest(req: Request, url: URL, path: string): Promis
     });
   }
   if (one && req.method === "PATCH") {
-    const body = (await req.json().catch(() => null)) as { title?: unknown; projectCwd?: unknown; archived?: unknown } | null;
+    const body = (await req.json().catch(() => null)) as { title?: unknown; projectCwd?: unknown; archived?: unknown; selection?: unknown } | null;
     let project: { cwd: string; name: string } | null | undefined;
     if (body?.projectCwd === null) project = null;
     else if (typeof body?.projectCwd === "string") {
@@ -1451,9 +1484,15 @@ async function handleThreadRequest(req: Request, url: URL, path: string): Promis
       if (!repo) return err(400, "unknown project");
       project = { cwd: repo.cwd, name: repo.project || repo.name };
     }
+    let selection: Awaited<ReturnType<typeof threadSelectionFromBody>> | undefined;
+    if (body?.selection !== undefined) {
+      selection = await threadSelectionFromBody(body.selection);
+      if (!selection.ok) return err(400, selection.reason);
+    }
     const updated = threadUpdate(id, {
       ...(typeof body?.title === "string" || body?.title === null ? { title: body.title as string | null } : {}),
       ...(project !== undefined ? { project } : {}),
+      ...(selection?.ok ? { selection: selection.selection } : {}),
       ...(typeof body?.archived === "boolean" ? { archived: body.archived } : {}),
     });
     return updated ? json({ thread: summarizeThread(updated) }) : err(404, "thread not found");
@@ -1531,6 +1570,11 @@ async function handleThreadRequest(req: Request, url: URL, path: string): Promis
  * Store a person's message, then let omg answer in the background if
  * mentioned. omg answers in the replies: of this message, or of the message
  * this one replies to.
+ *
+ * The thread's stored selection is read HERE, synchronously, before the
+ * answer is queued: a selection changed while a reply is in flight applies to
+ * the next message, never the one already on its way. The queued answers of
+ * one thread run one at a time, oldest first.
  */
 function postThreadMessage(
   threadId: string,
@@ -1541,6 +1585,8 @@ function postThreadMessage(
 ) {
   // Named with @: in the thread before the message is stored, so they are told.
   addMentionedPeople(threadId, text, userRoster(), viewer.identity);
+  // Frozen for the reply this message starts.
+  const storedSelection = getConversation(threadId)?.threadSelection ?? null;
   const message = appendThreadMessage(threadId, {
     author: threadAuthor(threadId, viewer.identity, viewer.name),
     text,
@@ -1550,13 +1596,24 @@ function postThreadMessage(
   // A mention always reaches omg; so does a reply in a reply thread omg is part of,
   // and omg decides whether it has anything to say. `@codex` asks a coding agent
   // by name: omg briefs it and it runs the task.
-  void (async () => {
+  queueThreadAnswer(threadId, async () => {
     const agent = mentionedAgent(text, mentionAgents(await listCodingAgentsCached().catch(() => [])));
     const wake = agent ? "mention" : omgWake(message, readThreadMessages(threadId, 5_000));
     if (!wake) return;
-    await answerMention(threadId, text, viewer.identity, threadDeps, replyTo ?? message.id, wake === "reply", agent);
-  })().catch((error) => {
-    console.error(`[threads] @omg failed in ${threadId}:`, error);
+    await answerMention(
+      threadId,
+      text,
+      viewer.identity,
+      threadDeps,
+      replyTo ?? message.id,
+      wake === "reply",
+      agent,
+      storedSelection,
+    );
+  }).catch((error) => {
+    // Redacted on the way to the log: a raw provider error can carry prompts
+    // or credentials, and the console is not the place for either.
+    console.error(`[threads] @omg failed in ${threadId}: ${visibleCompletionError(error, "unknown error")}`);
   });
   return message;
 }
@@ -5875,6 +5932,38 @@ a{color:#60a5fa}
         const handled = await handleMediaRequest(req, url, {
           spendPath: join(PATHS.data, "media-spend.json"),
           cloud: { signedIn: () => cloudAccount.status().signedIn, fetch: cloudAccount.cloudFetch },
+        });
+        if (handled) return handled;
+      }
+      // Own media: a provider the user picked, paid by the user's own
+      // subscription or API key (src/own-media.ts). No omg credits, no
+      // inference from @omg: the only automatic side effect is one thread
+      // message carrying the finished file. onJobCompleted fires from an
+      // atomic success transition, so duplicate CONCURRENT callbacks are
+      // avoided and a refresh or a retried poll cannot post twice. A crash
+      // between that transition and this post can still lose the thread
+      // delivery (the job state stays the truth; the panel keeps showing it);
+      // there is deliberately no outbox retry here.
+      if (path === "/api/own-media/providers" || path === "/api/own-media/jobs" || path.startsWith("/api/own-media/jobs/")) {
+        server.timeout(req, 360);
+        const { handleOwnMediaRequest } = await import("../own-media.ts");
+        const handled = await handleOwnMediaRequest(req, url, {
+          onJobCompleted: (job, media) => {
+            if (!job.threadId) return;
+            appendThreadMessage(job.threadId, {
+              author: { kind: "omg" },
+              text: `Media klaar via ${job.provider}.`,
+              media: [
+                {
+                  kind: job.kind,
+                  path: media.urlPath,
+                  name: media.name,
+                  ...(media.width != null ? { width: media.width } : {}),
+                  ...(media.height != null ? { height: media.height } : {}),
+                },
+              ],
+            });
+          },
         });
         if (handled) return handled;
       }

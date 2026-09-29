@@ -1,6 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./omg-client";
-import type { ThreadDetail, ThreadMessage, ThreadSummary } from "../../../packages/protocol/src/threads";
+import type { CodingAgentInfo } from "../App";
+import { CodingAgentsContext } from "./session-ui";
+import {
+  THREAD_CHAT_AGENT_KEYS,
+  type ThreadDetail,
+  type ThreadMessage,
+  type ThreadSelection,
+  type ThreadSelectionOption,
+  type ThreadSummary,
+} from "../../../packages/protocol/src/threads";
 
 /**
  * Threads on the web: people-first chat with no agent behind it. The machine
@@ -8,7 +17,7 @@ import type { ThreadDetail, ThreadMessage, ThreadSummary } from "../../../packag
  * packages/protocol/src/threads.ts.
  */
 
-export type { ThreadDetail, ThreadMessage, ThreadSummary };
+export type { ThreadDetail, ThreadMessage, ThreadSelection, ThreadSelectionOption, ThreadSummary };
 
 const json = { "Content-Type": "application/json" };
 
@@ -28,11 +37,21 @@ export function listThreads(): Promise<ThreadSummary[]> {
 /** A file already uploaded to the machine (POST /api/uploads), to go with a message. */
 export type ThreadAttachment = { path: string; name: string };
 
-export function createThread(text: string, user?: string | null, attachments: ThreadAttachment[] = []): Promise<ThreadSummary> {
+export function createThread(
+  text: string,
+  user?: string | null,
+  attachments: ThreadAttachment[] = [],
+  selection?: ThreadSelection | null,
+): Promise<ThreadSummary> {
   return api<{ thread: ThreadSummary }>("/api/threads", {
     method: "POST",
     headers: json,
-    body: JSON.stringify({ text, ...(user ? { user } : {}), ...(attachments.length ? { attachments } : {}) }),
+    body: JSON.stringify({
+      text,
+      ...(user ? { user } : {}),
+      ...(attachments.length ? { attachments } : {}),
+      ...(selection ? { selection } : {}),
+    }),
   }).then((res) => res.thread);
 }
 
@@ -66,13 +85,128 @@ export function sendThreadTyping(id: string, typing: boolean, user?: string | nu
 
 export function updateThread(
   id: string,
-  patch: { projectCwd?: string | null; title?: string | null; archived?: boolean },
+  patch: { projectCwd?: string | null; title?: string | null; archived?: boolean; selection?: ThreadSelection | null },
 ): Promise<ThreadSummary> {
   return api<{ thread: ThreadSummary }>(`/api/threads/${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: json,
     body: JSON.stringify(patch),
   }).then((res) => res.thread);
+}
+
+/* -------------------------------------------------------------------------- */
+/* The model a thread answers with                                             */
+/* -------------------------------------------------------------------------- */
+
+type CatalogModelItem = {
+  key: string;
+  label: string;
+  defaultModel: string;
+  models: string[];
+  thinkingLevels: string[];
+  thinkingLevelsByModel?: Record<string, string[]>;
+};
+
+/** Codex-family capability metadata as /api/coding-agents reports it. */
+type CatalogCapabilities = Record<string, { reasoningEfforts?: string[]; cyberAccessPrograms?: string[] }>;
+
+/** Codex-family keys whose per-model thinking levels come from live capability metadata. */
+const CODEX_FAMILY_KEYS = new Set(["codex", "codex-aisdk"]);
+
+/**
+ * The agents a thread can answer with: connected, shown on this box, and
+ * running through one of the thread reply adapters. Same rules as the server
+ * (src/thread-model.ts), so what the picker offers is what answers. Cyber
+ * access programs and fresh reasoning levels come from live metadata only.
+ */
+export function threadSelectionOptionsFrom(
+  codingAgents: readonly CodingAgentInfo[] | undefined,
+  models: readonly CatalogModelItem[] | null,
+  codexCapabilities?: CatalogCapabilities | null,
+): ThreadSelectionOption[] {
+  if (!codingAgents || !models) return [];
+  const connected = new Map<string, CodingAgentInfo>(codingAgents.map((agent) => [agent.key, agent]));
+  const out: ThreadSelectionOption[] = [];
+  for (const item of models) {
+    if (!THREAD_CHAT_AGENT_KEYS.includes(item.key)) continue;
+    const info = connected.get(item.key);
+    if (!info || !info.visible || info.status.configured !== true) continue;
+    if (!item.models?.length) continue;
+    const levelsByModel = CODEX_FAMILY_KEYS.has(item.key) && codexCapabilities
+      ? Object.fromEntries(item.models.flatMap((model) => {
+          const efforts = codexCapabilities[model]?.reasoningEfforts;
+          return efforts?.length ? [[model, [...efforts]]] : [];
+        }))
+      : {};
+    const mergedLevels: Record<string, string[]> = {
+      ...(item.thinkingLevelsByModel ?? {}),
+      ...levelsByModel,
+    };
+    const programs = codexCapabilities
+      ? Object.fromEntries(
+          item.models.flatMap((model) => {
+            const offered = codexCapabilities[model]?.cyberAccessPrograms ?? [];
+            return offered.length ? [[model, [...offered]]] : [];
+          }),
+        )
+      : {};
+    out.push({
+      key: item.key,
+      label: info.label || item.label,
+      models: item.models,
+      defaultModel: item.defaultModel || item.models[0],
+      thinkingLevels: item.thinkingLevels ?? [],
+      ...(Object.keys(mergedLevels).length ? { thinkingLevelsByModel: mergedLevels } : {}),
+      ...(Object.keys(programs).length ? { cyberAccessProgramsByModel: programs } : {}),
+    });
+  }
+  return out;
+}
+
+/** The model catalog is fetched once per open app; the roster refreshes on its own. */
+let cachedModels: { at: number; items: CatalogModelItem[] | null; capabilities: CatalogCapabilities | null } | null = null;
+
+/** Test seam: pre-seed the catalog so a render never needs the machine. */
+export function setThreadSelectionCatalogForTests(items: CatalogModelItem[] | null, capabilities: CatalogCapabilities | null = null): void {
+  cachedModels = items ? { at: Number.MAX_SAFE_INTEGER, items, capabilities } : null;
+}
+
+export function useThreadSelectionOptions(): { options: ThreadSelectionOption[]; loading: boolean } {
+  const [items, setItems] = useState<CatalogModelItem[] | null>(cachedModels?.items ?? null);
+  const [capabilities, setCapabilities] = useState<CatalogCapabilities | null | undefined>(cachedModels?.capabilities ?? undefined);
+  const [loading, setLoading] = useState(!cachedModels);
+  useEffect(() => {
+    if (cachedModels && Date.now() - cachedModels.at < 5 * 60_000) {
+      setItems(cachedModels.items);
+      setCapabilities(cachedModels.capabilities);
+      setLoading(false);
+      return;
+    }
+    let alive = true;
+    setLoading(true);
+    api<{ models?: CatalogModelItem[] | null; discovery?: { providers?: Record<string, { modelCapabilities?: CatalogCapabilities } | undefined> } | null }>("/api/coding-agents")
+      .then((res) => {
+        const caps = res.discovery?.providers?.["codex-aisdk"]?.modelCapabilities ?? null;
+        cachedModels = { at: Date.now(), items: res.models ?? [], capabilities: caps };
+        if (alive) {
+          setItems(res.models ?? []);
+          setCapabilities(caps);
+          setLoading(false);
+        }
+      })
+      .catch(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const codingAgents = useContext(CodingAgentsContext);
+  const options = useMemo(
+    () => threadSelectionOptionsFrom(codingAgents, items, capabilities),
+    [codingAgents, items, capabilities],
+  );
+  return { options, loading: loading || codingAgents === undefined };
 }
 
 /**

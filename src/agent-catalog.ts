@@ -4,7 +4,8 @@ export { OMG_MODELS } from "./omg-models.ts";
 import type { Agent } from "./agents/registry.ts";
 import type { AutoAgent } from "./auto/store.ts";
 import type { CodingAgentInfo, CodingAgentKind } from "./coding-agents.ts";
-import { readModelDiscoveryCacheSync, DEVIN_FUSION_UID_RE } from "./model-discovery.ts";
+import { readModelDiscoveryCacheSync, DEVIN_FUSION_UID_RE, type CodexModelCapabilities } from "./model-discovery.ts";
+export type { CodexModelCapabilities, CyberAccessProgram } from "./model-discovery.ts";
 import { CODEX_MUSE_MODELS, museSubscriptionKey } from "./agents/backends/codex-muse.ts";
 import { PI_AUTH_PROVIDER_IDS } from "./pi-auth.ts";
 import type { Session } from "./sessions.ts";
@@ -287,6 +288,13 @@ export type ModelCatalogItem = {
   thinkingLevels: string[];
   /** Model-specific levels for providers whose variants differ per model. */
   thinkingLevelsByModel?: Record<string, string[]>;
+  /**
+   * Discovered per-model capability metadata (reasoning efforts, cyber
+   * access programs) for the codex-family providers. Absent when discovery
+   * carried none — never statically seeded, so the picker advertises only
+   * what the connected account's live catalog offered.
+   */
+  modelCapabilities?: Record<string, CodexModelCapabilities>;
   session: boolean;
   auto: boolean;
   visible?: boolean;
@@ -648,6 +656,15 @@ export function curateCodexModels(models: string[]): string[] {
   addLatest(out, models.filter((m) => /^gpt-\d/.test(m) && m.includes("codex") && !m.includes("spark")));
   addLatest(out, models.filter((m) => m.includes("spark")));
   for (const fallback of CODEX_MODELS) if (!out.includes(fallback) && models.includes(fallback)) out.push(fallback);
+  // Discovery is authoritative for what the account can run, and the parser
+  // has already dropped `visibility: "hide"` entries — what reaches this point
+  // is exactly what Codex' own picker shows. Two real drops came from relying
+  // on the family filters above alone: `gpt-daybreak-blue-latest` carries no
+  // version digits, so /^gpt-\d/ never matched it; and a release that ships
+  // two families at one version (gpt-6.1-sol + gpt-6.1-luna) lost all but the
+  // localeCompare winner of addLatest. Keep the remaining discovered slugs in
+  // discovery order instead of deleting them.
+  for (const model of models) if (!out.includes(model)) out.push(model);
   return out.length ? out : models;
 }
 
@@ -989,6 +1006,13 @@ export function listModelCatalog(codingAgents: CodingAgentInfo[] = []): ModelCat
       piProviders,
       openCodeConnected,
     );
+    // Codex-family capability metadata rides along verbatim from discovery
+    // (codex-aisdk is mirrored from codex at refresh time). No entry when the
+    // cache carries none: the picker then advertises no cyber program.
+    const modelCapabilities =
+      key === "codex" || key === "codex-aisdk"
+        ? readModelDiscoveryCacheSync()?.providers?.[key]?.modelCapabilities
+        : undefined;
     // Devin's levels come from discovery (the family's variant suffixes),
     // keyed by the exact model id the picker shows.
     const devinLevels = key === "devin"
@@ -1019,6 +1043,9 @@ export function listModelCatalog(codingAgents: CodingAgentInfo[] = []): ModelCat
       thinkingLevels,
       ...(thinkingLevelsByModel && Object.keys(thinkingLevelsByModel).length
         ? { thinkingLevelsByModel }
+        : {}),
+      ...(modelCapabilities && Object.keys(modelCapabilities).length
+        ? { modelCapabilities }
         : {}),
       session: key !== "claude" && key !== "codex",
       auto: (AUTO_AGENT_BACKENDS as readonly string[]).includes(key),

@@ -174,6 +174,7 @@ export function createThreadConversation(input: {
   identity: string;
   name?: string | null;
   title?: string | null;
+  selection?: { agent: string; model: string; thinkingLevel?: string | null; cyberAccessProgram?: string | null } | null;
   now?: number;
 }): Conversation {
   const now = input.now ?? Date.now();
@@ -182,6 +183,7 @@ export function createThreadConversation(input: {
     kind: "thread",
     title: input.title?.trim() || null,
     threadProject: null,
+    threadSelection: input.selection ?? null,
     participants: [],
     runtimeSessions: [],
     createdAt: now,
@@ -197,10 +199,10 @@ export function createThreadConversation(input: {
   }) ?? conversation;
 }
 
-/** Change a thread's title, project, archive state or activity time. */
+/** Change a thread's title, project, model selection, archive state or activity time. */
 export function patchThreadConversation(
   id: string,
-  patch: Partial<Pick<Conversation, "title" | "threadProject" | "archivedAt" | "updatedAt">>,
+  patch: Partial<Pick<Conversation, "title" | "threadProject" | "threadSelection" | "archivedAt" | "updatedAt">>,
 ): Conversation | null {
   const rows = readStore();
   const conversation = rows.find((row) => row.id === id && row.kind === "thread");

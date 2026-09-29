@@ -408,6 +408,7 @@ import {
   ArrowDown,
   ArrowUp,
   Bot,
+  ImagePlus,
   BrainCircuit,
   CalendarClock,
   Clock3,
@@ -557,6 +558,7 @@ import { MorphText } from "@/components/ui/morph-text";
 import { DoubleConfirmAction } from "@/components/ui/double-confirm-action";
 import { ClearFindingsButton } from "@/components/clear-findings-button";
 import { AutoReportRow, SEV_DOT, SEV_LABEL, relTime } from "@/components/auto-report-row";
+import { OwnMediaPanel } from "@/components/own-media";
 import {
   Dialog,
   DialogContent,
@@ -23905,6 +23907,9 @@ function NewSessionDialog({
   // Resumable (closed / rebooted-away) sessions. Fetched lazily when the user
   // expands the section so opening the dialog stays instant; reset on close.
   const [resumeOpen, setResumeOpen] = useState(false);
+  // Eigen media: an explicit, optional chooser. Closed by default; opening it
+  // never touches the composer, the model picker or anything else on screen.
+  const [ownMediaOpen, setOwnMediaOpen] = useState(false);
   const [resumable, setResumable] = useState<ResumableSession[] | null>(null);
   // Mobile compact model picker (the approved sheet over the inline
   // composer). Always opens on its root page.
@@ -24890,6 +24895,22 @@ function NewSessionDialog({
     </button>
   );
 
+  // Eigen media: one compact, explicit action, next to the recovery button.
+  // The chooser itself is a dialog, so nothing about the composer changes
+  // until it is asked for. No thread yet here: results land in the panel.
+  const ownMediaButton = (
+    <button
+      type="button"
+      onClick={() => setOwnMediaOpen(true)}
+      title="Eigen media maken (beeld of video, op je eigen account)"
+      aria-label="Eigen media maken"
+      className={cn("flex h-8 shrink-0 items-center justify-center gap-2 rounded-full border border-border bg-background text-muted-foreground transition hover:text-foreground", variant === "workspace" ? "px-3 text-xs" : "w-8 shadow-sm")}
+    >
+      <ImagePlus className="size-4" />
+      {variant === "workspace" ? <span>Media</span> : null}
+    </button>
+  );
+
   // Inline composer: the agent icon opens the compact model picker. A
   // vertical swipe on the icon still steps through the agents without
   // opening anything.
@@ -25276,6 +25297,7 @@ function NewSessionDialog({
             {/* The project rail under the mobile header chooses the folder,
                 as on iOS, so the composer carries no folder button. */}
             {inlineExpanded ? resumeButton : null}
+            {inlineExpanded ? ownMediaButton : null}
             {inlineExpanded ? <span className="flex-1" /> : null}
             {micButton}
             {inlineExpanded ? startButton : null}
@@ -25284,7 +25306,7 @@ function NewSessionDialog({
           micButton
         )}
         {variant === "workspace" ? <div className="workspace-composer-actions">
-          <div className="flex shrink-0 items-center gap-2">{attachButton}{micButton}{resumeButton}</div>
+          <div className="flex shrink-0 items-center gap-2">{attachButton}{micButton}{resumeButton}{ownMediaButton}</div>
           <div className="workspace-model-controls">{controlsInner}</div>
           <div className="workspace-usage">
             {usageLoading ? <UsageRingsLoadingIndicator /> : usage ? <UsageRingsButton provider={usage} /> : null}
@@ -25354,6 +25376,7 @@ function NewSessionDialog({
             {/* Right cluster: resume + photo + send, stacked together. */}
             <div className="flex shrink-0 items-center gap-2">
               {resumeButton}
+              {ownMediaButton}
               {attachButton}
               {startButton}
             </div>
@@ -25374,6 +25397,19 @@ function NewSessionDialog({
             onClose={closeResume}
           />
         </Suspense>
+      ) : null}
+      {ownMediaOpen ? (
+        <Dialog open={ownMediaOpen} onOpenChange={setOwnMediaOpen}>
+          <DialogContent className="max-w-lg">
+            <DialogHeader>
+              <DialogTitle>Eigen media</DialogTitle>
+              <DialogDescription>
+                Beeld of video op een aanbieder die jij kiest, betaald met je eigen account of sleutel.
+              </DialogDescription>
+            </DialogHeader>
+            <OwnMediaPanel threadId={null} />
+          </DialogContent>
+        </Dialog>
       ) : null}
       <ProjectFolderBrowser
         open={folderBrowserOpen}

@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { defaultModelForCatalogItem } from "./agent-catalog.ts";
 import {
   modelDiscoveryKeysForAgent,
+  normalizeCyberAccessProgram,
   providersDueForRetry,
+  parseCodexModels,
   parseFxModels,
   parseJcodeModels,
   parseOpenCodeModels,
@@ -231,6 +233,121 @@ describe("muse model discovery", () => {
 
   test("an empty catalog yields no models", () => {
     expect(parseMuseModels(JSON.stringify({ data: [] })).models).toEqual([]);
+  });
+});
+
+describe("Codex model capability metadata", () => {
+  // Fixture trimmed from ~/.codex/models_cache.json / `codex debug models`
+  // (codex-cli 0.157.1, captured 2026-09-29): the account sees daybreak_blue
+  // on the sol/luna/5.6 families, only standard on Astra, and the
+  // daybreak-blue alias model takes daybreak_blue alone.
+  const CLI_CATALOG = JSON.stringify({
+    models: [
+      {
+        slug: "gpt-6-astra",
+        display_name: "GPT-6-Astra",
+        visibility: "list",
+        default_reasoning_level: "medium",
+        supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }, { effort: "high" }],
+        available_access_programs: { cyber: ["standard"] },
+      },
+      {
+        slug: "gpt-6-sol",
+        display_name: "GPT-6-Sol",
+        visibility: "list",
+        default_reasoning_level: "medium",
+        supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }, { effort: "high" }, { effort: "xhigh" }, { effort: "max" }, { effort: "ultra" }],
+        available_access_programs: { cyber: ["standard", "daybreak_blue"] },
+      },
+      { slug: "gpt-reserve", visibility: "hide", supported_reasoning_levels: [{ effort: "low" }], available_access_programs: { cyber: ["daybreak_red"] } },
+      {
+        slug: "gpt-daybreak-blue-latest",
+        display_name: "Daybreak Blue",
+        visibility: "list",
+        default_reasoning_level: "medium",
+        supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }, { effort: "high" }, { effort: "xhigh" }, { effort: "max" }, { effort: "ultra" }],
+        available_access_programs: { cyber: ["daybreak_blue"] },
+      },
+      { slug: "codex-auto-review", visibility: "hide" },
+    ],
+  });
+
+  test("carries per-model reasoning efforts and normalized cyber programs", () => {
+    const parsed = parseCodexModels(CLI_CATALOG);
+    expect(parsed.models).toEqual(["gpt-6-astra", "gpt-6-sol", "gpt-daybreak-blue-latest"]);
+    expect(parsed.modelCapabilities?.["gpt-6-sol"]).toEqual({
+      reasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+      defaultReasoningEffort: "medium",
+      cyberAccessPrograms: ["standard", "daybreakBlue"],
+    });
+    expect(parsed.modelCapabilities?.["gpt-6-astra"]?.cyberAccessPrograms).toEqual(["standard"]);
+    expect(parsed.modelCapabilities?.["gpt-daybreak-blue-latest"]?.cyberAccessPrograms).toEqual(["daybreakBlue"]);
+  });
+
+  test("hidden models contribute neither ids nor capability metadata", () => {
+    const parsed = parseCodexModels(CLI_CATALOG);
+    expect(parsed.modelCapabilities?.["gpt-reserve"]).toBeUndefined();
+    expect(parsed.modelCapabilities?.["codex-auto-review"]).toBeUndefined();
+  });
+
+  test("no access-program metadata means the field stays absent, never faked", () => {
+    const parsed = parseCodexModels(
+      JSON.stringify({
+        models: [
+          { slug: "gpt-5.5", visibility: "list", supported_reasoning_levels: [{ effort: "low" }] },
+        ],
+      }),
+    );
+    expect(parsed.modelCapabilities?.["gpt-5.5"]).toEqual({ reasoningEfforts: ["low"] });
+    expect("cyberAccessPrograms" in (parsed.modelCapabilities?.["gpt-5.5"] ?? {})).toBe(false);
+  });
+
+  test("an explicitly empty cyber list is real metadata: no program offered", () => {
+    const parsed = parseCodexModels(
+      JSON.stringify({
+        models: [{ slug: "gpt-5.5", visibility: "list", available_access_programs: { cyber: [] } }],
+      }),
+    );
+    expect(parsed.modelCapabilities?.["gpt-5.5"]?.cyberAccessPrograms).toEqual([]);
+  });
+
+  test("unknown program spellings are dropped, not guessed", () => {
+    expect(normalizeCyberAccessProgram("daybreak_blue")).toBe("daybreakBlue");
+    expect(normalizeCyberAccessProgram("daybreakBlue")).toBe("daybreakBlue");
+    expect(normalizeCyberAccessProgram("daybreak_red")).toBe("daybreakRed");
+    expect(normalizeCyberAccessProgram("standard")).toBe("standard");
+    expect(normalizeCyberAccessProgram("daybreak_purple")).toBeNull();
+    const parsed = parseCodexModels(
+      JSON.stringify({
+        models: [{ slug: "m", visibility: "list", available_access_programs: { cyber: ["standard", "daybreak_purple", 42] } }],
+      }),
+    );
+    expect(parsed.modelCapabilities?.m?.cyberAccessPrograms).toEqual(["standard"]);
+  });
+
+  test("accepts the app-server model/list camelCase shape as the same document", () => {
+    const parsed = parseCodexModels(
+      JSON.stringify({
+        data: [
+          {
+            id: "gpt-6-sol",
+            displayName: "GPT-6-Sol",
+            hidden: false,
+            defaultReasoningEffort: "medium",
+            supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "high" }],
+            availableAccessPrograms: { cyber: ["daybreakBlue"] },
+          },
+          { id: "gpt-reserve", hidden: true, supportedReasoningEfforts: [{ reasoningEffort: "low" }] },
+        ],
+      }),
+    );
+    expect(parsed.models).toEqual(["gpt-6-sol"]);
+    expect(parsed.labels).toEqual({ "gpt-6-sol": "GPT-6-Sol" });
+    expect(parsed.modelCapabilities?.["gpt-6-sol"]).toEqual({
+      reasoningEfforts: ["low", "high"],
+      defaultReasoningEffort: "medium",
+      cyberAccessPrograms: ["daybreakBlue"],
+    });
   });
 });
 

@@ -37,3 +37,38 @@ test("Codex hidden models never reach the picker and discovery order is kept", a
   );
   expect(parsed.models).toEqual(["gpt-6-astra", "gpt-6-sol", "gpt-5.5"]);
 });
+
+test("parseCodexModels keeps a newly named release that carries no version digits", async () => {
+  // Fixture trimmed from ~/.codex/models_cache.json (captured 2026-09-29):
+  // Codex listed Daybreak Blue as an ordinary `visibility: "list"` slug, so
+  // the parser keeps it with its display name. The drop happened later, in
+  // curateCodexModels.
+  const { parseCodexModels } = await import("./model-discovery.ts");
+  const parsed = parseCodexModels(
+    JSON.stringify({
+      models: [
+        { slug: "gpt-6-astra", display_name: "GPT-6-Astra", visibility: "list" },
+        { slug: "gpt-6-sol", display_name: "GPT-6-Sol", visibility: "list" },
+        { slug: "gpt-6-luna", display_name: "GPT-6-Luna", visibility: "list" },
+        { slug: "gpt-reserve", visibility: "hide" },
+        { slug: "gpt-5.6-sol", display_name: "GPT-5.6-Sol", visibility: "list" },
+        { slug: "gpt-5.6-terra", display_name: "GPT-5.6-Terra", visibility: "list" },
+        { slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", visibility: "list" },
+        { slug: "gpt-daybreak-blue-latest", display_name: "Daybreak Blue", visibility: "list" },
+        { slug: "gpt-5.5", display_name: "GPT-5.5", visibility: "list" },
+        { slug: "codex-auto-review", visibility: "hide" },
+      ],
+    }),
+  );
+  expect(parsed.models).toEqual([
+    "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-daybreak-blue-latest",
+    "gpt-5.5",
+  ]);
+  expect(parsed.labels["gpt-daybreak-blue-latest"]).toBe("Daybreak Blue");
+});
