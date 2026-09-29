@@ -1,29 +1,55 @@
-# Eigen Threads- en mediaroutes — voorstel, nog niet geïmplementeerd
+# Eigen Threads, modellen en media
 
-Per Thread een expliciete agent/model/reasoning-keuze uit de bestaande verbonden
-catalogus. Sla de keuze op bij de conversation-owner, expose via het protocol en
-gebruik dezelfde keuze voor korte antwoorden en taken. Geen verborgen OMG-call
-voor routering of antwoorden; een onbereikbaar abonnement geeft een zichtbare fout,
-geen taak of andere provider als automatische fallback.
+Sam heeft deze routes bevestigd: eigen verbonden agent/model in Threads;
+ChatGPT/OpenAI, Google Flow en KIE voor media; Sol 6.1 en Daybreak waar het account
+die aanbiedt. Implementatie staat lokaal klaar voor verificatie en activatie;
+de Agentbox is nog niet bijgewerkt.
 
-De bestaande korte antwoordroute gebruikt threadDeps.complete in serve.ts met een
-vast hosted Sonnet-model. Bestaande echte taken gaan al via de gewone sessieroute.
-Upstream143 ondersteunt ook @agent-vermeldingen; de expliciete modelkeuze moet daar
-coherent mee samenwerken, zonder één provider/modelpaar aan een andere agent door
-te geven. Bescherm bestaande groeps-/reply-context en de seriële threadqueue.
+## Threads
 
-Gebruik de bestaande geïsoleerde backend-infrastructuur; korte chatantwoorden krijgen
-geen schrijf-/shelltools. Hergebruik de modelcatalogus en voorkeuren, geen tweede
-catalogus. Verifieer authenticatie en daadwerkelijke accountfacturering vóór er
-"via abonnement" staat; OpenCode-modellen kunnen ook API-betaald zijn.
+Per Thread een opgeslagen agent/model/reasoning-keuze uit de bestaande verbonden
+catalogus. De seriële queue bevriest die keuze voor elk bericht. Korte antwoorden
+lopen via een begrensde tool-less Claude-, Codex- of OpenCode-adapter op het eigen
+verbonden account; geldige taakbeslissingen gebruiken de gewone sessieroute met
+het gekozen paar. Geen hosted OMG-inference fallback bij fouten. OpenCode kan
+abonnement óf API-facturering gebruiken; de UI zegt daarom eigen verbonden account.
 
-Media: eigen opties per job, zichtbaar account/provider en kostenroute. OMG-credits
-alleen na een expliciete keuze. Flow-browsercredits zijn geen Developer API-budget.
-Een browserhandoff heet geen automatische integratie. Upload/resultaatweergave hoort
-bij de primaire route, inclusief fout/annuleerstatus en cleanup.
+Daybreak is een echte `turn/start.cyberAccessProgram`-aanvraag via de Codex
+app-server, geen fictieve CLI-config. Alleen live ontdekte accessprogramma's mogen
+worden gekozen. Sol 6.1 bood op de gecontroleerde Mac-accountcatalogus alleen
+standard; Sol 6 bood Daybreak Blue. De gewone SDK heeft geen programma-parameter:
+een expliciete programmakeuze geldt daarom voor korte Thread-antwoorden. Een taak
+waarvoor dat programma niet kan worden doorgegeven krijgt een zichtbare weigering,
+geen stille downgrade. De ontdekte Daybreak-modelalias blijft beschikbaar als
+normale modelkeuze. Geen defaults automatisch wijzigen. Geen claim over door de
+server werkelijk toegepaste beleidsbeperkingen: het protocol meldt die niet.
 
-Open gebruikerskeuze: ChatGPT/OpenAI-beeld + bestaande Google Flow-video, of ook
-Grok. Live beschikbaarheid/login niet gemeten omdat Tailscale SSH om verificatie vraagt.
-Echte betaalde media-smoketest pas met expliciet budget. Nooit kunstmatig cost=0
-invullen om caps te passeren. Native app-pickers vereisen aparte apprelease; scope
-is de bestaande Agentbox webinterface op desktop en mobiel.
+## Media
+
+Een optionele Media-knop in de bestaande composer en in Threads opent de eigen
+kiezer. De huidige composer, uploads, favorieten en overige instellingen blijven
+beschikbaar. Elke job kiest zijn provider en model expliciet:
+
+- ChatGPT: browserhandoff, modelkeuze op ChatGPT, daarna resultaat uploaden.
+- Google Flow: browserhandoff, modelkeuze op Flow en eigen browsercredits,
+  daarna resultaat uploaden. Flow-credits zijn geen Developer API-budget.
+- OpenAI API: server-side OPENAI_API_KEY, ondersteunde Images API-modellen;
+  afzonderlijke API-facturering, niet het ChatGPT-abonnement.
+- KIE: server-side KIE_API_KEY, gedocumenteerde modeladapters voor beeld/video;
+  afzonderlijke KIE-credits.
+
+Browserhandoff is geen automatische generatie. API-jobs blijven geblokkeerd zolang
+key/prijs/gebruikerskostenbevestiging ontbreken. Prijs is een schatting; het lokale
+plafond is geen provider-side garantie. Geen verzonnen nulprijs en geen OMG-fallback.
+Betaalde echte media-smoketest vereist een expliciet budget.
+
+Private jobrecords, request-id/fingerprint, annulering en begrensde providerpolling
+voorkomen dubbele submits en late resultaatoverschrijvingen. Uploads en provider-
+resultaten gebruiken dezelfde echte image/video-validatie en artifactregistratie.
+Thread-resultaten worden via de bestaande mediaweergave toegevoegd, zonder model-
+inference. Een procescrash precies tussen commit en callback heeft geen bewezen
+exactly-once delivery-garantie; die claim wordt niet gemaakt.
+
+Scope is de Agentbox webinterface op desktop en mobiel. De native iOS-app vergt
+een eigen apprelease. Live accounts/prijzen/route zijn nog niet gecontroleerd door
+de verplichte Tailscale SSH-verificatie.

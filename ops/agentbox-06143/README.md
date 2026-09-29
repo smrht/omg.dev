@@ -1,21 +1,49 @@
-# Pinned 0.6.143 staging
+# Agentbox update 0.6.143
 
-Prepared locally. NOT DEPLOYED. Tailscale SSH user verification is pending.
+Status op 29 september 2026: lokaal voorbereid, NIET LIVE. Tailscale SSH vraagt
+gebruikersverificatie. Er zijn in deze run geen wijzigingen op de Agentbox gedaan.
+De publieke bootstrap meldde nog 0.6.138, 18 sessies en 26 settings.
 
-Before staging, re-read the live private pointer and verify its manifest.
-`deploy.py` currently expects the last verified 06138-agentbox-20260928;
-any newer live customization must be brought into the source before proceeding.
-Copy the current live safety wrapper/pilot checker, preserving all changes and
-adding only version 0.6.143 to the supported list.
+## Behoud en activatie
 
-The three Linux-only boot recovery checks in session-relaunch-containment.test.ts
-must run on the candidate on Linux. Source-level startup overlays must be tested
-against the candidate and remain no-ops before activation.
+Lees vóór staging de actuele private pointer, manifest, configuratie, service-
+instellingen, sessies, routines en Computer-processen opnieuw. `deploy.py` verwacht
+`06138-agentbox-20260928`; een nieuwere live customization moet eerst in de
+bron worden opgenomen. Neem de actuele safety wrapper en pilot checker over,
+behoud hun wijzigingen en voeg alleen 0.6.143 toe aan de ondersteunde versies.
 
-Use the prior 06138 runbook: release SHA validation, source delta upload,
-protocol/client/web build, stage, negative controls and replay, state capture,
-safe preflight, safe apply under a transient unit, adoption/state checks and
-public desktop/mobile QA. Do not run run-safe.sh before these prerequisites.
+Officiële Linux-release SHA256:
+`4293b4125c17f74cbca513fcf243c057ae1f5868f9432082cff6faf250250972`.
 
-Separate feature scope: thread subscription/model choice and own media routes
-are still at design stage. This update does not claim to implement those.
+Volg de eerdere 06138-runbook: releasehash, expliciete source delta, protocol/
+client/web-build, stage, guard negative controls en snapshot replay, statecapture,
+backup, safe preflight/apply onder een transient unit, adoptie en statevergelijking,
+en publieke desktop/mobiel-QA. Bestaande hashed webassets blijven beschikbaar voor
+open tabs. `agents`, `data` en `.env` blijven buiten runtimevervanging. Draai
+`run-safe.sh` niet vóór deze gates. De drie Linux boot recovery-tests moeten op
+de Linux-kandidaat slagen; Mac-tests vervangen die niet.
+
+## Codex 0.159.0
+
+De globale Mac-CLI is ongewijzigd. Een aparte tijdelijke CLI 0.159.0 gaf via dezelfde
+ChatGPT-login echte korte antwoorden op Sol 6.1 en Sol 6 met Daybreak Blue. De oude
+Mac-CLI 0.157.1 weigerde Sol 6.1; app-server 0.159.0 werkte. Dit is accountbewijs op
+de Mac, nog geen bewijs op de Agentbox.
+
+Controleer op de Agentbox eerst de werkelijk gebruikte `LFG_CODEX_PATH`/CLI,
+installatiemethode, versie en accountstatus. Bewaar de oude executable en rollback-
+route. Installeer 0.159.0 naar een versiepad, zonder auth/config/sessies te vervangen;
+wijs alleen de bestaande CLI-route naar de gecontroleerde executable. Verifieer
+versie, discovery en een kort antwoord vóór acceptatie. Bewaar discovery/preferences
+vóór een gerichte Codex-refresh; andere providers, favorieten en defaults blijven staan.
+
+Npm-package `@openai/codex@0.159.0`, gecontroleerde registry-integrity:
+`sha512-nQWxAkzn+Rhr8TgtIhVhSlqvCytrMoqe+P8xoo4xxhCIBnzOfRs6SEmkMJfTPjkU3BYlsplwDOY2dbSp4+514g==`.
+De Linux x64 optional dependency is de npm-alias `npm:@openai/codex@0.159.0-linux-x64`:
+`sha512-7ks+EeQjX33wfJXbggseyF0CJRFVgzDHA6BzC7mJjFsJKmdAuOFWMFeMeZe8vL/G6xEpL29wOdwR85sK49F0iA==`.
+
+## Nieuwe functies
+
+Zie FEATURE-DESIGN.md voor de bevestigde scope en grenzen. Geen betaalde media-
+generatie uitgevoerd. Configured keys, providerlogin, prijzen en live gebruikers-
+route moeten op de Agentbox worden gecontroleerd. Neem secrets nooit op in bewijs.

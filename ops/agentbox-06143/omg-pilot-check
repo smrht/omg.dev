@@ -148,7 +148,7 @@ roster_state(){
     echo "omg-versie onleesbaar ($OMG_ROOT/package.json), verwacht een release uit ROSTER_VERSIONS voor de chat-roster-overlay"
     return 0
   fi
-  if [ "$ver" = "0.6.98" ] || [ "$ver" = "0.6.117" ] || [ "$ver" = "0.6.124" ] || [ "$ver" = "0.6.127" ] || [ "$ver" = "0.6.143" ]; then
+  if [ "$ver" = "0.6.98" ] || [ "$ver" = "0.6.117" ] || [ "$ver" = "0.6.124" ] || [ "$ver" = "0.6.127" ] || [ "$ver" = "0.6.138" ] || [ "$ver" = "0.6.143" ]; then
     if python3 "$HOME/.local/lib/omg-private/current/preserve.py" "$OMG_ROOT" >/dev/null; then
       echo ok
     else
