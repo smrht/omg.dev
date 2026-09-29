@@ -1,0 +1,544 @@
+#!/usr/bin/env python3
+"""Guard omg.dev release updates with a snapshot, health gate, and rollback."""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import datetime as dt
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import shlex
+import shutil
+import sqlite3
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.request
+import uuid
+
+
+PERSISTENT_NAMES = {"data", "agents", ".env"}
+DEFAULT_CONFIGS = (".env", "data/install.json", "data/voice-settings.json")
+
+
+class SafeUpdateError(RuntimeError):
+    pass
+
+
+def now_utc() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def private_write(path: Path, data: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+        os.chmod(path, 0o600)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temp.unlink()
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def command_from_env(name: str, default: list[str]) -> list[str]:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    if raw.strip().lower() in {"", "off"}:
+        return []
+    return shlex.split(raw)
+
+
+class Config:
+    def __init__(self) -> None:
+        self.root = Path(os.environ.get("OMG_SAFE_ROOT", "~/omg")).expanduser().resolve()
+        self.backup_root = Path(
+            os.environ.get("OMG_SAFE_BACKUP_ROOT", "~/.local/state/omg-update-backups")
+        ).expanduser().resolve()
+        self.api = os.environ.get("OMG_SAFE_API", "http://127.0.0.1:8766").rstrip("/")
+        self.service = os.environ.get("OMG_SAFE_SERVICE", "omg.service")
+        self.retention = int(os.environ.get("OMG_SAFE_RETENTION", "3"))
+        self.wait_seconds = int(os.environ.get("OMG_SAFE_WAIT_SECONDS", "30"))
+        self.update_cmd = command_from_env(
+            "OMG_SAFE_UPDATE_CMD",
+            ["/home/agent/.bun/bin/bun", str(self.root / "src/cli.ts"), "update"],
+        )
+        self.update_check_cmd = command_from_env(
+            "OMG_SAFE_UPDATE_CHECK_CMD", self.update_cmd + ["--check"]
+        )
+        self.health_cmd = command_from_env(
+            "OMG_SAFE_HEALTH_CMD", ["/home/agent/bin/omg-pilot-check"]
+        )
+        default_probe = "/home/agent/bin/verify-omg-voice-feedback --live"
+        self.probe_cmd = command_from_env("OMG_SAFE_PROBE_CMD", shlex.split(default_probe))
+        self.restart_cmd = command_from_env(
+            "OMG_SAFE_RESTART_CMD", ["systemctl", "--user", "restart", self.service]
+        )
+        extras = os.environ.get(
+            "OMG_SAFE_EXTRA_CONFIGS", "/home/agent/.config/omg/agentbox-runs.env"
+        )
+        self.extra_configs = tuple(
+            Path(item).expanduser().resolve() for item in extras.split(os.pathsep) if item
+        )
+
+
+def is_persistent_name(name: str) -> bool:
+    return name in PERSISTENT_NAMES or name.startswith(".env.")
+
+
+def validate_config(cfg: Config, *, require_commands: bool = True) -> dict:
+    validate_root_path(cfg)
+    package_file = cfg.root / "package.json"
+    install_file = cfg.root / "data/install.json"
+    try:
+        package = json.loads(package_file.read_text(encoding="utf-8"))
+        install = json.loads(install_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise SafeUpdateError(f"invalid omg installation metadata: {error}") from error
+    if package.get("name") not in {"lfg", "omg"}:
+        raise SafeUpdateError("target package is not omg.dev")
+    if install.get("channel") != "release":
+        raise SafeUpdateError("omg-safe-update only manages release installs")
+    if cfg.retention < 1 or cfg.retention > 20:
+        raise SafeUpdateError("retention must be between 1 and 20")
+    env_file = cfg.root / ".env"
+    if env_file.exists() and stat.S_IMODE(env_file.stat().st_mode) & 0o077:
+        raise SafeUpdateError(f"credential file is not owner-only: {env_file}")
+    if require_commands:
+        for label, cmd in (
+            ("update", cfg.update_cmd),
+            ("update check", cfg.update_check_cmd),
+            ("health", cfg.health_cmd),
+            ("restart", cfg.restart_cmd),
+        ):
+            if not cmd:
+                raise SafeUpdateError(f"empty {label} command")
+            executable = shutil.which(cmd[0]) if "/" not in cmd[0] else cmd[0]
+            if not executable or not os.access(executable, os.X_OK):
+                raise SafeUpdateError(f"{label} command is not executable: {cmd[0]}")
+        if cfg.probe_cmd:
+            executable = shutil.which(cfg.probe_cmd[0]) if "/" not in cfg.probe_cmd[0] else cfg.probe_cmd[0]
+            if os.path.exists(executable or "") and not os.access(executable or "", os.X_OK):
+                raise SafeUpdateError(f"capability probe is not executable: {cfg.probe_cmd[0]}")
+    return {"package": package, "install": install}
+
+
+def validate_root_path(cfg: Config) -> None:
+    if not cfg.root.is_dir() or cfg.root.is_symlink():
+        raise SafeUpdateError(f"unsafe or missing omg root: {cfg.root}")
+    forbidden = {Path("/"), Path.home().resolve(), cfg.root.parent.resolve()}
+    if cfg.root in forbidden or len(cfg.root.parts) < 3:
+        raise SafeUpdateError(f"refusing broad omg root: {cfg.root}")
+
+
+def run(cmd: list[str], *, timeout: int = 300, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=timeout,
+        env={**os.environ, "TAR_OPTIONS": "", **(env or {})},
+    )
+
+
+def api_json(cfg: Config, path: str) -> dict:
+    if cfg.api == "off":
+        return {}
+    request = urllib.request.Request(f"{cfg.api}{path}", headers={"Accept": "application/json"})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.load(response)
+
+
+def session_ids(cfg: Config) -> set[str]:
+    payload = api_json(cfg, "/api/sessions")
+    return {
+        item["sessionId"]
+        for item in payload.get("sessions", [])
+        if isinstance(item, dict) and isinstance(item.get("sessionId"), str)
+    }
+
+
+def safe_archive_members(archive: tarfile.TarFile) -> list[tarfile.TarInfo]:
+    members = archive.getmembers()
+    for member in members:
+        path = Path(member.name)
+        if path.is_absolute() or ".." in path.parts or not path.parts:
+            raise SafeUpdateError(f"unsafe snapshot member: {member.name}")
+        if is_persistent_name(path.parts[0]):
+            raise SafeUpdateError(f"snapshot contains persistent path: {member.name}")
+    return members
+
+
+def copy_private(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    shutil.copyfile(source, destination)
+    os.chmod(destination, 0o600)
+
+
+def backup_data_tree(source: Path, destination: Path) -> list[dict[str, str]]:
+    """Copy mutable state safely. SQLite files use the online backup API."""
+    records: list[dict[str, str]] = []
+    if not source.is_dir():
+        return records
+    for item in sorted(source.rglob("*")):
+        relative = item.relative_to(source)
+        target = destination / relative
+        if item.is_symlink():
+            continue
+        if item.is_dir():
+            target.mkdir(parents=True, exist_ok=True, mode=0o700)
+            continue
+        if not item.is_file() or item.name.endswith(("-wal", "-shm")):
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # SQLite databases also use .db (and extensionless names). Copying only
+        # the main file would lose committed rows still held in its WAL.
+        with item.open("rb") as source_header:
+            is_sqlite = source_header.read(16) == b"SQLite format 3\x00"
+        if is_sqlite:
+            source_uri = f"file:{item}?mode=ro"
+            with sqlite3.connect(source_uri, uri=True) as source_db, sqlite3.connect(target) as target_db:
+                source_db.backup(target_db)
+        else:
+            shutil.copyfile(item, target)
+        os.chmod(target, 0o600)
+        records.append({"path": str(relative), "sha256": sha256_file(target)})
+    return records
+
+
+def create_backup(cfg: Config, before_sessions: set[str] | None = None) -> Path:
+    metadata = validate_config(cfg)
+    cfg.backup_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(cfg.backup_root, 0o700)
+    version = str(metadata["package"].get("version") or "unknown").replace("/", "-")
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup = cfg.backup_root / f"{stamp}-v{version}-{uuid.uuid4().hex[:8]}"
+    backup.mkdir(mode=0o700)
+    archive_path = backup / "release.tar"
+    root_entries: list[str] = []
+    with tarfile.open(archive_path, "w", format=tarfile.PAX_FORMAT) as archive:
+        for child in sorted(cfg.root.iterdir(), key=lambda p: p.name):
+            if is_persistent_name(child.name):
+                continue
+            root_entries.append(child.name)
+            archive.add(child, arcname=child.name, recursive=True)
+    os.chmod(archive_path, 0o600)
+
+    config_manifest: list[dict[str, str]] = []
+    config_sources = [cfg.root / rel for rel in DEFAULT_CONFIGS]
+    config_sources.extend(cfg.extra_configs)
+    for index, source in enumerate(config_sources):
+        if not source.is_file():
+            continue
+        destination = backup / "config" / f"{index:02d}-{source.name}"
+        copy_private(source, destination)
+        config_manifest.append(
+            {
+                "source": str(source),
+                "backup": str(destination.relative_to(backup)),
+                "sha256": sha256_file(destination),
+            }
+        )
+
+    data_manifest = backup_data_tree(cfg.root / "data", backup / "data")
+
+    install = metadata["install"]
+    manifest = {
+        "schema": 1,
+        "createdAt": now_utc(),
+        "root": str(cfg.root),
+        "version": version,
+        "install": {
+            key: install.get(key) for key in ("channel", "repoSlug", "releaseAsset") if key in install
+        },
+        "releaseArchive": "release.tar",
+        "releaseSha256": sha256_file(archive_path),
+        "rootEntries": root_entries,
+        "config": config_manifest,
+        "data": data_manifest,
+        "sessionIds": sorted(before_sessions or set()),
+        "result": "snapshot-created",
+    }
+    private_write(backup / "manifest.json", json.dumps(manifest, indent=2) + "\n")
+    return backup
+
+
+def read_manifest(backup: Path) -> dict:
+    try:
+        manifest = json.loads((backup / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise SafeUpdateError(f"invalid backup manifest: {backup}") from error
+    if manifest.get("schema") != 1:
+        raise SafeUpdateError("unsupported backup manifest")
+    return manifest
+
+
+def update_manifest(backup: Path, **values: object) -> None:
+    manifest = read_manifest(backup)
+    manifest.update(values)
+    private_write(backup / "manifest.json", json.dumps(manifest, indent=2) + "\n")
+
+
+def remove_replaceable_tree(cfg: Config) -> None:
+    validate_root_path(cfg)
+    for child in list(cfg.root.iterdir()):
+        if is_persistent_name(child.name):
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
+def restore_backup(cfg: Config, backup: Path, *, restart: bool = True) -> None:
+    backup = backup.resolve()
+    if backup.parent != cfg.backup_root or not backup.is_dir():
+        raise SafeUpdateError(f"backup is outside the configured backup root: {backup}")
+    manifest = read_manifest(backup)
+    if Path(manifest.get("root", "")).resolve() != cfg.root:
+        raise SafeUpdateError("backup belongs to another omg root")
+    archive_path = backup / str(manifest.get("releaseArchive", "release.tar"))
+    if sha256_file(archive_path) != manifest.get("releaseSha256"):
+        raise SafeUpdateError("backup archive checksum mismatch")
+
+    remove_replaceable_tree(cfg)
+    with tarfile.open(archive_path, "r") as archive:
+        members = safe_archive_members(archive)
+        archive.extractall(cfg.root, members=members, filter="data")
+    env_file = cfg.root / ".env"
+    if not env_file.exists():
+        for item in manifest.get("config", []):
+            if item.get("source") == str(env_file):
+                copy_private(backup / item["backup"], env_file)
+                break
+    if restart:
+        restarted = run(cfg.restart_cmd, timeout=60)
+        if restarted.returncode != 0:
+            raise SafeUpdateError(f"could not restart after rollback: {restarted.stdout.strip()}")
+
+
+def wait_for_api(cfg: Config) -> None:
+    if cfg.api == "off":
+        return
+    deadline = time.monotonic() + cfg.wait_seconds
+    last_error = ""
+    while time.monotonic() < deadline:
+        try:
+            api_json(cfg, "/api/voice/config")
+            return
+        except Exception as error:  # one bounded readiness loop
+            last_error = str(error)
+            time.sleep(0.5)
+    raise SafeUpdateError(f"omg API did not recover: {last_error}")
+
+
+def ended_normally(api_base, sid):
+    """A session missing from the live list is only lost if omg dropped it.
+    It ended normally when the durable store still has it (transcript, not
+    live) and no process on the box still carries its id: a running process
+    that omg no longer lists is exactly the adoption failure this gate is for."""
+    import json as _j, urllib.request as _u, os as _o
+    req=_u.Request(api_base+'/api/sessions/find',data=_j.dumps({'sessionId':sid,'limit':1}).encode(),headers={'Content-Type':'application/json'},method='POST')
+    try:
+        with _u.urlopen(req,timeout=20) as r: rows=_j.load(r).get('sessions') or []
+    except Exception: return False
+    row=next((x for x in rows if x.get('sessionId')==sid),None)
+    if not row or row.get('live') or not row.get('transcriptPath'): return False
+    mine=set(); p=_o.getpid()
+    while p>1 and p not in mine:  # our own process chain may quote the id
+        mine.add(p)
+        try: p=int(open('/proc/%d/stat'%p).read().rsplit(')',1)[1].split()[1])
+        except (OSError,ValueError,IndexError): break
+    needle=sid.encode()
+    for pid in _o.listdir('/proc'):
+        if not pid.isdigit() or int(pid) in mine: continue
+        try:
+            with open('/proc/'+pid+'/cmdline','rb') as f:
+                if needle in f.read(): return False
+        except OSError: pass
+    return True
+
+
+def healthcheck(cfg: Config, before_sessions: set[str]) -> None:
+    wait_for_api(cfg)
+    health = run(cfg.health_cmd, timeout=180)
+    if health.returncode != 0:
+        raise SafeUpdateError(f"healthcheck failed:\n{health.stdout.strip()}")
+    if cfg.probe_cmd:
+        executable = shutil.which(cfg.probe_cmd[0]) if "/" not in cfg.probe_cmd[0] else cfg.probe_cmd[0]
+        if executable and os.access(executable, os.X_OK):
+            probe = run(cfg.probe_cmd, timeout=180)
+            if probe.returncode != 0:
+                raise SafeUpdateError(f"protected capability probe failed:\n{probe.stdout.strip()}")
+    if cfg.api != "off":
+        after = session_ids(cfg)
+        missing = sorted(sid for sid in before_sessions - after if not ended_normally(cfg.api, sid))
+        if missing:
+            raise SafeUpdateError(f"sessions disappeared after update: {', '.join(x[:8] for x in missing)}")
+
+
+def prune_backups(cfg: Config, keep: Path | None = None) -> None:
+    if not cfg.backup_root.is_dir():
+        return
+    backups = sorted(
+        (item for item in cfg.backup_root.iterdir() if item.is_dir() and (item / "manifest.json").is_file()),
+        key=lambda item: item.name,
+        reverse=True,
+    )
+    protected = {keep.resolve()} if keep else set()
+    retained = len(protected)
+    for backup in backups:
+        if backup.resolve() in protected:
+            continue
+        if retained < cfg.retention:
+            retained += 1
+            continue
+        if backup.parent.resolve() != cfg.backup_root:
+            raise SafeUpdateError(f"refusing to prune outside backup root: {backup}")
+        shutil.rmtree(backup)
+
+
+@contextlib.contextmanager
+def update_lock(cfg: Config):
+    cfg.backup_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_path = cfg.backup_root / ".update.lock"
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        os.chmod(lock_path, 0o600)
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise SafeUpdateError("another omg safe update is already running") from error
+        yield
+
+
+def check(cfg: Config) -> None:
+    metadata = validate_config(cfg)
+    update = run(cfg.update_check_cmd, timeout=120)
+    if update.returncode != 0:
+        raise SafeUpdateError(f"omg update check failed: {update.stdout.strip()}")
+    health = run(cfg.health_cmd, timeout=180)
+    if health.returncode != 0:
+        raise SafeUpdateError(f"current omg healthcheck failed:\n{health.stdout.strip()}")
+    ids = session_ids(cfg) if cfg.api != "off" else set()
+    print(
+        f"release v{metadata['package'].get('version', 'unknown')}; "
+        f"sessions={len(ids)}; retention={cfg.retention}; update={update.stdout.strip()}"
+    )
+    print("omg safe update check: PASS")
+
+
+def apply_update(cfg: Config) -> Path:
+    with update_lock(cfg):
+        validate_config(cfg)
+        before_sessions = session_ids(cfg) if cfg.api != "off" else set()
+        backup = create_backup(cfg, before_sessions)
+        try:
+            # De sleutel die de fork-gate in `omg update` opent. Zonder deze
+            # env weigert de CLI te updaten en verwijst hij hierheen: dat is de
+            # hele bedoeling — snapshot, fork, health en rollback zitten hier,
+            # niet in een kale bundleswap (27-08-2026: een ongegate update naar
+            # 0.6.16 sloopte de fork en dat merkte niemand een uur lang).
+            result = run(cfg.update_cmd, timeout=900, env={"OMG_SAFE_UPDATE": "1"})
+            if result.returncode != 0:
+                raise SafeUpdateError(f"omg update failed: {result.stdout.strip()}")
+            updated = "Updated." in result.stdout
+            if updated:
+                restarted = run(cfg.restart_cmd, timeout=60)
+                if restarted.returncode != 0:
+                    raise SafeUpdateError(f"restart failed: {restarted.stdout.strip()}")
+            healthcheck(cfg, before_sessions)
+            update_manifest(
+                backup,
+                result="verified",
+                verifiedAt=now_utc(),
+                updateOutput=result.stdout.strip(),
+            )
+            prune_backups(cfg, keep=backup)
+            print(f"verified backup: {backup}")
+            print("omg safe update: PASS")
+            return backup
+        except Exception as error:
+            update_manifest(backup, result="rolling-back", failure=str(error), failedAt=now_utc())
+            restore_backup(cfg, backup, restart=True)
+            healthcheck(cfg, before_sessions)
+            update_manifest(backup, result="rolled-back", rolledBackAt=now_utc(), failure=str(error))
+            raise SafeUpdateError(f"update failed and was rolled back: {error}") from error
+
+
+def resolve_backup(cfg: Config, value: str) -> Path:
+    if value == "latest":
+        candidates = sorted(
+            (item for item in cfg.backup_root.iterdir() if (item / "manifest.json").is_file()),
+            key=lambda item: item.name,
+            reverse=True,
+        )
+        if not candidates:
+            raise SafeUpdateError("no backups found")
+        return candidates[0]
+    candidate = (cfg.backup_root / value).resolve()
+    if candidate.parent != cfg.backup_root:
+        raise SafeUpdateError("invalid backup id")
+    return candidate
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    actions = parser.add_mutually_exclusive_group(required=True)
+    actions.add_argument("--check", action="store_true", help="read-only preflight")
+    actions.add_argument("--apply", action="store_true", help="snapshot, update, verify, rollback on failure")
+    actions.add_argument("--backup-only", action="store_true", help="create a verified snapshot without updating")
+    actions.add_argument("--rollback", metavar="ID", help="restore a backup id or latest")
+    args = parser.parse_args(argv)
+    cfg = Config()
+    try:
+        if args.check:
+            check(cfg)
+        elif args.apply:
+            apply_update(cfg)
+        elif args.backup_only:
+            with update_lock(cfg):
+                ids = session_ids(cfg) if cfg.api != "off" else set()
+                backup = create_backup(cfg, ids)
+                healthcheck(cfg, ids)
+                update_manifest(backup, result="verified", verifiedAt=now_utc())
+                prune_backups(cfg, keep=backup)
+                print(f"verified backup: {backup}")
+                print("omg safe backup: PASS")
+        elif args.rollback:
+            with update_lock(cfg):
+                before = session_ids(cfg) if cfg.api != "off" else set()
+                backup = resolve_backup(cfg, args.rollback)
+                restore_backup(cfg, backup, restart=True)
+                healthcheck(cfg, before)
+                update_manifest(backup, result="manual-rollback-verified", rolledBackAt=now_utc())
+                print(f"rollback verified: {backup}")
+        return 0
+    except (SafeUpdateError, subprocess.TimeoutExpired, OSError) as error:
+        print(f"omg safe update: FAIL: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
