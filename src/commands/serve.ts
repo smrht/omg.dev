@@ -27,15 +27,28 @@ import {
   isThread,
   listThreads,
   mentionsOmg,
+  omgWake,
+  turnAnswer,
+  addMentionedPeople,
+  keepSessionFile,
+  threadPeople,
+  keepThreadUpload,
+  participantsForView,
+  setTyping,
+  threadTyping,
   readThreadMessages,
+  setThreadNotifier,
   startThread,
   summarizeThread,
   threadAuthor,
+  threadDisplayName,
   threadParticipantId,
   threadTasks,
   threadUpdate,
   type ThreadDeps,
 } from "../threads.ts";
+import { mentionAgents, mentionedAgent, threadPreview, type ThreadMedia } from "../../packages/protocol/src/threads.ts";
+import { COMPUTER_KIOSK_PATH } from "../../packages/protocol/src/computer-kiosk.ts";
 import { buildContinueSessionPrompt } from "../session-continue-prompt.ts";
 import { regenerateSessionTitle } from "../session-title-regenerate.ts";
 import { hasHostedOmgAiProxy, hasOmgProviderAccess } from "../omg-provider.ts";
@@ -46,6 +59,7 @@ import {
   setSessionPinned,
 } from "../session-pins.ts";
 import { createConnectManager, readRelayBoxId } from "../connect-manager.ts";
+import { tailnetGateResponse, tailnetPortFromEnv } from "../tailnet-gate.ts";
 import { findProjectFavicon, projectFaviconMime } from "../project-favicon.ts";
 import { claudeOauthToken as sharedClaudeOauthToken } from "../claude-creds.ts";
 import {
@@ -64,7 +78,9 @@ import { compressedAssetResponse, maybeCompressResponse } from "../http-compress
 import { serveOmgMcpRequest, serveComputerMcpRequest } from "../mcp-http.ts";
 import { resolveCaller } from "../policy/caller.ts";
 import { createBrowserLoginService } from "../computer/login.ts";
-import { createProjectPreviewService } from "../project-previews.ts";
+import { createProjectPreviewService, storedProjectPreview } from "../project-previews.ts";
+import { simulatorStreamProvider } from "../simulator-stream.ts";
+import { createExpoAccountService, installXdgOpenShim, liveExpoAccountDeps } from "../expo-account.ts";
 import { importBrowserLogin } from "../computer/browser.ts";
 import {
   configureConnectors,
@@ -340,7 +356,7 @@ import {
   type SessionMsg,
 } from "../sessions.ts";
 import { markSessionRead, sessionUnreadMap } from "../session-reads.ts";
-import { rankSessionMentions } from "../session-mentions.ts";
+import { rankSessionMentions, sessionMentionTerms } from "../session-mentions.ts";
 import { countTranscriptRows, foldWorkRows, LiveWorkRows, type ChatRenderMessage } from "../transcript-rows.ts";
 import {
   invalidateListSessionsCache,
@@ -413,10 +429,12 @@ import {
   removeManaged,
   type ManagedSession,
 } from "../managed.ts";
-import { reconcileCommandFileSessions } from "../session-recovery.ts";
+import { recordSessionExitReason } from "../session-containment-record.ts";
+import { coldResumeContainment, type ColdResumeContainment, commandFileHarnessIsDead, reconcileCommandFileSessions, relaunchDeadCommandFileHarness, setRecoveryEgressProxy } from "../session-recovery.ts";
 import { resolveResumeModel } from "../resume-model.ts";
 import { PtyBridge, termSessionName } from "../pty.ts";
 import { RfbBridge } from "../computer/rfb-bridge.ts";
+import { computerKiosk } from "../computer/kiosk.ts";
 import {
   desktopStatus,
   ensureDesktopAdopted,
@@ -437,6 +455,8 @@ import {
   browserType,
   cancelBrowserInspection,
   closeAgentView,
+  expoWebSignedIn,
+
 } from "../computer/browser.ts";
 import { capturePaneScroll, capturePaneEscaped, paneWidth } from "../tmux.ts";
 import { detectUrls } from "../links.ts";
@@ -938,6 +958,9 @@ function publicSessionUrl(sessionId: string): string | null {
 // (via `tailscale serve`), never the public internet. Override LFG_HOST only
 // if you understand the exposure.
 const HOST = process.env.LFG_HOST ?? "127.0.0.1";
+// Opt-in second listener for `tailscale serve`. See src/tailnet-gate.ts.
+const TAILNET_PORT = tailnetPortFromEnv(process.env.LFG_TAILNET_PORT, PORT);
+const OMG_WEB_ORIGIN = (process.env.OMG_WEB_URL ?? "https://omg.dev").trim();
 const MAX_LFG_SUBAGENT_DEPTH = 4;
 const agentAdmission = new AgentAdmissionController();
 
@@ -1278,14 +1301,17 @@ const threadDeps: ThreadDeps = {
   },
   // Through the normal creation route, so a task gets every rule a session
   // started from the composer gets: admission, worktree, user tag, title.
-  startTask: async ({ prompt, title, cwd, user }) => {
+  startTask: async ({ prompt, title, cwd, user, agent }) => {
     // Settings' "Default agent and model". The creation route picks the agent
     // from it on its own, but the model is applied by the clients, so a task
     // with no client has to pass the pair itself.
     const { defaultAgent, defaultModel } = getGlobalSettingsSync();
-    const agentChoice = defaultAgent?.trim()
-      ? { agent: defaultAgent.trim(), ...(defaultModel?.trim() ? { model: defaultModel.trim() } : {}) }
-      : {};
+    // Asked by name (`@codex`), that agent runs, with its own default model.
+    const agentChoice = agent
+      ? { agent }
+      : defaultAgent?.trim()
+        ? { agent: defaultAgent.trim(), ...(defaultModel?.trim() ? { model: defaultModel.trim() } : {}) }
+        : {};
     const response = await fetch(
       `http://127.0.0.1:${PORT}/api/sessions/${cwd ? "new" : "new-unassigned"}`,
       {
@@ -1304,6 +1330,18 @@ const threadDeps: ThreadDeps = {
     if (!response.ok || !body?.sessionId) throw new Error(body?.error || `session start failed (${response.status})`);
     return body.sessionId;
   },
+  // Through the normal send route, as if the person typed it in the task.
+  tellTask: async ({ sessionId, text, user }) => {
+    const response = await fetch(`http://127.0.0.1:${PORT}/api/sessions/${sessionId}/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, ...(user.includes("@") ? { user } : {}) }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => null) as { error?: string } | null;
+      throw new Error(body?.error || `send failed (${response.status})`);
+    }
+  },
 };
 
 function threadViewer(req: Request, requested: string | null | undefined): { identity: string; name: string | null } {
@@ -1312,19 +1350,80 @@ function threadViewer(req: Request, requested: string | null | undefined): { ide
   return { identity, name: profile?.name || null };
 }
 
+
+/**
+ * The answer of a task's turn that just finished, read from its transcript.
+ * The completion can arrive a moment before the transcript has the final
+ * answer, so it looks again for a few seconds before giving up.
+ */
+async function taskTurnAnswer(sessionId: string): Promise<string | null> {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const path = await resolveTranscript(sessionId).catch(() => null);
+    if (path) {
+      await ensureChatTranscriptCaughtUp(path, sessionId, "thread-task-result");
+      const page = await indexedMessagePage(path, sessionId, { limit: 80 }).catch(() => null);
+      const answer = page ? turnAnswer(page.messages) : null;
+      if (answer) return answer;
+    }
+    await Bun.sleep(750);
+  }
+  return null;
+}
+
+/** Threads for the `#` picker, in its row shape, marked `kind: "thread"`. */
+function mentionableThreads(query: string | undefined) {
+  const terms = sessionMentionTerms(query);
+  return listThreads()
+    .filter((thread) => terms.every((term) => thread.title.toLowerCase().includes(term)))
+    .slice(0, 5)
+    .map((thread) => ({
+      kind: "thread" as const,
+      sessionId: thread.id,
+      title: thread.title,
+      cwd: thread.project?.cwd ?? null,
+      project: thread.project?.name ?? "",
+      lastUserText: thread.lastMessage ? threadPreview(thread) : null,
+      lastActivityAt: thread.updatedAt,
+      agent: "thread",
+      live: false,
+      sameFolder: false,
+    }));
+}
+
+/** A message's files, as a client names them: uploaded first through POST /api/uploads, each { path, name }. */
+function threadAttachmentsFrom(value: unknown): { path: string; name: string | null }[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .flatMap((row) => {
+      const item = row as { path?: unknown; name?: unknown } | null;
+      return typeof item?.path === "string" ? [{ path: item.path, name: typeof item.name === "string" ? item.name : null }] : [];
+    })
+    .slice(0, 10);
+}
+
 async function handleThreadRequest(req: Request, url: URL, path: string): Promise<Response | null> {
   if (path === "/api/threads" && req.method === "GET") return json({ threads: listThreads() });
   if (path === "/api/threads" && req.method === "POST") {
-    const body = (await req.json().catch(() => null)) as { text?: unknown; title?: unknown; user?: unknown } | null;
+    const body = (await req.json().catch(() => null)) as { text?: unknown; title?: unknown; user?: unknown; attachments?: unknown } | null;
     const viewer = threadViewer(req, typeof body?.user === "string" ? body.user : url.searchParams.get("user"));
     const thread = startThread({ ...viewer, title: typeof body?.title === "string" ? body.title : null });
     const text = typeof body?.text === "string" ? body.text.trim() : "";
-    if (text) postThreadMessage(thread.id, text, viewer);
+    const attachments = threadAttachmentsFrom(body?.attachments);
+    if (text || attachments.length) {
+      let media: ThreadMedia[];
+      try {
+        media = await Promise.all(attachments.map((row) => keepThreadUpload(thread.id, row.path, row.name)));
+      } catch (error) {
+        return err(400, error instanceof Error ? error.message : String(error));
+      }
+      postThreadMessage(thread.id, text, viewer, null, media);
+    }
     return json({ thread: summarizeThread(thread) });
   }
   const one = path.match(/^\/api\/threads\/([0-9a-f-]{36})$/i);
   const messages = path.match(/^\/api\/threads\/([0-9a-f-]{36})\/messages$/i);
-  const id = one?.[1] ?? messages?.[1];
+  const typing = path.match(/^\/api\/threads\/([0-9a-f-]{36})\/typing$/i);
+  const id = one?.[1] ?? messages?.[1] ?? typing?.[1];
   if (!id) return null;
   const conversation = getConversation(id);
   if (!isThread(conversation)) return err(404, "thread not found");
@@ -1336,9 +1435,11 @@ async function handleThreadRequest(req: Request, url: URL, path: string): Promis
       // Which author is the caller, so a client can put their own bubbles on the right.
       me: threadParticipantId(viewer.identity),
       thread: summarizeThread(conversation),
-      participants: conversation.participants,
+      participants: participantsForView(conversation, userRoster()),
+      people: threadPeople(conversation, userRoster()),
       messages: readThreadMessages(id, limit),
       tasks: threadTasks(conversation, live),
+      typing: threadTyping(id, threadParticipantId(viewer.identity)),
     });
   }
   if (one && req.method === "PATCH") {
@@ -1361,17 +1462,67 @@ async function handleThreadRequest(req: Request, url: URL, path: string): Promis
     threadUpdate(id, { archived: true });
     return json({ ok: true });
   }
-  if (messages && req.method === "POST") {
-    const body = (await req.json().catch(() => null)) as { text?: unknown; user?: unknown; replyTo?: unknown } | null;
+  if (typing && req.method === "POST") {
+    // A ping, not a message: it names nobody new in the thread and writes nothing to disk.
+    const body = (await req.json().catch(() => null)) as { typing?: unknown; user?: unknown; replyTo?: unknown } | null;
+    const viewer = threadViewer(req, typeof body?.user === "string" ? body.user : url.searchParams.get("user"));
+    const author = {
+      kind: "human" as const,
+      participantId: threadParticipantId(viewer.identity),
+      name: threadDisplayName(viewer.identity, viewer.name),
+    };
+    const replyTo = typeof body?.replyTo === "string" && body.replyTo ? body.replyTo : null;
+    setTyping(id, author, body?.typing !== false, replyTo);
+    return json({ ok: true });
+  }
+  // An agent session posting as omg (omg_send_thread_message). It names the
+  // files it shows by path, as omg_display_image does; a person attaches uploads.
+  const callerSession = messages && req.method === "POST" ? req.headers.get("x-omg-caller-session-id")?.trim() || null : null;
+  if (messages && req.method === "POST" && callerSession) {
+    const body = (await req.json().catch(() => null)) as { text?: unknown; replyTo?: unknown; mediaPaths?: unknown } | null;
     const text = typeof body?.text === "string" ? body.text.trim() : "";
-    if (!text) return err(400, "text is required");
+    const paths = Array.isArray(body?.mediaPaths) ? body.mediaPaths.filter((p): p is string => typeof p === "string").slice(0, 10) : [];
+    if (!text && !paths.length) return err(400, "text or mediaPaths is required");
+    const replyTo = typeof body?.replyTo === "string" && body.replyTo ? body.replyTo : null;
+    const rows = readThreadMessages(id, 5_000);
+    const root = replyTo ? rows.find((row) => !row.replyTo && row.id.startsWith(replyTo)) : null;
+    if (replyTo && !root) return err(400, "replyTo must be a top-level message in this thread");
+    let media: ThreadMedia[];
+    try {
+      media = await Promise.all(paths.map((path) => keepSessionFile(callerSession, path)));
+    } catch (error) {
+      return err(400, error instanceof Error ? error.message : String(error));
+    }
+    const session = (await listSessionsCached().catch(() => [])).find(
+      (row) => row.sessionId === callerSession || row.nativeSessionId === callerSession,
+    );
+    const message = appendThreadMessage(id, {
+      author: { kind: "omg" },
+      text,
+      replyTo: root?.id ?? null,
+      media,
+      via: { sessionId: session?.sessionId ?? callerSession, title: session?.title ?? null, agent: session?.agent ?? null },
+    });
+    return json({ message });
+  }
+  if (messages && req.method === "POST") {
+    const body = (await req.json().catch(() => null)) as { text?: unknown; user?: unknown; replyTo?: unknown; attachments?: unknown } | null;
+    const text = typeof body?.text === "string" ? body.text.trim() : "";
+    const attachments = threadAttachmentsFrom(body?.attachments);
+    if (!text && !attachments.length) return err(400, "text or an attachment is required");
+    let media: ThreadMedia[];
+    try {
+      media = await Promise.all(attachments.map((row) => keepThreadUpload(id, row.path, row.name)));
+    } catch (error) {
+      return err(400, error instanceof Error ? error.message : String(error));
+    }
     const replyTo = typeof body?.replyTo === "string" && body.replyTo ? body.replyTo : null;
     // Replies are one level deep, as in Slack: only a top-level message has them.
     if (replyTo && !readThreadMessages(id).some((row) => row.id === replyTo && !row.replyTo)) {
       return err(400, "replyTo must be a top-level message in this thread");
     }
     const viewer = threadViewer(req, typeof body?.user === "string" ? body.user : url.searchParams.get("user"));
-    return json({ message: postThreadMessage(id, text, viewer, replyTo) });
+    return json({ message: postThreadMessage(id, text, viewer, replyTo, media) });
   }
   return err(405, "method not allowed");
 }
@@ -1386,17 +1537,27 @@ function postThreadMessage(
   text: string,
   viewer: { identity: string; name: string | null },
   replyTo: string | null = null,
+  media: ThreadMedia[] = [],
 ) {
+  // Named with @: in the thread before the message is stored, so they are told.
+  addMentionedPeople(threadId, text, userRoster(), viewer.identity);
   const message = appendThreadMessage(threadId, {
     author: threadAuthor(threadId, viewer.identity, viewer.name),
     text,
     replyTo,
+    media,
   });
-  if (mentionsOmg(text)) {
-    void answerMention(threadId, text, viewer.identity, threadDeps, replyTo ?? message.id).catch((error) => {
-      console.error(`[threads] @omg failed in ${threadId}:`, error);
-    });
-  }
+  // A mention always reaches omg; so does a reply in a reply thread omg is part of,
+  // and omg decides whether it has anything to say. `@codex` asks a coding agent
+  // by name: omg briefs it and it runs the task.
+  void (async () => {
+    const agent = mentionedAgent(text, mentionAgents(await listCodingAgentsCached().catch(() => [])));
+    const wake = agent ? "mention" : omgWake(message, readThreadMessages(threadId, 5_000));
+    if (!wake) return;
+    await answerMention(threadId, text, viewer.identity, threadDeps, replyTo ?? message.id, wake === "reply", agent);
+  })().catch((error) => {
+    console.error(`[threads] @omg failed in ${threadId}:`, error);
+  });
   return message;
 }
 
@@ -1578,6 +1739,14 @@ async function resolveResumeCwd(
   if (repo && (!dirExists(transcriptCwd) || projectName(transcriptCwd) !== project)) return repo.cwd;
   if (dirExists(transcriptCwd)) return transcriptCwd;
   return repo?.cwd || SELF_REPO;
+}
+
+function logResumeContainment(sessionId: string, cold: ColdResumeContainment): void {
+  const c = cold.containment;
+  console.log(
+    `[resume] ${sessionId.slice(0, 8)} containment from ${cold.source}: ` +
+      `slice=${c.agentSlice} sandbox=${c.sandbox} egress=${c.egressProxy}${cold.role ? ` role=${cold.role}` : ""}`,
+  );
 }
 
 function persistManagedResume(session: Session): void {
@@ -2375,6 +2544,15 @@ async function closeLiveSession(
       removeManaged(sess.tmuxName);
       assignUser(sess.tmuxName, null);
     }
+    // The OOM verdict came from the unit journal while the row still existed
+    // (managedLaunchRow). Keep it, so the resume picker can say why it stopped.
+    if (sess.statusReason === "out_of_memory") {
+      try {
+        recordSessionExitReason([sess.sessionId, sess.nativeSessionId], "out_of_memory");
+      } catch (error) {
+        console.error(`[close] exit reason for ${id.slice(0, 8)} not recorded: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     clearResolved(id);
     invalidateListSessionsCache();
     // Command-file sessions are always lfg-launched (no "attached to someone
@@ -2858,6 +3036,40 @@ function interruptLiveSession(session: Session): { ok: boolean; error?: string; 
   return { ok: true };
 }
 
+// A command-file session whose harness died (OOM kill, crash) is still listed,
+// and sendPromptToLiveSession would only append to a command file nobody
+// tails. Relaunch it with the boot-recovery launcher first, under the same
+// activation gate a cold start clears. Returns null when there is nothing to
+// revive (not command-file, harness alive, or no registry entry to relaunch
+// from), a Response when the gate or the launch refuses, and otherwise the
+// relaunch state. "claimed" means another request already started one; the
+// booting harness reads the command file from its cursor, so a message
+// appended now is still delivered.
+async function reviveDeadCommandFileHarness(
+  session: Session,
+  opts: { overLimit?: boolean } = {},
+): Promise<Response | { state: "relaunched" | "claimed" } | null> {
+  if (!usesCommandFileRuntime(session.agent, session.runtime)) return null;
+  const ids = [session.sessionId, session.nativeSessionId].filter((id): id is string => !!id);
+  const entry = ids.map((id) => findAisdkEntryByAnyId(id)).find((found) => !!found) ?? null;
+  if (!entry || !commandFileHarnessIsDead(entry)) return null;
+  const gate = await activationGate({
+    overLimit: opts.overLimit,
+    kind: session.persistent ? "bot" : session.spawnedBy === "schedule" ? "schedule" : undefined,
+  });
+  if (gate instanceof Response) return gate;
+  try {
+    const result = relaunchDeadCommandFileHarness(entry.sessionId);
+    if (result.state === "failed") return err(502, `couldn't restart the stopped agent: ${result.error}`);
+    if (result.state === "unknown" || result.state === "alive") return null;
+    invalidateListSessionsCache();
+    traceLog("session_harness_relaunch", { sessionId: entry.sessionId, state: result.state });
+    return { state: result.state };
+  } finally {
+    gate.release();
+  }
+}
+
 function sendPromptToLiveSession(
   session: Session,
   text: string,
@@ -3179,6 +3391,7 @@ async function launchBotSession(
       appliedConfigRevision: opts.appliedConfigRevision ?? botConfigRevision(bot),
       botId: bot.id,
       persistent: true,
+      containment: { agentSlice: true, sandbox: "none", egressProxy: false },
     });
     // Attach provisionally before the harness can write its launch turn. This
     // gives transcript indexing a verified bot author without selecting this
@@ -4231,6 +4444,32 @@ export async function cmdServe() {
       }
       return { url: body.url, expoGoUrl: body.expoGoUrl };
     },
+    simulator: simulatorStreamProvider(),
+  });
+  // A Computer has no xdg-open. Tools that open a browser (`expo login
+  // --browser`, `gh auth login --web`) get the shim, which opens the page in
+  // the Computer's desktop browser. Every child of this process inherits it.
+  installXdgOpenShim(process.env, PORT);
+  const expoAccount = createExpoAccountService({
+    ...liveExpoAccountDeps(),
+    session: async (id) => {
+      const row = (await listSessions()).find(s => s.sessionId === id || s.nativeSessionId === id);
+      return row?.sessionId ? { id: row.sessionId, owner: row.assignedUser ?? null, cwd: row.cwd ?? null } : null;
+    },
+    viewer: req => botViewerFromRequest(req, new URL(req.url).searchParams.get("user")).identity,
+    preview: (sessionId) => storedProjectPreview(sessionId),
+    startDesktop: () => startDesktop(),
+    // The sign-up and sign-in pages open in the kiosk window, which the card
+    // shows in a sheet. The agent's own tab is not touched.
+    openBrowser: (url) => computerKiosk().open(url),
+    closeBrowser: () => computerKiosk().close(),
+    webSignedIn: () => expoWebSignedIn(),
+    tellAgent: async (sessionId, text) => {
+      await fetch(`http://127.0.0.1:${PORT}/api/sessions/${encodeURIComponent(sessionId)}/send`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, mode: "queue" }),
+      });
+    },
   });
   const cloudMachineProxy = createCloudMachineProxy({ account: cloudAccount });
   const server = Bun.serve<AppSocketData>({
@@ -4621,8 +4860,11 @@ export async function cmdServe() {
       if (path === "/api/browser-login" || path.startsWith("/api/browser-login/")) {
         return await browserLogin(req);
       }
-      if (path === "/api/project-preview") {
+      if (path === "/api/project-preview" || path === "/api/project-preview/simulator") {
         return await projectPreview(req);
+      }
+      if (path === "/api/expo-account" || path.startsWith("/api/expo-account/")) {
+        return await expoAccount(req);
       }
 
       // ---- the computer: a shared desktop, streamed and controllable ----
@@ -4988,6 +5230,18 @@ export async function cmdServe() {
         "/api/computer/browser/inspect",
         "/api/computer/browser/screenshot",
       ];
+      // Where the kiosk page is on the desktop, so a sheet can show only
+      // that part of the screen stream.
+      if (path === COMPUTER_KIOSK_PATH && req.method === "GET") {
+        if (!desktopStatus().running) return json({ open: false });
+        try {
+          return json(await computerKiosk().frame());
+        } catch (e) {
+          return err(500, e instanceof Error ? e.message : "kiosk check failed");
+        }
+      }
+
+
       if (path.startsWith("/api/computer/browser/") && req.method === "POST") {
         if (!desktopStatus().running) return err(409, "the computer is not running");
         const action = path.slice("/api/computer/browser/".length);
@@ -5000,10 +5254,15 @@ export async function cmdServe() {
             text?: string;
             key?: string;
             timeoutMs?: number;
+            kiosk?: boolean;
+
           };
           switch (action) {
             case "navigate": {
               if (!body.url) return err(400, "url is required");
+              // The xdg-open shim sets kiosk for a login the person does in
+              // a sheet (OMG_COMPUTER_KIOSK). See src/computer/kiosk.ts.
+              if (body.kiosk === true) return json(await computerKiosk().open(body.url));
               return json(await browserNavigate(body.url));
             }
             case "click": {
@@ -5615,6 +5874,7 @@ a{color:#60a5fa}
         const { handleMediaRequest } = await import("../media-generation.ts");
         const handled = await handleMediaRequest(req, url, {
           spendPath: join(PATHS.data, "media-spend.json"),
+          cloud: { signedIn: () => cloudAccount.status().signedIn, fetch: cloudAccount.cloudFetch },
         });
         if (handled) return handled;
       }
@@ -8911,7 +9171,12 @@ a{color:#60a5fa}
           excludeId,
           limit,
         });
-        return json({ sessions });
+        // Threads are referenced with the same `#`, first, so a prompt can name
+        // one for the agent to read or post to (omg_send_thread_message). Only
+        // for a client that asks: an older app writes every row as a session
+        // link, and a thread written as `omg:session_<id>` names nothing.
+        const withThreads = url.searchParams.get("threads") === "1";
+        return json({ sessions: [...(withThreads ? mentionableThreads(query) : []), ...sessions] });
       }
 
       if (path === "/api/sessions/find" && req.method === "POST") {
@@ -9011,6 +9276,37 @@ a{color:#60a5fa}
             agent: live.agent,
           });
         }
+        // A command-file session whose harness died still has its owner row
+        // and registry entry. Relaunch that same row (boot-recovery launcher)
+        // instead of cold-starting a second one, then deliver the prompt.
+        const listedDead = (await listSessions()).find(
+          (s) =>
+            (s.sessionId === sessionId || s.nativeSessionId === sessionId) &&
+            usesCommandFileRuntime(s.agent, s.runtime),
+        );
+        if (listedDead) {
+          const revived = await reviveDeadCommandFileHarness(listedDead, { overLimit: body?.overLimit === true });
+          if (revived instanceof Response) return revived;
+          if (revived) {
+            if (body?.user && listedDead.tmuxName) assignUser(listedDead.tmuxName, body.user);
+            const prompt = body?.prompt?.trim() ?? "";
+            const sent = prompt
+              ? sendPromptToLiveSession(listedDead, prompt, { mode: "queue" })
+              : { ok: true as const, msg: undefined };
+            if (!sent.ok) return err(409, sent.error || "couldn't send resume prompt");
+            return json({
+              ok: true,
+              tmuxName: listedDead.tmuxName,
+              cwd: listedDead.cwd,
+              sessionId: listedDead.sessionId ?? sessionId,
+              resumedFrom: listedDead.nativeSessionId ?? sessionId,
+              relaunched: revived.state,
+              sentPrompt: !!prompt,
+              msg: sent.msg,
+              agent: listedDead.agent,
+            });
+          }
+        }
         // Past this point a resume COLD-STARTS a fresh agent process, so it must
         // clear the same pause / cap gate as a create. (The already-live branch
         // above returned early and is never gated — it spawns nothing.)
@@ -9034,11 +9330,19 @@ a{color:#60a5fa}
           // incompatible client model is ignored instead of crossing provider
           // families (the gpt-5.6-sol -> Claude error from the resume picker).
           const resumeModel = resolveResumeModel(cachedResume.backend, cachedResume.model, model);
+          // No registry entry is left to relaunch, but the owner row (if any)
+          // still records the first launch's containment. Start in it, and
+          // record it on the new row for the next relaunch.
+          const coldContainment = coldResumeContainment([sessionId, resumeHandle], cachedResume.backend, sessionId);
+          if ("error" in coldContainment) return err(503, coldContainment.error);
+          logResumeContainment(sessionId, coldContainment);
           addManaged({
             tmuxName,
             cwd,
             createdAt: Date.now(),
             agent: cachedResume.backend,
+            containment: coldContainment.containment,
+            ...(coldContainment.role ? { role: coldContainment.role } : {}),
             runtime: "command-file",
             sessionId,
             nativeSessionId: resumeHandle,
@@ -9084,6 +9388,7 @@ a{color:#60a5fa}
             resume: resumeHandle,
             omgUser: assignedUser,
             claudeAccountId: pinnedClaudeAccountId,
+            ...coldContainment.launch,
           });
           if (!spawned.ok) {
             removeManaged(tmuxName);
@@ -9141,9 +9446,13 @@ a{color:#60a5fa}
             if (!tag.ok) return err(400, `unknown user "${tag.unknown}"`);
             const assignedUser = tag.user;
             const resumeModel = model || prior.model || "auto";
+            const coldContainment = coldResumeContainment([sessionId, jcodeNativeId], "jcode", sessionId, [prior]);
+            if ("error" in coldContainment) return err(503, coldContainment.error);
+            logResumeContainment(sessionId, coldContainment);
             await indexTranscript(transcript, sessionId);
             addManaged({
               ...prior,
+              containment: coldContainment.containment,
               tmuxName,
               cwd,
               createdAt: Date.now(),
@@ -9166,6 +9475,7 @@ a{color:#60a5fa}
               resume: jcodeNativeId,
               omgSessionId: sessionId,
               omgUser: assignedUser,
+              containInAgentSlice: coldContainment.launch.containInAgentSlice,
             });
             if (!spawned.ok) {
               removeManaged(tmuxName);
@@ -9203,12 +9513,17 @@ a{color:#60a5fa}
           const resumeModel = model || cachedResume.model || (
             agent === "grok" ? GROK_DEFAULT_MODEL() : "auto"
           );
+          const coldContainment = coldResumeContainment([sessionId, cachedResume.resumeHandle], agent, sessionId);
+          if ("error" in coldContainment) return err(503, coldContainment.error);
+          logResumeContainment(sessionId, coldContainment);
           await indexTranscript(transcript, sessionId);
           addManaged({
             tmuxName,
             cwd,
             createdAt: Date.now(),
             agent,
+            containment: coldContainment.containment,
+            ...(coldContainment.role ? { role: coldContainment.role } : {}),
             sessionId,
             nativeSessionId: sessionId,
             launchState: "launching",
@@ -9231,6 +9546,7 @@ a{color:#60a5fa}
                 resume: sessionId,
                 omgSessionId: sessionId,
                 omgUser: assignedUser,
+                containInAgentSlice: coldContainment.launch.containInAgentSlice,
               })
             : spawnManagedCursorSession({
                 name: tmuxName,
@@ -9240,6 +9556,7 @@ a{color:#60a5fa}
                 nativeSessionId: sessionId,
                 omgSessionId: sessionId,
                 omgUser: assignedUser,
+                containInAgentSlice: coldContainment.launch.containInAgentSlice,
               }));
           if (!spawned.ok) {
             removeManaged(tmuxName);
@@ -9268,6 +9585,9 @@ a{color:#60a5fa}
           );
           const tmuxName = `lfg-${randomBytes(3).toString("hex")}`;
           const key = crypto.randomUUID(); // control-plane key (names registry/cmd files)
+          const coldContainment = coldResumeContainment([sessionId], "codex-aisdk", key);
+          if ("error" in coldContainment) return err(503, coldContainment.error);
+          logResumeContainment(sessionId, coldContainment);
           // The resumable catalog discovers rollout files without eagerly
           // indexing their messages. Import and seed history before spawning:
           // otherwise the harness's one-shot copy races the lazy indexer and a
@@ -9281,6 +9601,7 @@ a{color:#60a5fa}
             key,
             resume: sessionId,
             omgUser: body?.user,
+            ...coldContainment.launch,
           });
           if (!r.ok) return err(502, r.error || "failed to resume session");
           addManaged({
@@ -9288,6 +9609,8 @@ a{color:#60a5fa}
             cwd,
             createdAt: Date.now(),
             agent: "codex-aisdk",
+            containment: coldContainment.containment,
+            ...(coldContainment.role ? { role: coldContainment.role } : {}),
             sessionId: key,
             nativeSessionId: sessionId,
             launchState: "running",
@@ -9320,6 +9643,12 @@ a{color:#60a5fa}
         const cwd = await resolveResumeCwd(await cwdForTranscript(transcript), cachedResume?.project);
         const tmuxName = `lfg-${randomBytes(3).toString("hex")}`;
         const resumePrompt = body?.prompt?.trim() || undefined;
+        // The transcript branch is where a closed session lands: its owner row
+        // and registry entry are gone and the scan left no backend on the
+        // cache row. The durable record still has its containment.
+        const coldContainment = coldResumeContainment([sessionId], "aisdk", sessionId);
+        if ("error" in coldContainment) return err(503, coldContainment.error);
+        logResumeContainment(sessionId, coldContainment);
         // Claude transcripts are discovered lazily just like Codex rollouts.
         // Import and seed the direct read model before launching the resumed
         // harness so every file-backed backend has the same non-empty contract.
@@ -9329,6 +9658,8 @@ a{color:#60a5fa}
           cwd,
           createdAt: Date.now(),
           agent: "aisdk",
+          containment: coldContainment.containment,
+          ...(coldContainment.role ? { role: coldContainment.role } : {}),
           sessionId,
           nativeSessionId: sessionId,
           launchState: "launching",
@@ -9347,6 +9678,7 @@ a{color:#60a5fa}
           prompt: resumePrompt,
           omgUser: body?.user,
           claudeAccountId: pinnedClaudeAccountId,
+          ...coldContainment.launch,
         });
         if (!r.ok) {
           removeManaged(tmuxName);
@@ -9716,6 +10048,13 @@ a{color:#60a5fa}
         const fallbackTitle = body?.prompt?.slice(0, 72);
         const resolvedRole = requestedRole || roleForUser(assignedUser).id;
         sessionRole = resolvedRole !== OWNER_ROLE_ID ? resolvedRole : undefined;
+        // One decision, recorded on the row and passed to the spawn below, so
+        // a relaunch after an OOM kill or a reboot gets the same containment.
+        const containment = {
+          agentSlice: true, // Agentbox: parent and child launches retain isolation.
+          sandbox: roleSandbox(sessionRole),
+          egressProxy: roleEgress(sessionRole).mode === "allowlist",
+        };
         const claim = addManaged({
           tmuxName,
           cwd,
@@ -9745,6 +10084,7 @@ a{color:#60a5fa}
           // Every session launched from here is handed its token at spawn
           // (omgMcpServers), so the endpoint may demand it.
           mcpTokenRequired: true,
+          containment,
         }, idempotencyKey);
         if (!claim.created) return replaySessionCreation(claim.session);
         if (claudeAccountId) bindClaudeSessionAccount(launchId, claudeAccountId);
@@ -9763,18 +10103,16 @@ a{color:#60a5fa}
           fastMode,
           sessionId: launchId,
           omgUser: assignedUser,
-          // Issue 521: parents run contained too — their own
-          // lfg-agent-*.service, so omg.service restarts stop
-          // accumulating orphaned children.
-          containInAgentSlice: true,
+          containInAgentSlice: containment.agentSlice,
+
           claudeAccountId,
           // Restricted roles run their harness in a filesystem sandbox
           // (src/sandbox/bwrap.ts). Owner and unknown roles get none.
-          sandbox: roleSandbox(sessionRole),
+          sandbox: containment.sandbox,
           // An allowlist role also gets an egress proxy URL carrying its own
           // token, so its outbound traffic is held to the role's hosts.
           egressProxyUrl:
-            roleEgress(sessionRole).mode === "allowlist" && egressProxy
+            containment.egressProxy && egressProxy
               ? egressProxy.proxyUrlFor(launchId, sessionToken(launchId))
               : undefined,
         });
@@ -10672,6 +11010,10 @@ a{color:#60a5fa}
             }
           }
           if (!sess) return err(404, "session not found");
+          if (!deliveredOnLaunch) {
+            const revived = await reviveDeadCommandFileHarness(sess);
+            if (revived instanceof Response) return revived;
+          }
           // Who wrote this turn, resolved ONCE and reused by everything below
           // that needs to name the sender.
           //
@@ -11989,6 +12331,28 @@ a{color:#60a5fa}
 
   connectManager.start();
 
+  // The egress proxy: a restricted-role session's harness is pointed here, so
+  // it reaches only the model APIs plus its role's allowed hosts. Resolves the
+  // caller from the same per-session token the MCP endpoints use.
+  const egressProxyReady = startEgressProxy({
+    log: (l) => console.log(l),
+    resolve: (sessionId, token) => {
+      if (!verifySessionToken(sessionId, token)) return null;
+      const row = listManaged().find((s) => s.sessionId === sessionId || s.nativeSessionId === sessionId);
+      const egress = roleEgress(row?.role);
+      if (egress.mode !== "allowlist") return null;
+      return { sessionId, allow: [...DEFAULT_ALLOW_HOSTS, ...egress.allowHosts] };
+    },
+  })
+    .then((proxy) => {
+      egressProxy = proxy;
+    })
+    .catch((e) => console.error(`[egress] start failed: ${e instanceof Error ? e.message : String(e)}`));
+  // Relaunches (boot recovery below, and a send to a dead harness) rebuild a
+  // restricted session's proxy URL here. Recovery waits for the proxy so a
+  // restricted session is not relaunched before it can be pointed at it.
+  setRecoveryEgressProxy((sessionId) => egressProxy?.proxyUrlFor(sessionId, sessionToken(sessionId)) ?? null);
+  await egressProxyReady;
   const recovered = await reconcileCommandFileSessions((l) => console.log(l));
   if (recovered.adopted || recovered.recovered || recovered.failed || recovered.skippedLegacy) {
     console.log(`[session-recovery] adopted=${recovered.adopted} recovered=${recovered.recovered} recoveredTmux=${recovered.recoveredTmux} failed=${recovered.failed} skippedLegacy=${recovered.skippedLegacy}`);
@@ -12069,12 +12433,23 @@ a{color:#60a5fa}
   // Bridge those same completions to Web Push, so an installed PWA hears
   // about a landed turn with the app closed. Must follow startFleetWatcher().
   startSessionPushBridge();
+  // Thread messages reach the people in them through the same push fan-out as
+  // everything else (web and iOS).
+  setThreadNotifier(({ user, notification }) => {
+    void notifyAll({ user: user ?? undefined, notification }).catch(() => {});
+  });
   // A task started from a thread posts each finished turn back to it.
   subscribeFleet(null, (ev) => {
     if (ev.type !== "completed" || !threadForTaskSession(ev.sessionId)) return;
-    void listSessionsCached()
-      .then((rows) => bridgeTaskCompletion(ev.sessionId, rows.find((row) => row.sessionId === ev.sessionId) ?? null))
-      .catch((error) => console.error("[threads] task result not posted:", error));
+    void (async () => {
+      const rows = await listSessionsCached();
+      const row = rows.find((session) => session.sessionId === ev.sessionId) ?? null;
+      // The answer comes from the task's own transcript, not the cached list's
+      // `last`: that can still be the thinking before the answer, or the
+      // message the task was sent, and the thread got "(thinking)" or nothing.
+      const answer = await taskTurnAnswer(ev.sessionId);
+      bridgeTaskCompletion(ev.sessionId, row ? { ...row, last: answer ? { role: "assistant", text: answer } : null } : null);
+    })().catch((error) => console.error("[threads] task result not posted:", error));
   });
   // Keep SQLite as the chat read model for every active session. Transcript
   // JSONL files are treated as an import source; live draft deltas stay
@@ -12089,28 +12464,31 @@ a{color:#60a5fa}
   });
   startChatIngestMonitor(listSessionsCached);
 
-  // The egress proxy: a restricted-role session's harness is pointed here, so
-  // it reaches only the model APIs plus its role's allowed hosts. Resolves the
-  // caller from the same per-session token the MCP endpoints use.
-  void startEgressProxy({
-    log: (l) => console.log(l),
-    resolve: (sessionId, token) => {
-      if (!verifySessionToken(sessionId, token)) return null;
-      const row = listManaged().find((s) => s.sessionId === sessionId || s.nativeSessionId === sessionId);
-      const egress = roleEgress(row?.role);
-      if (egress.mode !== "allowlist") return null;
-      return { sessionId, allow: [...DEFAULT_ALLOW_HOSTS, ...egress.allowHosts] };
-    },
-  })
-    .then((proxy) => {
-      egressProxy = proxy;
-    })
-    .catch((e) => console.error(`[egress] start failed: ${e instanceof Error ? e.message : String(e)}`));
   // Warm the resumable-session cache in the background so the first time someone
   // opens the resume picker it's already served from SQLite (no cold scan wait).
   void refreshResumableCache({ force: true }).catch(() => {});
 
   console.log(`lfg web → http://${server.hostname}:${server.port}`);
+
+  // Tailnet entry point. `tailscale serve` points here instead of at PORT, so
+  // every request on it is from the tailnet and must pass the gate (see
+  // src/tailnet-gate.ts). The relay and local tools keep using PORT.
+  if (TAILNET_PORT) {
+    const tailnet = Bun.serve({
+      port: TAILNET_PORT,
+      hostname: "127.0.0.1",
+      maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
+      fetch(req) {
+        const gated = tailnetGateResponse(req, { boxId: readRelayBoxId(), webOrigin: OMG_WEB_ORIGIN });
+        if (gated) {
+          if (gated.status === 401) console.warn(`[tailnet-gate] 401 ${req.method} ${new URL(req.url).pathname}`);
+          return gated;
+        }
+        return server.fetch(req);
+      },
+    });
+    console.log(`lfg tailnet gate → http://${tailnet.hostname}:${tailnet.port} (sign-in required)`);
+  }
   console.log(`  agents dir: ${AGENTS_DIR}`);
 
   // Release installs apply a newer GitHub release on their own. Hosted

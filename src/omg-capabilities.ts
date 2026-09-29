@@ -4,7 +4,7 @@ import { DEFAULT_MAX_BOT_SCHEDULES } from "./settings.ts";
 // Bump whenever an agent-facing omg.dev capability or its operating guidance
 // changes. Managed sessions persist the value they launched with, which lets
 // the UI identify long-lived sessions whose MCP/tool catalog predates a ship.
-export const OMG_CAPABILITY_VERSION = "2026-09-28.1";
+export const OMG_CAPABILITY_VERSION = "2026-09-29.2";
 
 export const OMG_CAPABILITIES = [
   {
@@ -39,7 +39,7 @@ export const OMG_CAPABILITIES = [
     tool: "omg_expose_port",
     useWhen: "A live HTTP development server in an omg.dev Cloud Computer should appear as a preview card.",
     guidance:
-      "For web previews, start one server on 0.0.0.0 and expose its exact port. For Expo Go, choose a free Metro port and call with expoGo:true before Metro starts. In an Expo template project, start Metro with `bash scripts/start-expo-preview.sh <expoGo.proxyUrl> <port>`; elsewhere start Metro with EXPO_PACKAGER_PROXY_URL set to expoGo.proxyUrl. The omg.dev app shows expoGo.url on the preview card, with an Open in Expo Go button and a QR code. So tell the user the preview is ready and to open it from the card below, and do not paste the exps:// URL. Paste expoGo.url only where the user cannot see the card, for example a reply sent with omg_send_to_origin to a messaging channel, or when the user asks for the link. Do not use Expo tunnel, exp.direct, ngrok, or LAN exposure.",
+      "For web previews, start one server on 0.0.0.0 and expose its exact port. For Expo Go, choose a free Metro port and call with expoGo:true before Metro starts. In an Expo template project, start Metro with `bash scripts/start-expo-preview.sh <expoGo.proxyUrl> <port>`; elsewhere start Metro with EXPO_PACKAGER_PROXY_URL set to expoGo.proxyUrl. The omg.dev preview card shows the Expo Web version inline first, and its Your phone tab has the Open in Expo Go button and a QR code for expoGo.url. So tell the user the app is ready in the card below, then mention the Your phone tab, and do not paste the exps:// URL. Paste expoGo.url only where the user cannot see the card, for example a reply sent with omg_send_to_origin to a messaging channel, or when the user asks for the link. Do not use Expo tunnel, exp.direct, ngrok, or LAN exposure.",
   },
   {
     tool: "omg_display_image / omg_display_video / omg_display_file",
@@ -57,6 +57,12 @@ export const OMG_CAPABILITIES = [
     useWhen: "A genuinely irreversible, risky, or ambiguous decision requires the human's answer.",
     guidance:
       "Prefer deciding autonomously — do NOT ask merely to check in. This is fire-and-forget: raise it once, do not poll or block; the answer arrives later as a user message.",
+  },
+  {
+    tool: "omg_list_threads / omg_read_thread / omg_send_thread_message",
+    useWhen: "A person referenced a team chat thread (a `[#Title](omg:thread_<id>)` link), or asked you to read one or post a message, picture or video to one.",
+    guidance:
+      "Pass the thread id as written in the link, or a prefix from omg_list_threads. omg_send_thread_message posts as omg, in the thread or in one message's replies (replyTo), and everyone in it is notified. Write it like a teammate in a chat: short and plain. Read the thread first when you need its context.",
   },
   {
     tool: "omg_find_sessions",
@@ -110,7 +116,7 @@ export function omgRuntimeContract(): string {
   return [
     `=== omg.dev RUNTIME CONTRACT (capability version ${OMG_CAPABILITY_VERSION}) ===`,
     "- You are an omg.dev-managed coding agent. Communicate with the human through normal assistant messages; omg.dev tool calls do not replace those replies.",
-    "- Use `omg_display_image` or `omg_display_video` when a local screenshot or recording provides useful evidence in the omg.dev transcript. Use `omg_display_file` for any other file the user should see: a PDF, an audio clip, a CSV, a log, an archive.",
+    "- Use `omg_display_image` or `omg_display_video` when a local screenshot or recording provides useful evidence in the omg.dev transcript. A markdown image link or a file path in your reply does not render; only these calls show media. Leave their `sessionId` unset unless the user asked for another session. Use `omg_display_file` for any other file the user should see: a PDF, an audio clip, a CSV, a log, an archive.",
     "- Finish verified work with `omg_ship`: a short headline, a tweet-length result, and your strongest evidence. Publishing does not close the session, so keep working if anything is left. Never ship planning, partial, or blocked work.",
     "- Shipped is not deployed. If deployment was requested, verify it before you claim it.",
     "- For a website login, use `omg_request_browser_login` and `omg_browser_login_status`. The iOS app can transfer an approved login to the shared Computer browser. Check client availability and verify the signed-in page after transfer; never request cookies or passwords in chat.",
@@ -248,6 +254,8 @@ const SUBAGENT_HEADERS = [
   "=== omg.dev SUBAGENT OPERATING CONTRACT ===",
   // Same shape: terminated by USER_TASK. See withFirstRunEnvelope.
   "=== omg.dev FIRST RUN ===",
+  // Same shape. See withThreadTaskEnvelope.
+  "=== omg.dev THREAD TASK ===",
 ] as const;
 
 export const FIRST_RUN_HEADER = "=== omg.dev FIRST RUN ===";
@@ -287,7 +295,7 @@ export function withFirstRunEnvelope(prompt: string | undefined, opts: { seesIma
     // Feast design build, deepseek-v4-flash): 31 turns and 5 min of code
     // before the first omg_expose_port, then 2 min of cold Metro bundling,
     // preview at 8 min. The A/B runs that exposed first had the card at 27 s.
-    `- For a phone app, do these steps first, before you write any app code, even when the request includes a design to match: 1. \`omg_create_project\` with \`template: "expo"\`. 2. \`omg_expose_port\` with port 8081 and \`expoGo: true\`. 3. From the project directory run \`bash scripts/start-expo-preview.sh <expoGo.proxyUrl> 8081\` with a 240000 ms shell timeout. 4. Tell the user the preview is ready and to open it from the card below. Metro reloads on every save, so the phone follows your edits. Then read the omg-app-builder skill in the project and build the screens.`,
+    `- For a phone app, do these steps first, before you write any app code, even when the request includes a design to match: 1. \`omg_create_project\` with \`template: "expo"\`. 2. \`omg_expose_port\` with port 8081 and \`expoGo: true\`. 3. From the project directory run \`bash scripts/start-expo-preview.sh <expoGo.proxyUrl> 8081\` with a 240000 ms shell timeout. 4. Present the web preview first: tell the user the app is ready and the card below shows it running, on any device, with no account. Then mention the phone in one sentence: to try it on their own phone, tap \"Your phone\" on the card. If the script prints \`WARNING: Expo CLI is not signed in\`, offer \"Create a free Expo account\" for an iPhone: on that tab they tap \"Create free account\", or \"I have one\" if they already have one; Android does not need it. The user creates the account themself; never sign up for them. Metro reloads on every save, so the preview follows your edits. Then read the omg-app-builder skill in the project and build the screens.`,
     "- Before that first preview: no test suites, no self-test loops, and no reading files one by one to learn the template. One quick check that the page loads is enough.",
     "- After the preview: build in a few larger edits, run one typecheck or build, deploy once with `omg_deploy`, commit, then `omg_ship`.",
     ...(opts.seesImages
@@ -299,6 +307,36 @@ export function withFirstRunEnvelope(prompt: string | undefined, opts: { seesIma
     "- Keep your messages to the user short and plain.",
     USER_TASK,
     text,
+  ].join("\n");
+}
+
+export const THREAD_TASK_HEADER = "=== omg.dev THREAD TASK ===";
+
+/**
+ * The envelope for a task started from a thread: an agent working for a
+ * group chat, not a person watching a transcript.
+ *
+ * Without it a thread task wrote like a task session: bolded headings,
+ * numbered sections and a recap of every domain it checked, posted into a
+ * chat that several people read on their phones. The team kept asking it to
+ * "be more concise" (2026-09-28). The rules mirror the bot contract's reply
+ * style, plus the one fact only a thread task has: the thread sees the last
+ * message of each turn and nothing else (threads.ts, turnAnswer).
+ */
+export function withThreadTaskEnvelope(prompt: string, opts: { threadTitle?: string | null } = {}): string {
+  const title = opts.threadTitle?.trim();
+  return [
+    THREAD_TASK_HEADER,
+    `You are working for a team chat thread${title ? ` called "${title}"` : ""}. Several people read it, mostly on their phones. These rules hold for the whole session.`,
+    "- The last message of each turn is posted into the thread as your reply. Nothing else you write is seen there, so that message must stand on its own.",
+    "- Talk like a teammate in a chat, not a report: a couple of short lines by default, plain words. Length is earned by the question. Answer what was asked first, then stop.",
+    "- No headings, no bolded label on every line, no recap of the steps you took, no closing \"want me to do X or Y?\". Use a short list only when you are giving options.",
+    "- Say what you think, once, plainly. If you recommend one option, say which and why in a line.",
+    "- Later messages from the thread reach you as new turns, relayed by omg with who said them. Answer that person, by name when it helps.",
+    "- Show a picture or a video with `omg_display_image` or `omg_display_video`: it appears in the thread. For a decision only a person can make, ask with `omg_input`; it shows in the thread too.",
+    "- Use `omg_ship` only for finished work that changed something (code, a deploy, a file). An answer in the thread needs no ship.",
+    USER_TASK,
+    prompt.trim(),
   ].join("\n");
 }
 

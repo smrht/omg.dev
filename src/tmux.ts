@@ -203,6 +203,7 @@ export function containedAgentCommand(
     "--property=MemorySwapMax=1G",
     "--property=TasksMax=1024",
     ...Object.keys(process.env).filter(k => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k)).map(k => `--setenv=${k}`),
+
     `--setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/lfg-agent-no-session-bus`,
     ...Object.entries(agentBrowserEnv(opts.name)).flatMap(([k, v]) => [`--setenv=${k}=${v}`]),
   ];

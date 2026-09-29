@@ -30,7 +30,7 @@
 import * as Clipboard from "expo-clipboard";
 import * as Haptics from "expo-haptics";
 import { marked, type Token, type Tokens } from "marked";
-import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, Fragment, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Image, Linking, Platform, ScrollView, StyleSheet, View } from "react-native";
 import Reanimated, {
   cancelAnimation,
@@ -43,9 +43,11 @@ import Reanimated, {
   withTiming,
 } from "react-native-reanimated";
 
-import { IconButton } from "../components";
+import { IconButton, withAlpha } from "../components";
+import { mentionFromHref } from "../../../packages/protocol/src/threads";
 import { agentIcon } from "./agent-icons";
-import { sessionHrefFromCodespan, sessionRefFromHref } from "./session-mention";
+import { sessionHrefFromCodespan, sessionRefFromHref, threadRefFromHref } from "./session-mention";
+import { router } from "expo-router";
 import { openSessionRef, useSessionRefLabel } from "./session-ref-link";
 import { Text } from "./text";
 import { useTheme } from "./theme";
@@ -558,8 +560,15 @@ function SessionRefChip({
 }
 
 /** Inline spans: bold, italic, strike, code, links, images. */
+/**
+ * What a tapped `@mention` does, set by the screen that shows the message (a
+ * thread opens its members). Without it a mention is still highlighted.
+ */
+export const MarkdownMentionContext = createContext<((who: string) => void) | null>(null);
+
 function Inline({ tokens }: { tokens?: Token[] }) {
   const { colors } = useTheme();
+  const onMention = useContext(MarkdownMentionContext);
   if (!tokens?.length) return null;
 
   return (
@@ -603,6 +612,46 @@ function Inline({ tokens }: { tokens?: Token[] }) {
           }
           case "link": {
             const t = token as Tokens.Link;
+            const mentioned = mentionFromHref(t.href);
+            if (mentioned) {
+              return (
+                <Text
+                  key={i}
+                  accessibilityRole="link"
+                  accessibilityLabel={`${t.text}. Show members`}
+                  onPress={
+                    onMention
+                      ? () => {
+                          void Haptics.selectionAsync();
+                          onMention(mentioned);
+                        }
+                      : undefined
+                  }
+                  suppressHighlighting={false}
+                  style={{ color: colors.primary, backgroundColor: withAlpha(colors.primary, 0.14), fontWeight: "600" }}
+                >
+                  {t.text}
+                </Text>
+              );
+            }
+            const threadId = threadRefFromHref(t.href);
+            if (threadId) {
+              // A `#Thread` reference: the same tag as a session's, and it opens the thread.
+              return (
+                <Text
+                  key={i}
+                  accessibilityRole="link"
+                  onPress={() => {
+                    void Haptics.selectionAsync();
+                    router.push(`/thread/${threadId}`);
+                  }}
+                  suppressHighlighting={false}
+                  style={{ backgroundColor: colors.codeBg, color: colors.text, fontWeight: "600" }}
+                >
+                  {t.text.startsWith("#") ? t.text : `#${t.text}`}
+                </Text>
+              );
+            }
             if (sessionRefFromHref(t.href)) {
               return (
                 <SessionRefChip

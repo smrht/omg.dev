@@ -21,7 +21,8 @@
       "expect": [
         "Alex",
         "Demo",
-        "@omg also fix the typo in the signup email"
+        "@omg also fix the typo in the signup email",
+        "Alex and omg are typing"
       ],
       "forbid": [
         "Claude Code",
@@ -34,26 +35,36 @@
       "goal": "Read the reply links under the messages near the end of the thread. Do not tap anything.",
       "done": "The messages that asked omg for work say how many replies they have, one with a task that needs you and one with a task that is done.",
       "expect": [
-        "reply, task Needs you",
+        "replies, task Needs you",
         "2 replies, task Done"
       ]
     },
     {
       "name": "omg answers in the replies",
       "goal": "Tap the reply link that says the task needs you.",
-      "done": "The replies sheet is open with omg's message, the task card and the task's question.",
+      "done": "The Replies page is open (its title is Replies, the thread name under it), scrolled to the end: the newest reply and the task's question are on screen.",
       "expect": [
         "Replies",
-        "Started a task in web.",
-        "Cap the free tier on the pricing page",
+        "Agreed. Ship it after the Stripe question.",
         "Create it in live mode?",
         "Yes, live"
+      ],
+      "forbid": [
+        "**Mockup**"
       ]
     },
     {
-      "name": "Close the replies",
-      "goal": "Tap Close replies at the top right of the replies sheet.",
-      "done": "The replies sheet is closed and the thread is visible again.",
+      "name": "The reply bar sits above the keyboard",
+      "goal": "Tap the text field that says Reply\u2026 at the bottom of the replies sheet. It must be tapped even if it is already visible, so the keyboard opens. Do not type anything.",
+      "done": "The on-screen keyboard is open (letter keys are listed) and the Reply\u2026 field is still listed above it.",
+      "expect": [
+        "Reply\u2026"
+      ]
+    },
+    {
+      "name": "Back from the replies",
+      "goal": "Tap Back at the top left of the Replies page.",
+      "done": "The replies page is gone and the thread's main list is visible again.",
       "expect": [
         "Pricing ideas"
       ],
@@ -62,12 +73,13 @@
       ]
     },
     {
-      "name": "Start a new thread",
-      "goal": "Leave the thread with the back button at the top left, then on Home tap the New thread button next to the Threads heading. Do not tap the message field or the add button.",
-      "done": "An empty new thread is open with its heading and starter prompts.",
+      "name": "A mention is a tag that shows the members",
+      "goal": "In the thread, tap the highlighted @omg tag at the start of a message (for example in \"@omg also fix the typo in the signup email\"). Tap the tag itself, not the reply link under the message.",
+      "done": "The thread details sheet is open, listing the members and omg.",
       "expect": [
-        "New thread",
-        "What is on your mind?"
+        "Details",
+        "Members",
+        "Answers, or starts a task, when someone writes @omg"
       ]
     }
   ]

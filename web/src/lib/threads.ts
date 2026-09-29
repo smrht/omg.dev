@@ -25,11 +25,14 @@ export function listThreads(): Promise<ThreadSummary[]> {
   return api<{ threads?: ThreadSummary[] }>("/api/threads").then((res) => res.threads ?? []);
 }
 
-export function createThread(text: string, user?: string | null): Promise<ThreadSummary> {
+/** A file already uploaded to the machine (POST /api/uploads), to go with a message. */
+export type ThreadAttachment = { path: string; name: string };
+
+export function createThread(text: string, user?: string | null, attachments: ThreadAttachment[] = []): Promise<ThreadSummary> {
   return api<{ thread: ThreadSummary }>("/api/threads", {
     method: "POST",
     headers: json,
-    body: JSON.stringify({ text, ...(user ? { user } : {}) }),
+    body: JSON.stringify({ text, ...(user ? { user } : {}), ...(attachments.length ? { attachments } : {}) }),
   }).then((res) => res.thread);
 }
 
@@ -43,12 +46,22 @@ export function sendThreadMessage(
   user?: string | null,
   /** A top-level message id, to post in its replies. */
   replyTo?: string | null,
+  attachments: ThreadAttachment[] = [],
 ): Promise<ThreadMessage> {
   return api<{ message: ThreadMessage }>(`/api/threads/${encodeURIComponent(id)}/messages`, {
     method: "POST",
     headers: json,
-    body: JSON.stringify({ text, ...(user ? { user } : {}), ...(replyTo ? { replyTo } : {}) }),
+    body: JSON.stringify({ text, ...(user ? { user } : {}), ...(replyTo ? { replyTo } : {}), ...(attachments.length ? { attachments } : {}) }),
   }).then((res) => res.message);
+}
+
+/** "I am typing" (or not). Fire and forget: a lost ping only delays a dot. */
+export function sendThreadTyping(id: string, typing: boolean, user?: string | null, replyTo?: string | null): void {
+  void api(`/api/threads/${encodeURIComponent(id)}/typing`, {
+    method: "POST",
+    headers: json,
+    body: JSON.stringify({ typing, ...(user ? { user } : {}), ...(replyTo ? { replyTo } : {}) }),
+  }).catch(() => {});
 }
 
 export function updateThread(

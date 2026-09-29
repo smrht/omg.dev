@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { faststart, handleMediaRequest, MEDIA_MESSAGES, type MediaOptions } from "./media-generation.ts";
 
 // A fake host media router. Each test sets `router` to shape its responses.
-type Call = { method: string; path: string; body: any };
+type Call = { method: string; path: string; body: any; auth: string | null };
 let calls: Call[] = [];
 let router: {
   quote?: (body: any) => Response;
@@ -26,8 +26,9 @@ beforeAll(() => {
     async fetch(req) {
       const url = new URL(req.url);
       const body = req.method === "POST" ? await req.json().catch(() => null) : null;
-      const path = url.pathname.replace(/^\/media/, "");
-      calls.push({ method: req.method, path, body });
+      // The sandbox router lives at /media; the control-plane CLI gate at /api/cli/media.
+      const path = url.pathname.replace(/^(\/api\/cli)?\/media/, "");
+      calls.push({ method: req.method, path, body, auth: req.headers.get("authorization") });
       if (path === "/quote" && router.quote) return router.quote(body);
       if (path === "/submit" && router.submit) return router.submit(body);
       if (path === "/models" && router.models) return router.models();
@@ -50,7 +51,8 @@ beforeEach(() => {
   calls = [];
   jobPolls = 0;
   router = {
-    quote: (b) => Response.json({ model: b.model, kind: "image", costMicros: 8_000 }),
+    // Like the router: "auto" resolves to a concrete model at quote time.
+    quote: (b) => Response.json({ model: b.model === "auto" ? "wavespeed-ai/flux-schnell" : b.model, kind: "image", provider: "wavespeed", costMicros: 8_000 }),
     submit: () => Response.json({ jobId: "job-1", status: "queued", costMicros: 8_000 }, { status: 202 }),
     job: (id, n) =>
       Response.json(
@@ -100,11 +102,38 @@ describe("media generation routes", () => {
     expect(new Uint8Array(readFileSync(data.paths[0]))).toEqual(PNG);
 
     const quote = calls.find((c) => c.path === "/quote")!;
-    expect(quote.body).toEqual({ model: "recraft-ai/recraft-v4.1-flash/text-to-image", input: { prompt: "a red fox", aspect_ratio: "1:1" } });
+    // No model means "auto": the router picks the cheapest for the task.
+    expect(quote.body).toEqual({ model: "auto", kind: "image", input: { prompt: "a red fox", aspect_ratio: "1:1" } });
     const submit = calls.find((c) => c.path === "/submit")!;
+    // Submit runs the model that was priced, never "auto" again.
+    expect(submit.body.model).toBe("wavespeed-ai/flux-schnell");
+    expect(submit.body.provider).toBe("wavespeed");
     // Tightest of the per-call cap ($1) and what is left today ($5).
     expect(submit.body.maxCostMicros).toBe(1_000_000);
     expect(JSON.parse(readFileSync(opts.spendPath, "utf8"))).toEqual({ day: "2026-09-28", spentMicros: 8_000 });
+  });
+
+  test("an open fal model id passes through with its provider", async () => {
+    const { status } = await call("POST", "/api/media/generate", { model: "fal-ai/flux/dev", provider: "fal", input: { prompt: "p" } });
+    expect(status).toBe(200);
+    expect(calls.find((c) => c.path === "/quote")!.body).toMatchObject({ model: "fal-ai/flux/dev", provider: "fal" });
+    expect(calls.find((c) => c.path === "/submit")!.body).toMatchObject({ model: "fal-ai/flux/dev" });
+  });
+
+  test("model search params pass through to the router", async () => {
+    let seenQuery = "";
+    router.models = () => Response.json({
+      models: [{ id: "fal-ai/flux/dev", kind: "image", task: "text-to-image", provider: "fal", name: "FLUX dev", curated: false, defaultCostMicros: 0 }],
+    });
+    const orig = opts.fetch;
+    const { status, data } = await call("GET", "/api/media/models?all=1&q=flux&kind=image&limit=20", undefined, {
+      ...opts,
+      fetch: (input, init) => { seenQuery = new URL(input).search; return (orig ?? fetch)(input, init); },
+    });
+    expect(status).toBe(200);
+    expect(seenQuery).toBe("?all=1&q=flux&kind=image&limit=20");
+    expect(data.models[0]).toMatchObject({ id: "fal-ai/flux/dev", provider: "fal", curated: false, task: "text-to-image" });
+    expect(data.defaults).toEqual({ image: "auto", video: "auto" });
   });
 
   test("writes to the caller outputPath", async () => {
@@ -183,6 +212,41 @@ describe("media generation routes", () => {
     expect(data.status).toBe("not_on_computer");
     expect(data.error).toContain("Media generation needs an omg.dev Computer");
     expect(calls).toHaveLength(0);
+  });
+
+  test("a signed-in box with no OMG_MEDIA_URL uses the control-plane CLI gate with its Bearer", async () => {
+    const origin = `http://127.0.0.1:${server.port}`;
+    const cloudPaths: string[] = [];
+    const cloud = {
+      signedIn: () => true,
+      fetch: (path: string, init?: RequestInit) => {
+        cloudPaths.push(path);
+        const headers = new Headers(init?.headers);
+        headers.set("Authorization", "Bearer omg-token");
+        return fetch(`${origin}${path}`, { ...init, headers });
+      },
+    };
+    const { status, data } = await call("POST", "/api/media/generate", { input: { prompt: "p" } }, { ...opts, mediaUrl: null, cloud });
+    expect(status).toBe(200);
+    expect(data.status).toBe("succeeded");
+    expect(new Uint8Array(readFileSync(data.paths[0]))).toEqual(PNG);
+    expect(cloudPaths[0]).toBe("/api/cli/media/quote");
+    expect(cloudPaths[1]).toBe("/api/cli/media/submit");
+    expect(cloudPaths.slice(2).every((p) => p === "/api/cli/media/jobs/job-1")).toBe(true);
+    const routerCalls = calls.filter((c) => c.path !== "/files/out.png");
+    expect(routerCalls.every((c) => c.auth === "Bearer omg-token")).toBe(true);
+    // The account token never goes to the result host.
+    expect(calls.find((c) => c.path === "/files/out.png")!.auth).toBeNull();
+  });
+
+  test("OMG_MEDIA_URL wins over the account, and a signed-out box still needs a Computer", async () => {
+    let used = 0;
+    const cloud = (signedIn: boolean) => ({ signedIn: () => signedIn, fetch: async () => { used++; return new Response("{}"); } });
+    expect((await call("POST", "/api/media/generate", { input: { prompt: "p" } }, { ...opts, cloud: cloud(true) })).status).toBe(200);
+    expect(used).toBe(0);
+    const out = await call("POST", "/api/media/generate", { input: { prompt: "p" } }, { ...opts, mediaUrl: null, cloud: cloud(false) });
+    expect(out.data.status).toBe("not_on_computer");
+    expect(used).toBe(0);
   });
 
   test("a wait timeout returns the jobId and charges once; omg_media_job finishes it", async () => {

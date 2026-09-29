@@ -171,6 +171,7 @@ describe("omg.dev runtime capabilities", () => {
       "omg_display_image / omg_display_video / omg_display_file",
       "omg_generate_image / omg_generate_video / omg_media_job / omg_media_models",
       "omg_input",
+      "omg_list_threads / omg_read_thread / omg_send_thread_message",
       "omg_find_sessions",
       "omg_close_session",
       "omg_create_subagent / omg_delegate_*",
@@ -340,6 +341,16 @@ describe("first-run envelope", () => {
     expect(expose).toBeGreaterThan(create);
     expect(script).toBeGreaterThan(expose);
     expect(wrapped).toContain("before you write any app code, even when the request includes a design to match");
+    expect(wrapped).toContain("`WARNING: Expo CLI is not signed in`");
+    // The agent offers the account in the card's words and never signs up itself.
+    expect(wrapped).toContain('offer \"Create a free Expo account\"');
+    expect(wrapped).toContain('tap \"Create free account\", or \"I have one\"');
+    expect(wrapped).toContain("never sign up for them");
+    // Level 1 first: the web preview works on any device with no account.
+    const web = wrapped.indexOf("Present the web preview first");
+    const phone = wrapped.indexOf('tap \"Your phone\" on the card');
+    expect(web).toBeGreaterThan(script);
+    expect(phone).toBeGreaterThan(web);
   });
 
   test("the image rule is only for models that cannot see", async () => {
@@ -351,5 +362,21 @@ describe("first-run envelope", () => {
     expect(modelSeesImages("opus")).toBe(true);
     expect(modelSeesImages(undefined)).toBe(true);
     expect(withFirstRunEnvelope("", { seesImages: true })).toBe("");
+  });
+});
+
+describe("thread task envelope", () => {
+  test("a thread's task is told to talk like a teammate, and titles still show only the ask", async () => {
+    const { withThreadTaskEnvelope, withOmgRuntimeContract, stripOmgRuntimeContract, sessionTitleFromPrompt, THREAD_TASK_HEADER } =
+      await import("./omg-capabilities.ts");
+    const ask = "Brainstorm course names that start with Super";
+    const wrapped = withThreadTaskEnvelope(ask, { threadTitle: "Name and logo design" });
+    expect(wrapped.startsWith(THREAD_TASK_HEADER)).toBe(true);
+    expect(wrapped).toContain('a team chat thread called "Name and logo design"');
+    expect(wrapped).toContain("The last message of each turn is posted into the thread");
+    expect(wrapped).toContain("Talk like a teammate in a chat, not a report");
+    const launched = withOmgRuntimeContract(wrapped)!;
+    expect(stripOmgRuntimeContract(launched)).toBe(ask);
+    expect(sessionTitleFromPrompt(launched)).toBe(ask);
   });
 });

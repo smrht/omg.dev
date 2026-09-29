@@ -128,6 +128,9 @@ export interface AppSearch {
   /** Session that launched a Computer element picker. This is an immutable
    *  return target, not a filter or a Computer-side choice. */
   inspectSession?: string;
+  /** On `/threads/<id>`: the message whose replies to open (a push links here). */
+  replies?: string;
+
   /** Framed-host mode (omg Computer iframe). EXTERNAL CONTRACT with omg's
    *  use-computer-session-frame mint — must stay as `embed=1`. */
   embed?: boolean;
@@ -146,6 +149,8 @@ export function validateAppSearch(search: Record<string, unknown>): AppSearch {
   if (typeof search.inspectSession === "string" && search.inspectSession) {
     out.inspectSession = search.inspectSession;
   }
+  if (typeof search.replies === "string" && search.replies) out.replies = search.replies;
+
   if (
     search.embed === true ||
     search.embed === 1 ||

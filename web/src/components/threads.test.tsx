@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
 import { mount, type Mounted } from "../test-support/render";
 import type { ThreadDetail, ThreadMessage } from "../../../packages/protocol/src/threads";
 
@@ -36,7 +36,7 @@ const detail: ThreadDetail = {
   ],
 };
 
-const { ThreadChatView, ThreadRailSection, NEW_THREAD_ID } = await import("./threads");
+const { ThreadChatView, NEW_THREAD_ID } = await import("./threads");
 
 const sent: { text: string; replyTo: string | null }[] = [];
 function view(props: Partial<Parameters<typeof ThreadChatView>[0]> = {}) {
@@ -59,6 +59,10 @@ function view(props: Partial<Parameters<typeof ThreadChatView>[0]> = {}) {
 }
 
 let ui: Mounted;
+// Messages render through Streamdown, which reads process.cwd(). In the full
+// suite an earlier test can leave the process in a deleted directory
+// (see streamdown-session-ref.test.tsx), so pin one that exists.
+beforeAll(() => process.chdir(import.meta.dir));
 beforeEach(() => {
   ui = mount();
   sent.length = 0;
@@ -79,8 +83,14 @@ async function type(selector: string, value: string) {
 
 const links = () => ui.queryAll<HTMLButtonElement>('[data-testid="thread-replies-link"]');
 
-test("the main list is the people's: omg's answers are replies, not messages", () => {
+/** Messages render through the lazily loaded markdown renderer, as in the session chat. */
+async function waitForMarkdown() {
+  for (let i = 0; i < 100 && !ui.query('[data-testid="thread-message"] [data-streamdown]'); i += 1) await ui.flushAsync(() => Bun.sleep(20));
+}
+
+test("the main list is the people's: omg's answers are replies, not messages", async () => {
   ui.render(view());
+  await waitForMarkdown();
   const text = ui.text();
   expect(text).toContain("Should we drop the free tier?");
   expect(text).toContain("@omg what does Linear charge?");
@@ -130,19 +140,122 @@ test("an empty new thread sends its first message", async () => {
   expect(sent).toEqual([{ text: "Should we drop the free tier?", replyTo: null }]);
 });
 
-test("the rail lists threads by who spoke last, and New opens an empty one", () => {
-  const actions: string[] = [];
-  ui.render(
-    <ThreadRailSection
-      threads={[{ ...detail.thread, lastMessage: { author: alex, text: "Keep it", ts: 2 } }]}
-      activeId={null}
-      onOpen={(id) => actions.push(`open:${id}`)}
-      onNew={() => actions.push("new")}
-    />,
-  );
-  expect(ui.text()).toContain("Threads · 1");
-  expect(ui.text()).toContain("Alex: Keep it");
-  ui.query<HTMLButtonElement>('[aria-label="New thread"]')?.click();
-  ui.queryAll<HTMLButtonElement>('[data-testid="thread-rail"] button')[1]?.click();
-  expect(actions).toEqual(["new", "open:t1"]);
+
+
+test("the header has no project chip; the title opens details with members, omg and the project", async () => {
+  ui.render(view());
+  const header = ui.query("header")!;
+  expect(header.textContent).not.toContain("web");
+  expect(header.textContent).not.toContain("No project");
+  expect(ui.query('[data-testid="thread-menu"]')).not.toBeNull();
+  await ui.flushAsync(() => ui.query<HTMLButtonElement>('[data-testid="thread-title"]')!.click());
+  const details = document.querySelector('[data-testid="thread-details"]');
+  expect(details?.textContent).toContain("Members · 3");
+  expect(details?.textContent).toContain("Benny (you)");
+  expect(details?.textContent).toContain("Answers, or starts a task");
+  expect(details?.querySelector<HTMLSelectElement>('[data-testid="thread-details-project"]')?.value).toBe("/repos/web");
+});
+
+test("people show their own photo and current name; no photo falls back to a letter", () => {
+  const withPhotos = {
+    ...detail,
+    participants: [
+      { id: "human:me", kind: "human", display: { name: "Benny", fallback: "Benny", avatar: "/api/avatars/benny.png" } },
+      { id: "human:alex", kind: "human", display: { name: "Alex Chan", fallback: "Alex", avatar: null } },
+    ],
+  };
+  ui.render(view({ detail: withPhotos }));
+  const photos = ui.queryAll<HTMLImageElement>('[data-testid="thread-message"] img').map((img) => img.getAttribute("src"));
+  expect(photos).toContain("/api/avatars/benny.png");
+  expect(ui.text()).toContain("Alex Chan");
+});
+
+test("people and omg typing show over the bar where they write", async () => {
+  const typing = [
+    { author: alex, replyTo: null },
+    { author: omg, replyTo: "m4" },
+  ];
+  ui.render(view({ detail: { ...detail, typing } }));
+  // omg answers in replies, so the main list shows it too.
+  expect(ui.query('[data-testid="thread-typing"]')?.textContent).toBe("Alex and omg are typing");
+  const needsYou = links().find((link) => link.textContent?.includes("Needs you"))!;
+  await ui.flushAsync(() => needsYou.click());
+  expect(ui.query('[data-testid="thread-reply-typing"]')?.textContent).toBe("omg is typing");
+});
+
+test("typing in the bar tells the thread, and stops when the field empties", async () => {
+  const pings: [boolean, string | null][] = [];
+  ui.render(view({ typing: (on, replyTo) => pings.push([on, replyTo]) }));
+  const input = ui.query<HTMLTextAreaElement>('[data-testid="thread-input"]')!;
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")!.set!;
+  for (const value of ["h", "hi", ""]) {
+    await ui.flushAsync(() => {
+      setter.call(input, value);
+      input.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+  }
+  expect(pings).toEqual([[true, null], [false, null]]);
+});
+
+test("messages are formatted, and carry pictures, videos and files", async () => {
+  const withMedia: ThreadDetail = {
+    ...detail,
+    messages: [
+      {
+        id: "x1",
+        threadId: "t1",
+        ts: 60 * MIN,
+        author: omg,
+        text: "**Name options**\n\n1. **Vibe to Ship**\n2. **Just Vibe It**",
+        media: [
+          { kind: "image", path: "/api/artifacts/logo-a", name: "logo-a.png", width: 800, height: 600, caption: "Logo A" },
+          { kind: "video", path: "/api/artifacts/clip", name: "demo.mp4" },
+          { kind: "file", path: "/api/artifacts/brief", name: "brief.pdf" },
+        ],
+      },
+    ],
+  };
+  ui.render(view({ detail: withMedia }));
+  // The markdown renderer is loaded lazily, as in the session chat.
+  for (let i = 0; i < 100 && !ui.query('[data-testid="thread-message"] [data-streamdown="strong"]'); i += 1) await ui.flushAsync(() => Bun.sleep(20));
+  const row = ui.queryAll('[data-testid="thread-message"]').at(-1)!;
+  // Markdown, not asterisks.
+  expect(row.textContent).toContain("Name options");
+  expect(row.textContent).not.toContain("**");
+  expect(row.querySelector('[data-streamdown="strong"]')?.textContent).toBe("Name options");
+  expect(row.querySelectorAll("li")).toHaveLength(2);
+  expect(row.textContent).toContain("Logo A");
+  const file = row.querySelector<HTMLAnchorElement>('[data-testid="thread-media"] a[download]');
+  expect(file?.getAttribute("href")).toBe("/api/artifacts/brief");
+  expect(file?.textContent).toContain("brief.pdf");
+});
+
+test("a mention is a highlighted tag, and clicking it shows the members", async () => {
+  ui.render(view());
+  for (let i = 0; i < 100 && !ui.query('[data-testid="thread-mention"]'); i += 1) await ui.flushAsync(() => Bun.sleep(20));
+  const tags = ui.queryAll<HTMLButtonElement>('[data-testid="thread-mention"]');
+  expect(tags.map((tag) => tag.textContent)).toContain("@omg");
+  expect(tags.find((tag) => tag.textContent === "@omg")?.dataset.mention).toBe("omg");
+  await ui.flushAsync(() => tags[0].click());
+  expect(document.body.textContent).toContain("Members");
+});
+
+test("a task's answer shows its agent's mark; omg's own words show omg's", async () => {
+  const withAgent: ThreadDetail = {
+    ...detail,
+    messages: [
+      { id: "m9", threadId: "t1", ts: 60 * MIN, author: me, text: "@omg try again" },
+      { id: "n1", threadId: "t1", ts: 60 * MIN, author: omg, text: "Started a task.", replyTo: "m9",
+        task: { sessionId: TASK_ASKING, event: "started", title: "Cap the free tier", project: "web" } },
+      { id: "n2", threadId: "t1", ts: 61 * MIN, author: omg, text: "Capped it.", replyTo: "m9",
+        task: { sessionId: TASK_ASKING, event: "finished", title: "Cap the free tier", project: "web", agent: "codex" } },
+    ],
+  };
+  ui.render(view({ detail: withAgent, initialReplies: "m9" }));
+  await waitForMarkdown();
+  const marks = ui
+    .queryAll<HTMLImageElement>('[data-testid="thread-replies"] [data-testid="thread-message"] img')
+    .map((img) => img.getAttribute("src") ?? "");
+  expect(marks.some((src) => src.includes("omg"))).toBe(true);
+  expect(marks.some((src) => src.includes("codex"))).toBe(true);
 });

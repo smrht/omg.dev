@@ -1,6 +1,10 @@
 export type { BrowserLoginRequest, BrowserLoginSnapshot, BrowserLoginCookie } from "./browser-login";
-export type { ProjectPreview, ProjectPreviewSnapshot } from "./project-preview";
-export { PROJECT_PREVIEW_RESTART_MESSAGE } from "./project-preview.js";
+export type { PreviewLevel, ProjectPreview, ProjectPreviewSnapshot, SimulatorStream, SimulatorStreamProvider } from "./project-preview";
+export { inlinePreviewUrl, PREVIEW_LEVEL_LABEL, PROJECT_PREVIEW_RESTART_MESSAGE, PROJECT_PREVIEW_SIMULATOR_PATH, previewLevels, simulatorStatusText } from "./project-preview.js";
+export type { ExpoAccountSnapshot, ExpoConnectMode, ExpoConnectState, ExpoConnectStatus } from "./expo-account";
+export { EXPO_SIGNUP_LABEL, expoConnectActive, expoConnectMessage } from "./expo-account.js";
+export type { KioskFrame, KioskRect } from "./computer-kiosk";
+export { COMPUTER_KIOSK_PATH, keysymFor, kioskHitsInput, kioskHost, kioskLayout, NAMED_KEYSYMS } from "./computer-kiosk.js";
 
 export type OmgSessionStatus =
   | "ok"
@@ -11,6 +15,8 @@ export type OmgSessionStatusReason =
   | "out_of_credits"
   | "provider_auth"
   | "provider_error"
+  | "interrupted"
+  | "out_of_memory"
   | null;
 
 export interface OmgSession {

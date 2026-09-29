@@ -205,6 +205,15 @@ async function resolveSid(input: string): Promise<string> {
       `session id "${id}" is ambiguous (matches ${matches.size} sessions); pass more characters`,
     );
   }
+  // A thread id handed over as a session (an `omg:session_` link written by an
+  // older app): say what it is, so the agent reaches for the thread tools.
+  const threads = await api<{ threads?: { id: string; title: string }[] }>("/api/threads").catch(() => ({ threads: [] as { id: string; title: string }[] }));
+  const thread = (threads.threads ?? []).find((row) => row.id.toLowerCase().startsWith(lower));
+  if (thread) {
+    throw new Error(
+      `"${id}" is not a session: it is the thread "${thread.title}" (${thread.id}). Use omg_read_thread or omg_send_thread_message with that id.`,
+    );
+  }
   throw new Error(`no session matches id "${id}"`);
 }
 
@@ -733,6 +742,101 @@ export function buildOmgMcpServer(): McpServer {
     },
   );
 
+  // ---- Threads: people-first team chat (src/threads.ts) ----
+  type ThreadRow = { id: string; title: string; updatedAt: number; project?: { name: string } | null; lastMessage?: { author: { kind: string; name?: string }; text: string } | null };
+  const resolveThread = async (ref: string): Promise<string> => {
+    const id = ref.trim().replace(/^omg:thread_/, "").toLowerCase();
+    const threads = (await api<{ threads?: ThreadRow[] }>("/api/threads")).threads ?? [];
+    const matches = threads.filter((row) => row.id.toLowerCase().startsWith(id));
+    if (!id || matches.length === 0) throw new Error(`no thread matches "${ref}"; list them with omg_list_threads`);
+    if (matches.length > 1) throw new Error(`"${ref}" matches ${matches.length} threads; use more of the id`);
+    return matches[0].id;
+  };
+  const short = (id: string | null | undefined) => (id ? id.slice(0, 8) : null);
+
+  server.registerTool(
+    "omg_list_threads",
+    {
+      title: "List omg.dev Threads",
+      description:
+        "List the team chat threads on this machine, newest first: id, title, project and the last message. A person references one as [#Title](omg:thread_<id>).",
+      inputSchema: {},
+    },
+    async () => {
+      const threads = (await api<{ threads?: ThreadRow[] }>("/api/threads")).threads ?? [];
+      return result({
+        threads: threads.map((row) => ({
+          id: row.id,
+          title: row.title,
+          project: row.project?.name ?? null,
+          updatedAt: new Date(row.updatedAt).toISOString(),
+          last: row.lastMessage
+            ? `${row.lastMessage.author.kind === "omg" ? "omg" : row.lastMessage.author.name}: ${row.lastMessage.text.slice(0, 200)}`
+            : null,
+        })),
+      });
+    },
+  );
+
+  server.registerTool(
+    "omg_read_thread",
+    {
+      title: "Read an omg.dev Thread",
+      description:
+        "Read a team chat thread: its people and its messages, oldest first. A reply carries replyTo, the id of the message it answers.",
+      inputSchema: {
+        threadId: z.string().min(1).describe("Thread id, an unambiguous prefix, or an omg:thread_<id> link."),
+        limit: z.number().int().min(1).max(500).optional().describe("How many recent messages. Default 100."),
+      },
+    },
+    async ({ threadId, limit }) => {
+      const id = await resolveThread(threadId);
+      const data = await api<{
+        thread: ThreadRow;
+        participants?: { id: string; kind: string; display: { name?: string | null; fallback: string } }[];
+        messages?: { id: string; ts: number; author: { kind: string; name?: string }; text: string; replyTo?: string | null; media?: { kind: string; name?: string | null }[]; task?: { sessionId: string; event: string } }[];
+      }>(`/api/threads/${id}?limit=${limit ?? 100}`);
+      return result({
+        id,
+        title: data.thread.title,
+        people: (data.participants ?? []).filter((row) => row.kind === "human").map((row) => row.display.name || row.display.fallback),
+        messages: (data.messages ?? []).map((row) => ({
+          id: short(row.id),
+          at: new Date(row.ts).toISOString(),
+          from: row.author.kind === "omg" ? "omg" : row.author.name,
+          text: row.text,
+          ...(row.replyTo ? { replyTo: short(row.replyTo) } : {}),
+          ...(row.media?.length ? { media: row.media.map((m) => `${m.kind}${m.name ? `: ${m.name}` : ""}`) } : {}),
+          ...(row.task ? { task: `${row.task.event} ${short(row.task.sessionId)}` } : {}),
+        })),
+      });
+    },
+  );
+
+  server.registerTool(
+    "omg_send_thread_message",
+    {
+      title: "Send a Message to an omg.dev Thread",
+      description:
+        "Post a message to a team chat thread as omg: in the thread, or in the replies of one message (replyTo). Everyone in the thread is notified. Attach local pictures, videos or files with mediaPaths. Write like a teammate in a chat: short and plain.",
+      inputSchema: {
+        threadId: z.string().min(1).describe("Thread id, an unambiguous prefix, or an omg:thread_<id> link."),
+        text: z.string().optional().describe("The message, markdown allowed."),
+        replyTo: z.string().optional().describe("Id (or its 8-char prefix from omg_read_thread) of a top-level message, to post in its replies."),
+        mediaPaths: z.array(z.string()).max(10).optional().describe("Absolute paths of pictures, videos or files to attach."),
+      },
+    },
+    async ({ threadId, text, replyTo, mediaPaths }) => {
+      const id = await resolveThread(threadId);
+      const data = await api<{ message: { id: string; replyTo?: string | null } }>(`/api/threads/${id}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: text ?? "", ...(replyTo ? { replyTo } : {}), ...(mediaPaths?.length ? { mediaPaths } : {}) }),
+      });
+      return result({ ok: true, threadId: id, messageId: short(data.message.id), replyTo: short(data.message.replyTo) });
+    },
+  );
+
   server.registerTool(
     "omg_close_session",
     {
@@ -832,12 +936,17 @@ export function buildOmgMcpServer(): McpServer {
     {
       title: "Display Image In omg.dev",
       description:
-        "Display a local image file, such as a screenshot captured while testing, in the omg.dev session transcript.",
+        "Display a local image file, such as a screenshot captured while testing, in the omg.dev session transcript. This call is the only way an image reaches the user: a markdown image link or a file path in your reply does not render. Call it once per image before your reply refers to the image. Do not run it in parallel with a long command; the image appears only when the call finishes. Leave sessionId unset so the image shows in your own session.",
       inputSchema: {
         path: z.string().min(1).describe("Absolute path to a png, jpg, jpeg, webp, or gif image on this machine."),
         caption: z.string().optional().describe("Short caption shown under the image."),
         alt: z.string().optional().describe("Short alt text for the image."),
-        sessionId: z.string().optional().describe("Target omg.dev session id. Defaults to OMG_SESSION_ID."),
+        sessionId: z
+          .string()
+          .optional()
+          .describe(
+            "Target omg.dev session id. Defaults to OMG_SESSION_ID. Set it only when the user asked for the image in another session; the image then does not show in your own session.",
+          ),
       },
     },
     async ({ path, caption, alt, sessionId }) => {
@@ -929,17 +1038,20 @@ export function buildOmgMcpServer(): McpServer {
     return input;
   };
   const MEDIA_COST_NOTE =
-    "Spends the user's omg credits (1 credit = $1). The router quotes the price first; the call is refused above the per-call cap ($1.00 default) or the daily cap ($5.00 default, UTC). The result has costUsd: tell the user the price in your reply.";
+    "Spends the user's omg credits (1 credit = $1). The router quotes the price first; the call is refused above the per-call cap ($1.00 default) or the daily cap ($5.00 default, UTC). The result has model and costUsd: tell the user both in your reply.";
+  const MEDIA_MODEL_FIELD = z.string().optional().describe(
+    "Leave out to let the router pick the cheapest suitable model. To choose, pass an id from omg_media_models.",
+  );
 
   server.registerTool(
     "omg_generate_image",
     {
       title: "Generate An Image With omg Credits",
       description:
-        `Generate an image from a text prompt and save it to a local file. ${MEDIA_COST_NOTE} Default model recraft-ai/recraft-v4.1-flash/text-to-image costs about $0.008 per image (fast, readable text). Other models: wavespeed-ai/flux-schnell $0.003, openai/gpt-image-2.5-flare/text-to-image $0.024 default ($0.01-$1.00 by quality and resolution), bytedance/seedream-v4 $0.027, recraft-ai/recraft-20b-svg $0.044 (SVG), google/nano-banana-2/text-to-image $0.07. Prefer the cheapest model that fits. Show the result with omg_display_image.`,
+        `Generate an image from a text prompt and save it to a local file. ${MEDIA_COST_NOTE} Show the result with omg_display_image.`,
       inputSchema: {
         prompt: z.string().min(1).describe("What to draw."),
-        model: z.string().optional().describe("Router model id. Defaults to recraft-ai/recraft-v4.1-flash/text-to-image."),
+        model: MEDIA_MODEL_FIELD,
         aspectRatio: z.string().optional().describe("Aspect ratio such as 1:1, 16:9, 9:16, 4:3, 3:4. Sent as aspect_ratio."),
         input: z.record(z.string(), z.unknown()).optional().describe("Extra provider input fields, for example {quality:'high', resolution:'2k'}. Friendly fields override these."),
         outputPath: z.string().optional().describe("Absolute output file path. Defaults to ~/omg-media/<date>/<jobId>-<n>.<ext>."),
@@ -967,10 +1079,10 @@ export function buildOmgMcpServer(): McpServer {
     {
       title: "Generate A Video With omg Credits",
       description:
-        `Generate a short video from a text prompt and save it to a local file. ${MEDIA_COST_NOTE} Default model bytedance/seedance-v1.5-pro/text-to-video-fast: 5 s 720p with audio costs $0.20 ($0.04/s; $0.02/s without generate_audio; 1080p $0.06/s). Other models: wavespeed-ai/wan-2.2/t2v-480p-ultra-fast $0.01/s (5 or 8 s), pruna-ai/p-video-2/text-to-video $0.025/s 720p (1-20 s), kwaivgi/kling-v3-turbo-std/text-to-video $0.112/s (best quality). Prefer the cheapest model that fits. Video takes 30 s to 5 min. Before omg_display_video, make sure the file is under 6 MB H.264 with faststart; re-encode with ffmpeg if larger.`,
+        `Generate a short video from a text prompt and save it to a local file. ${MEDIA_COST_NOTE} Video takes 30 s to 5 min. Before omg_display_video, make sure the file is under 6 MB H.264 with faststart; re-encode with ffmpeg if larger.`,
       inputSchema: {
         prompt: z.string().min(1).describe("What happens in the video."),
-        model: z.string().optional().describe("Router model id. Defaults to bytedance/seedance-v1.5-pro/text-to-video-fast."),
+        model: MEDIA_MODEL_FIELD,
         durationSeconds: z.number().int().min(1).max(20).optional().describe("Length in seconds. Sent as duration. Price scales with it."),
         resolution: z.string().optional().describe("Resolution such as 480p, 720p, 1080p. Sent as resolution."),
         aspectRatio: z.string().optional().describe("Aspect ratio such as 16:9, 9:16, 1:1. Sent as aspect_ratio."),
@@ -1021,10 +1133,23 @@ export function buildOmgMcpServer(): McpServer {
     {
       title: "List Media Generation Models And Prices",
       description:
-        "List the image and video models this omg.dev Computer can use, each with its default price in USD, plus the per-call cap, the daily cap, and today's spend. guidePath points to the media-generation skill: read it before choosing a model.",
-      inputSchema: {},
+        "List the top image and video models with their default price in USD, plus the per-call cap, the daily cap, and today's spend. all:true returns the full list, cheapest first; narrow it with q or kind. You rarely need this: generate without a model and the router picks the cheapest suitable one.",
+      inputSchema: {
+        all: z.boolean().optional().describe("Return the full model list, not only the top models."),
+        q: z.string().optional().describe("Search text matched against model id and name, for example \"flux\" or \"kling\"."),
+        kind: z.enum(["image", "video", "audio"]).optional().describe("Only this output kind."),
+        limit: z.number().int().min(1).max(500).optional().describe("Most rows from the full list. Default 50."),
+      },
     },
-    async () => result(await api("/api/media/models")),
+    async ({ all, q, kind, limit }) => {
+      const params = new URLSearchParams();
+      if (all) params.set("all", "1");
+      if (q) params.set("q", q);
+      if (kind) params.set("kind", kind);
+      if (limit) params.set("limit", String(limit));
+      const qs = params.toString();
+      return result(await api(`/api/media/models${qs ? `?${qs}` : ""}`));
+    },
   );
 
   server.registerTool(

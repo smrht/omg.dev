@@ -2,6 +2,35 @@
 
 Recent product updates and deployment notes.
 
+## September 29, 2026 - Tailnet access needs sign-in (v0.6.143)
+
+- A new setting, `LFG_TAILNET_PORT`, opens a second local port for `tailscale serve`. Point `tailscale serve` at it to require sign-in for tailnet devices.
+- On that port, opening the computer or a session link sends you to the same page in the omg app, where you sign in. Requests to the API get 401.
+- The main port does not change. The relay and the tools on the computer keep working.
+- A signed-in computer can generate media through omg.dev. Media generation can pick the cheapest model and accepts any fal or WaveSpeed model id.
+
+## September 29, 2026 - A paused Computer stops being polled (v0.6.142)
+
+- When your omg.dev Computer is paused, the app stops asking it for updates in the background. It waits longer between tries, up to one minute. It starts again at once when you return to the window or the tab.
+- Your own actions, such as sending a message, still go through and wake the Computer.
+- The Computer desktop keeps working when `~/.omg` is not writable. It keeps its files in `~/.local/state/omg/computer` and says so in the log. Before, a restarted server lost the running desktop.
+
+## September 29, 2026 - Simulator preview (private test) and Expo account prompt (v0.6.141)
+
+- The Expo preview card can show a **Simulator** level: a live iPhone simulator that runs your app, streamed into the card, with taps, swipes and typing. It is a private test for now, so only the owner of the simulator Mac sees it. The control plane decides per account; other cards do not change.
+- On an iPhone, the preview card asks you to create a free Expo account when Expo Go needs one to open the project.
+- A closed session resumes in the containment it was recorded with. v0.6.140 did not include this fix.
+
+## September 29, 2026 - Connect Expo and a web preview first (v0.6.140)
+
+- The Expo preview card now opens on **Web**: the app runs inline on the card, on the web and in the iOS and Android apps. **Your phone** shows one "Open in Expo Go" button on a phone, or a QR code on a computer.
+- **Connect Expo** signs the Computer's Expo CLI in to your Expo account. The Expo login opens in the Computer browser. After that, "Open in Expo Go" works on iPhone when Expo Go is signed in to the same account.
+- The card says when an iPhone will refuse the project because Expo Go and the Computer use different Expo accounts.
+- Agents present the web preview first, then "Your phone".
+- Threads: @ anyone on the machine to add and notify them, and reference a thread with #. On iOS, replies open on their own page.
+- A stopped agent session that uses a command file starts again when you send it a message.
+- v0.6.139 was tagged but not published: its build failed. This release contains all of its changes.
+
 ## September 28, 2026 - `omg update` restarts the service (v0.6.138)
 
 - `omg update` now restarts the running service after it installs a release, also on an omg.dev Computer. Before, it printed "Restarting the service…" and the old version kept running.

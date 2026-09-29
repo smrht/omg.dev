@@ -17,6 +17,7 @@
  * account, so demo mode cannot leak a session, an email, or a repository name.
  */
 
+import { DEMO_THREAD_IMAGE_DATA_URI, DEMO_THREAD_IMAGE_PATH } from "./demo-thread-image";
 import type { OmgTransport } from "@omg-dev/client";
 import type { OmgMessage, OmgSession } from "@omg-dev/protocol";
 import { DEMO_VIDEO_PATH, demoVideoBytes } from "./demo-video";
@@ -72,9 +73,17 @@ function demoThreadMessages(t: number) {
     msg("t4", t - 38 * MIN, omg, "Linear starts at $8 per seat a month. Vercel Pro is $20 per member a month.", undefined, "t3"),
     msg("t5", t - 21 * MIN, me, "@omg update the pricing page with the cap"),
     msg("t6", t - 20 * MIN, omg, "Started a task in web.", { sessionId: DEMO_TASK_ASKING, event: "started", title: "Cap the free tier on the pricing page", project: "web" }, "t5"),
+    // Formatting and a picture, as a task's result carries them.
+    { ...msg("t6b", t - 19 * MIN, omg, "**Mockup** of the new tiers:\n\n- Free: 3 tasks a day\n- Pro: unlimited", undefined, "t5"),
+      media: [{ kind: "image", path: DEMO_THREAD_IMAGE_PATH, name: "mockup.png", width: 240, height: 160, caption: "Pricing mockup" }] },
+    // Enough replies to scroll, so the sheet has to open on the newest.
+    msg("t6c", t - 18 * MIN, alex, "Looks good. Can the Pro badge be orange?", undefined, "t5"),
+    msg("t6d", t - 17 * MIN, me, "Yes, same orange as the logo.", undefined, "t5"),
+    msg("t6e", t - 16 * MIN, alex, "And keep the yearly toggle on the right.", undefined, "t5"),
+    msg("t6f", t - 16 * MIN, me, "Agreed. Ship it after the Stripe question.", undefined, "t5"),
     msg("t7", t - 15 * MIN, alex, "@omg also fix the typo in the signup email"),
     msg("t8", t - 14 * MIN, omg, "Started a task in web.", { sessionId: DEMO_TASK_DONE, event: "started", title: "Fix the signup email typo", project: "web" }, "t7"),
-    msg("t9", t - 2 * MIN, omg, "Fixed \"recieve\" in the signup email. Tests pass.", { sessionId: DEMO_TASK_DONE, event: "finished", title: "Fix the signup email typo", project: "web" }, "t7"),
+    msg("t9", t - 2 * MIN, omg, "Fixed \"recieve\" in the signup email. Tests pass.", { sessionId: DEMO_TASK_DONE, event: "finished", title: "Fix the signup email typo", project: "web", agent: "codex" }, "t7"),
   ];
 }
 
@@ -96,12 +105,23 @@ function demoThreadDetail() {
     thread: demoThreadSummary(),
     participants: [
       { id: ME, kind: "human", role: "owner", display: { name: "Demo", fallback: "Demo" } },
-      { id: ALEX, kind: "human", role: "member", display: { name: "Alex", fallback: "Alex" } },
+      { id: ALEX, kind: "human", role: "member", display: { name: "Alex", fallback: "Alex", avatar: "https://avatars.githubusercontent.com/u/9919?s=128&v=4" } },
     ],
     messages: demoThreadMessages(t),
     tasks: [
       { sessionId: DEMO_TASK_ASKING, title: "Cap the free tier on the pricing page", project: "web", busy: false, status: "ok", ended: false },
       { sessionId: DEMO_TASK_DONE, title: "Fix the signup email typo", project: "web", busy: false, status: "ok", ended: true },
+    ],
+    // Who @ can name: the members, and someone on the machine not in it yet.
+    people: [
+      { participantId: ME, name: "Demo", member: true },
+      { participantId: ALEX, name: "Alex", avatar: "https://avatars.githubusercontent.com/u/9919?s=128&v=4", member: true },
+      { participantId: "human:sam", name: "Sam", member: false },
+    ],
+    // Alex is writing in the main list; omg is answering in t5's replies.
+    typing: [
+      { author: { kind: "human", participantId: ALEX, name: "Alex" }, replyTo: null },
+      { author: { kind: "omg" }, replyTo: "t5" },
     ],
   };
 }
@@ -532,6 +552,11 @@ function answer(path: string): unknown | null {
   }
   if (clean === "/api/sessions") return { sessions: demoSessions() };
   if (clean === "/api/threads") return { threads: threadFixture ? [demoThreadSummary()] : [] };
+  // `#` offers threads first, as the machine does.
+  if (threadFixture && clean === "/api/sessions/mentionable") {
+    const thread = demoThreadSummary();
+    return { sessions: [{ kind: "thread", sessionId: thread.id, title: thread.title, cwd: null, project: "web", lastUserText: null, lastActivityAt: thread.updatedAt, agent: "thread", live: false, sameFolder: false }] };
+  }
   if (threadFixture && clean === `/api/threads/${DEMO_THREAD}`) return demoThreadDetail();
   if (clean === "/api/ask") return demoAsk();
   if (clean.startsWith("/api/browser-login")) {
@@ -597,6 +622,10 @@ export function getDemoTransport(): OmgTransport {
   demoTransport = {
     async fetch(path: string) {
       await openingDelay(path);
+      if (threadFixture && path.split("?")[0] === DEMO_THREAD_IMAGE_PATH) {
+        const image = await globalThis.fetch(DEMO_THREAD_IMAGE_DATA_URI);
+        return { ok: true, status: 200, blob: () => image.blob() } as unknown as Response;
+      }
       if (videoFixture && path.split("?")[0] === DEMO_VIDEO_PATH && !path.includes("preview=1")) {
         return { ok: true, status: 200, async arrayBuffer() { return demoVideoBytes(); } } as unknown as Response;
       }

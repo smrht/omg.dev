@@ -101,10 +101,10 @@ import {
 import { ChatStarterRow } from "./components/chat-starter-row";
 import { groupNodesByProject, type ProjectGroup } from "./lib/session-groups";
 import { pathnameToSessionId, pathnameToThreadId, sessionToPath, threadToPath } from "./lib/app-search";
-import { NEW_THREAD_ID, ThreadChat, ThreadRailSection } from "./components/threads";
+import { NEW_THREAD_ID, ThreadChat, ThreadRailSection, useTypingReport, type ThreadComposerProps } from "./components/threads";
 import { PullToThread } from "./components/pull-to-thread";
 import { useThreads } from "./lib/threads";
-import type { ThreadSummary } from "../../packages/protocol/src/threads";
+import { THREAD_MENTIONS, threadPreview, type ThreadMentionOption, type ThreadSummary } from "../../packages/protocol/src/threads";
 import {
   BOT_ROSTER_ROW_CLASS,
   isPrimarySurfaceTab,
@@ -912,7 +912,7 @@ export type Session = {
   // Build health (from the backend). "blocked" means the session can't make
   // progress until a human acts; statusReason/statusDetail explain why.
   status?: "ok" | "blocked";
-  statusReason?: "model_unavailable" | "out_of_credits" | "provider_auth" | "provider_error" | "restart_recovered" | null;
+  statusReason?: "model_unavailable" | "out_of_credits" | "provider_auth" | "provider_error" | "restart_recovered" | "interrupted" | "out_of_memory" | null;
   statusDetail?: string | null;
   // Live "working" flag from the list call (backend computes it from the tmux
   // pane / aisdk registry). Lets a collapsed card show working/idle without
@@ -6164,11 +6164,13 @@ export function App() {
   // Session references in rendered messages open through this page route.
   // The list is read through a ref so a click sees the latest sessions.
   const sessionsForRefs = useRef<Session[]>(sessions);
+  const openThreadPageRef = useRef<(id: string) => void>(() => {});
   sessionsForRefs.current = sessions;
   useEffect(() => {
     registerSessionRefHandlers({
       navigate: openSessionPage,
       peekSessions: () => sessionsForRefs.current,
+      navigateThread: (id) => openThreadPageRef.current(id),
     });
     return () => registerSessionRefHandlers(null);
   }, [openSessionPage]);
@@ -6184,6 +6186,8 @@ export function App() {
     },
     [navigate, keepHostSearch],
   );
+  // Thread references in rendered messages (`#Title` links) open through this.
+  openThreadPageRef.current = openThreadPage;
   const selectedBotConversationId = selectedBotId ? routeSearch.conversation ?? null : null;
   // A terminal is on screen — as the Terminal tab, or pulled up over any tab.
   // Both need the same soft-keyboard treatment: the shell pinned to the visible
@@ -9574,6 +9578,7 @@ export function App() {
           >
             <LiveView
               threadViewer={botUnreadIdentity}
+              threadReplies={openThreadId ? routeSearch.replies ?? null : null}
               openThreadId={openThreadId}
               onOpenThread={openThreadPage}
               openSessionId={openSessionId}
@@ -11911,6 +11916,7 @@ function LiveView({
   openThreadId = null,
   onOpenThread,
   threadViewer = "",
+  threadReplies = null,
   openSessionId = null,
   onOpenSessionPage,
   onCloseSessionPage,
@@ -11981,6 +11987,8 @@ function LiveView({
   openThreadId?: string | null;
   /** Who writes in a thread from this browser; see lib/threads.ts. */
   threadViewer?: string;
+  /** Replies to open in the thread, from `?replies=` (a push link). */
+  threadReplies?: string | null;
   onOpenThread?: (id: string) => void;
   onOpenSessionPage?: (sid: string) => void;
   onCloseSessionPage?: () => void;
@@ -12257,12 +12265,6 @@ function LiveView({
       <div className="flex flex-col gap-5">
         {coach}
         <PullToThread onStart={() => onOpenThread?.(NEW_THREAD_ID)}>
-          <ThreadRailSection
-            threads={threads}
-            activeId={null}
-            onOpen={(id) => onOpenThread?.(id)}
-            onNew={() => onOpenThread?.(NEW_THREAD_ID)}
-          />
           <RuntimeEmptyState />
         </PullToThread>
       </div>
@@ -12372,6 +12374,7 @@ function LiveView({
       <RailStage
         threads={threads}
         threadViewer={threadViewer}
+        threadReplies={threadReplies}
         openThreadId={openThreadId}
         onOpenThread={onOpenThread}
         onCloseThread={onCloseSessionPage}
@@ -12521,6 +12524,7 @@ function LiveView({
         onProjectChange={onProjectChange}
         renderItem={renderMobileItem}
       />
+
       </PullToThread>
     </div>
     {/* Open findings live behind a pill, not at the end of the list. A group
@@ -12607,6 +12611,8 @@ function LiveView({
             <ThreadChat
               threadId={openThreadId}
               viewer={threadViewer}
+              initialReplies={threadReplies}
+              renderComposer={renderThreadComposer}
               repos={repos}
               onCreated={(id) => onOpenThread?.(id)}
               onOpenTask={openThreadTask}
@@ -12682,12 +12688,14 @@ function RailStage({
   hostSettingsInMenu = false,
   threads = [],
   threadViewer = "",
+  threadReplies = null,
   openThreadId = null,
   onOpenThread,
   onCloseThread,
   onOpenThreadTask,
 }: {
   threadViewer?: string;
+  threadReplies?: string | null;
   /** Threads, listed above the sessions; see components/threads.tsx. */
   threads?: ThreadSummary[];
   /** The open thread fills the stage while it is open. */
@@ -14318,7 +14326,7 @@ function RailStage({
           />
         ) : null}
         <div data-overview-density={railSurface !== "chat" ? overviewPrefs.density : undefined} className="session-overview session-list-scroll min-h-0 flex-1 overflow-y-auto px-1.5 py-2">
-          {railSurface === "chat" ? botRailList : <>
+          {railSurface === "chat" ? botRailList : <PullToThread fill={false} onStart={() => onOpenThread?.(NEW_THREAD_ID)}>
           {!railCollapsed && railSurface === "sessions" ? (
             <ThreadRailSection
               threads={threads}
@@ -14327,6 +14335,7 @@ function RailStage({
               onNew={() => onOpenThread?.(NEW_THREAD_ID)}
             />
           ) : null}
+
           {/* Leads the list, the way New bot leads the roster: it belongs to
               the thing it adds to, under the switch bar that says which list
               that is. It used to sit in the chrome above, sharing a row with
@@ -14406,7 +14415,7 @@ function RailStage({
             headerless={showFolderMenu}
             dense
           />
-          </>}
+          </PullToThread>}
         </div>
         {/* Host-owned footer. A host embedding LFG as its whole desktop surface
             (omg) has nowhere to put its own top-level navigation: this layout
@@ -14523,10 +14532,13 @@ function RailStage({
         )}
       >
         {openThreadId && railSurface === "sessions" ? (
-          <div className="h-full min-h-0 min-w-0 overflow-hidden rounded-xl border border-border">
+          // Flat, as a session column is on the stage: no card border or radius.
+          <div className="h-full min-h-0 min-w-0 overflow-hidden">
             <ThreadChat
               threadId={openThreadId}
               viewer={threadViewer}
+              initialReplies={threadReplies}
+              renderComposer={renderThreadComposer}
               repos={repos}
               onCreated={(id) => onOpenThread?.(id)}
               onOpenTask={(sid) => onOpenThreadTask?.(sid)}
@@ -15034,6 +15046,49 @@ function RailGroup({
  * conversation) and which swipe actions, if any, make sense for what the row
  * represents.
  */
+/**
+ * Threads in the session list, as on the iPad rail: a group like Pinned or a
+ * folder, drawn only when there are threads, each row a session row without
+ * an agent mark. There is no New button; a pull at the top of the list starts
+ * a thread (PullToThread).
+ */
+function ThreadRailGroup({
+  threads,
+  activeId,
+  collapsed,
+  dense = false,
+  onOpen,
+}: {
+  threads: ThreadSummary[];
+  activeId: string | null;
+  collapsed: boolean;
+  dense?: boolean;
+  onOpen: (id: string) => void;
+}) {
+  if (!threads.length) return null;
+  return (
+    <RailGroup label="Threads" count={threads.length} collapsed={collapsed} foldKey="__threads">
+      {threads.map((thread) => (
+        <RailRow
+          key={thread.id}
+          railKey={`thread:${thread.id}`}
+          collapsed={collapsed}
+          dense={dense}
+          active={activeId === thread.id}
+          cursored={false}
+          ariaLabel={`Thread ${thread.title}`}
+          tooltip={thread.title}
+          mark={null}
+          title={thread.title}
+          preview={threadPreview(thread)}
+          trailingStatic={relTime(thread.updatedAt)}
+          onActivate={() => onOpen(thread.id)}
+        />
+      ))}
+    </RailGroup>
+  );
+}
+
 const RailRow = memo(function RailRow({
   railKey,
   collapsed,
@@ -15347,7 +15402,7 @@ const RailItem = memo(function RailItem({
     useContext(ViewPrefsContext);
   const questions = useSessionQuestions([session.sessionId, session.nativeSessionId]);
   const overviewPreview = questions[0]?.question || (session.status === "blocked"
-    ? ({ model_unavailable: "Model niet beschikbaar", out_of_credits: "Gebruikslimiet bereikt", provider_auth: "Opnieuw inloggen nodig", provider_error: "Providerfout · open om te hervatten", restart_recovered: "Onderbroken · open om te hervatten" }[session.statusReason || "provider_error"])
+    ? ({ model_unavailable: "Model niet beschikbaar", out_of_credits: "Gebruikslimiet bereikt", provider_auth: "Opnieuw inloggen nodig", provider_error: "Providerfout · open om te hervatten", restart_recovered: "Onderbroken · open om te hervatten", interrupted: "Onderbroken · open om te hervatten", out_of_memory: "Geheugenlimiet bereikt · open om te hervatten" }[session.statusReason || "provider_error"])
     : busy ? "Bezig · " + (latest || "Agent werkt aan je opdracht") : latest);
   const botDirectory = useContext(BotDirectoryContext);
   const drivingBotId = productBotId(session);
@@ -16090,6 +16145,10 @@ function PausedBanner({
   const title =
     reason === "restart_recovered"
       ? "Session recovered after restart"
+      : reason === "interrupted"
+      ? "Agent stopped"
+      : reason === "out_of_memory"
+      ? "Agent ran out of memory"
       : reason === "out_of_credits"
       ? "Build paused — out of credits"
       : reason === "provider_auth"
@@ -16102,6 +16161,10 @@ function PausedBanner({
   const detail =
     reason === "restart_recovered"
       ? session.statusDetail || "The previous turn was interrupted. Review the last output, then send a message to continue safely."
+      : reason === "interrupted"
+      ? session.statusDetail || "The agent process stopped before it finished. Continue to restart it."
+      : reason === "out_of_memory"
+      ? `The system stopped the agent because it used more memory than its limit allows${session.statusDetail ? ` (${session.statusDetail})` : ""}. Continue to restart it with the same limit.`
       : reason === "out_of_credits"
       ? "This app's build agent ran out of AI credits. Top up the wallet to resume the build."
       : reason === "provider_auth"
@@ -16122,7 +16185,7 @@ function PausedBanner({
           <div className="mt-0.5 text-foreground/70">{detail}</div>
           {err ? <div className="mt-1 text-destructive">{err}</div> : null}
         </div>
-        {reason === "restart_recovered" ? (
+        {reason === "restart_recovered" || reason === "interrupted" || reason === "out_of_memory" ? (
           <button
             type="button"
             onClick={() => void continueSession()}
@@ -16320,6 +16383,14 @@ function SkillSlashSuggest({
  * so the picker opens instantly and cannot show a spinner or a stale network
  * error.
  */
+/**
+ * A name the `@` picker offers that is not a bot: it inserts plain `@name `
+ * text. A thread's `@omg` is one (packages/protocol/src/threads.ts reads it).
+ */
+type PlainMention = { plain: true; id: string; name: string; hint?: string; icon?: string | null };
+type MentionOption = PersistentBot | PlainMention;
+const isPlainMention = (option: MentionOption): option is PlainMention => "plain" in option;
+
 function BotMentionSuggest({
   active,
   matches,
@@ -16329,10 +16400,10 @@ function BotMentionSuggest({
 }: {
   active: BotMentionState | null;
   /** Owned by SkillTextarea, because the arrow keys arrive at the textarea. */
-  matches: PersistentBot[];
+  matches: MentionOption[];
   selected: number;
   onHover: (index: number) => void;
-  onPick: (bot: PersistentBot) => void;
+  onPick: (option: MentionOption) => void;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -16375,18 +16446,25 @@ function BotMentionSuggest({
               idx === selected ? "bg-accent text-accent-foreground" : "hover:bg-accent/70",
             )}
           >
-            <BotMascot
-              shape={bot.shape}
-              colorway={bot.colorway}
-              size={16}
-              state="idle"
-              seed={bot.id.length}
-            />
+            {isPlainMention(bot) ? (
+              <img aria-hidden alt="" src={bot.icon || agentIconSrc("omg")} className="size-4 shrink-0 rounded" />
+            ) : (
+              <BotMascot
+                shape={bot.shape}
+                colorway={bot.colorway}
+                size={16}
+                state="idle"
+                seed={bot.id.length}
+              />
+            )}
             <span className="min-w-0 flex-1">
               <span className="block truncate font-medium">
                 <span className="font-mono text-primary">@</span>
                 {bot.name}
               </span>
+              {isPlainMention(bot) && bot.hint ? (
+                <span className="block truncate text-xs text-muted-foreground">{bot.hint}</span>
+              ) : null}
             </span>
           </button>
         ))}
@@ -16435,6 +16513,10 @@ type SkillTextareaProps = Omit<
   // Where the `#` session picker ranks from: siblings of this folder come
   // first, and the composer's own session is never offered to itself.
   mentionScope?: SessionMentionScope;
+  /** Plain `@` names offered before (or instead of) bots, e.g. a thread's omg. */
+  plainMentions?: readonly Omit<PlainMention, "plain">[];
+  /** Offer this box's bots after `@`. Off in a thread, where bots are not members. */
+  mentionBots?: boolean;
 };
 
 function SkillTextarea({
@@ -16447,6 +16529,8 @@ function SkillTextarea({
   scrollToEndNonce = 0,
   onMultilineChange,
   mentionScope,
+  plainMentions,
+  mentionBots = true,
   ...props
 }: SkillTextareaProps) {
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -16457,11 +16541,17 @@ function SkillTextarea({
   const [botMention, setBotMention] = useState<BotMentionState | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const botDirectory = useContext(BotDirectoryContext);
-  const mentionableBots = useMemo(() => Array.from(botDirectory.values()), [botDirectory]);
+  const mentionableBots = useMemo<MentionOption[]>(
+    () => [
+      ...(plainMentions ?? []).map((row) => ({ ...row, plain: true as const })),
+      ...(mentionBots ? Array.from(botDirectory.values()) : []),
+    ],
+    [botDirectory, plainMentions, mentionBots],
+  );
   // Owned here rather than in the popover: the arrow keys land on the
   // textarea, so the keyboard handler needs the list it is walking.
   const mentionMatches = useMemo(
-    () => (botMention ? (matchBots(mentionableBots, botMention.query) as PersistentBot[]) : []),
+    () => (botMention ? (matchBots(mentionableBots, botMention.query) as MentionOption[]) : []),
     [botMention, mentionableBots],
   );
   // A new query is a new list, so the highlight returns to the top. Keyed on
@@ -16615,10 +16705,18 @@ function SkillTextarea({
     });
   }
 
-  function pickBot(bot: PersistentBot) {
+  function pickBot(bot: MentionOption) {
     if (!botMention) return;
     const textarea = fieldRef.current;
-    const next = applyBotMention(value, botMention, bot);
+    const next = isPlainMention(bot)
+      ? (() => {
+          const replacement = `@${bot.name} `;
+          return {
+            value: value.slice(0, botMention.start) + replacement + value.slice(botMention.end),
+            cursor: botMention.start + replacement.length,
+          };
+        })()
+      : applyBotMention(value, botMention, bot);
     onValueChange(next.value);
     setBotMention(null);
     requestAnimationFrame(() => {
@@ -16782,6 +16880,128 @@ function SkillTextarea({
 // Shared growing field for the home and live-session chat composers. Keeping
 // the cap here prevents the two entry points from drifting back to different
 // viewport-relative heights, while SkillTextarea owns the resize/follow logic.
+/** A thread's `@` options as the picker draws them: omg's mark, the agent's icon, or the person's photo. */
+function threadPickerMentions(mentions: readonly ThreadMentionOption[] | undefined) {
+  return (mentions ?? THREAD_MENTIONS).map((row) => ({
+    id: row.id,
+    name: row.name,
+    hint: row.hint,
+    icon: row.kind === "agent" ? agentIconSrc(row.agent ?? "") : row.kind === "person" ? row.avatar || null : agentIconSrc("omg"),
+  }));
+}
+
+/**
+ * THE SESSION CHAT BAR, IN A THREAD. The same pill, field, mic and send
+ * button a session uses, so a thread does not grow a second-class input.
+ * `@` offers omg (and, later, the people here) instead of the box's bots.
+ * No attach button: a thread message is text.
+ */
+function ThreadComposerBar({ testId, placeholder, onSend, autoFocus, onTyping, mentions }: ThreadComposerProps) {
+  const [text, setText] = useState("");
+  useTypingReport(text, onTyping);
+  const pickerMentions = useMemo(() => threadPickerMentions(mentions), [mentions]);
+  const [sending, setSending] = useState(false);
+  const [multiline, setMultiline] = useState(false);
+  // The session composer's file plumbing: eager uploads, paste, drop, annotate, HD.
+  const files = useComposerAttachments({
+    endpoint: (att) => `/api/uploads?filename=${encodeURIComponent(att.name)}`,
+    disabled: sending,
+  });
+  const [error, setError] = useState<string | null>(null);
+  const send = async (override?: string) => {
+    const body = (override ?? text).trim();
+    const attached = files.attachments;
+    if ((!body && !attached.length) || sending) return;
+    setSending(true);
+    setError(null);
+    setText("");
+    try {
+      // Uploads started when the files were attached; this waits only for bytes still in flight.
+      const uploaded = attached.length ? await Promise.all(attached.map(files.resolveUpload)) : [];
+      await onSend(body, uploaded.map((row) => ({ path: row.path, name: row.name })));
+      files.setAttachments([]);
+      files.forgetAllUploads();
+    } catch (e) {
+      setText(body);
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSending(false);
+    }
+  };
+  return (
+    <div className={cn("px-4 py-3", files.draggingFiles && "bg-primary/8")} {...files.dropZoneProps}>
+      {files.fileInput}
+      {files.annotator}
+      <ComposerAttachmentChips
+        className="mb-2"
+        items={files.attachments.map((att) => ({ att }))}
+        disabled={sending}
+        onAnnotate={files.setAnnotatingId}
+        onRemove={files.removeAttachment}
+        onToggleHd={files.setAttachmentHd}
+      />
+      <div
+        className={cn(
+          "lfg-gfield relative z-[1] flex gap-1 rounded-3xl px-2 py-1.5 md:gap-0.5 md:px-1.5 md:py-1",
+          multiline ? "items-end" : "items-center",
+        )}
+      >
+        <Button
+          size="icon"
+          type="button"
+          variant={files.draggingFiles ? "brand-soft" : "tint"}
+          className="size-10 shrink-0 rounded-full md:size-8"
+          onClick={files.openFilePicker}
+          aria-label="Attach files"
+          title="Attach files"
+          disabled={sending}
+        >
+          <Plus className="size-4" />
+        </Button>
+        <ComposerTextarea
+          data-testid={testId}
+          onPaste={files.onPasteFiles}
+          autoFocus={autoFocus}
+          value={text}
+          onValueChange={setText}
+          onMultilineChange={setMultiline}
+          plainMentions={pickerMentions}
+          mentionBots={false}
+          onKeyDown={(e) => {
+            if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
+            e.preventDefault();
+            void send();
+          }}
+          placeholder={placeholder}
+          disabled={sending}
+          rows={1}
+          className="min-h-10 resize-none border-0 bg-transparent px-2 py-2 text-base leading-5 shadow-none placeholder:text-muted-foreground focus-visible:border-0 focus-visible:ring-0 md:min-h-8 md:py-1.5 md:text-sm"
+        />
+        <MicButton
+          className="size-10 shrink-0 rounded-full bg-foreground/[0.06] text-foreground/70 hover:bg-foreground/[0.12] hover:text-foreground md:size-8"
+          baseText={text}
+          onText={setText}
+          onInterim={setText}
+          onAutoSubmit={(said, base) => void send(base.trim() ? `${base.trimEnd()} ${said}` : said)}
+          onCancel={(base) => setText(base)}
+        />
+        {text.trim() || files.attachments.length || sending ? (
+          <ComposerSendButton
+            className="size-10 shrink-0 md:size-8"
+            sending={sending}
+            defaultMode="steer"
+            onSend={() => void send()}
+            onQueue={() => void send()}
+          />
+        ) : null}
+      </div>
+      {error ? <p className="mt-1 px-2 text-[12px] text-destructive">{error}</p> : null}
+    </div>
+  );
+}
+
+const renderThreadComposer = (props: ThreadComposerProps) => <ThreadComposerBar {...props} />;
+
 function ComposerTextarea({ className, ...props }: SkillTextareaProps) {
   return (
     <SkillTextarea
@@ -22742,6 +22962,8 @@ export type ResumableSession = {
   // labels it too; null for rows that predate the field, which fall back to
   // lastActivityAt exactly as the server's ORDER BY does.
   archivedAt?: number | null;
+  // Set when the session stopped because the kernel OOM killer ended it.
+  exitReason?: "out_of_memory";
 };
 
 // Facet counts + total returned alongside the resumable roster so the picker can
