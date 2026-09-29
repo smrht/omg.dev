@@ -1,6 +1,9 @@
 """Pinned, reviewed Agentbox migration. Invoked only by omg-safe-update."""
 import pathlib,json,hashlib,subprocess,os,sys,shutil,sqlite3,urllib.request
-h=pathlib.Path.home();w=h/'.cache/agent-tmp/omg-update-06143';live=h/'omg';private=h/'.local/lib/omg-private';new=private/'releases/06143-agentbox-20260929';backups=h/'.local/state/omg-update-backups/update-06143';old=private/'releases/06138-agentbox-20260928'
+h=pathlib.Path.home();w=h/'.cache/agent-tmp/omg-update-06143';live=h/'omg';private=h/'.local/lib/omg-private';new=private/'releases/06143-agentbox-20260929';backups=h/'.local/state/omg-update-backups/update-06143';old=private/'releases/06138-threads-grouplabel-20260928'
+codex=h/'.local/lib/codex-0159/node_modules/.bin/codex'
+dropin=h/'.config/systemd/user/omg.service.d/90-codex-06143.conf'
+codex_config=f'[Service]\nEnvironment=LFG_CODEX_PATH={codex}\n'
 def run(*args):subprocess.run(list(map(str,args)),check=True)
 def point(target):
  p=private/'current.next-06143';p.symlink_to(target);p.replace(private/'current')
@@ -17,6 +20,9 @@ def hashfile(p):
  return d.hexdigest()
 mode=sys.argv[1]
 if mode=='preflight':
+ assert (private/'current').resolve()==old,'private layer changed during preparation'
+ assert not dropin.exists() or dropin.read_text()==codex_config,'unreviewed Codex service override'
+ assert subprocess.check_output([str(codex),'--version'],text=True).strip()=='codex-cli 0.159.0'
  run('python3',new/'preserve.py',w/'candidate')
  run('python3',w/'state.py','check')
  (w/'failed-before.json').write_text(json.dumps(failed()))
@@ -24,7 +30,15 @@ if mode=='preflight':
 elif mode=='restart':
  version=json.loads((live/'package.json').read_text())['version']
  assert version in ['0.6.138','0.6.143']
- point(new if version=='0.6.143' else old)
+ target=new if version=='0.6.143' else old
+ run('python3',target/'preserve.py',live)
+ if version=='0.6.143':
+  assert dropin.read_text()==codex_config,'Codex override missing'
+ elif dropin.exists():
+  assert dropin.read_text()==codex_config,'refusing to remove another service override'
+  dropin.unlink()
+ point(target)
+ run('systemctl','--user','daemon-reload')
  run('systemctl','--user','restart','omg.service')
 elif mode=='health':
  with urllib.request.urlopen('http://127.0.0.1:8766/api/install?ready=1',timeout=15) as response: identity=json.load(response)
@@ -64,6 +78,12 @@ elif mode=='activate':
  (backup/'private-before.txt').write_text(str(old)+'\n')
  (backup/'safety-before.txt').write_text(str((h/'.local/lib/agentbox-isolation/current').resolve())+'\n')
  shutil.copy2(w/'before-state.json',backup/'setup-before.json')
+ # Only the restarted server selects the versioned CLI. Existing agent
+ # processes and the global binary/config/auth remain untouched.
+ assert not dropin.exists(),'new Codex drop-in appeared during preparation'
+ dropin.parent.mkdir(parents=True,exist_ok=True)
+ dropin.write_text(codex_config);dropin.chmod(0o600)
+ (backup/'codex-override.txt').write_text(str(dropin)+'\n')
  archive=w/'old-runtime';archive.mkdir()
  for item in sorted((w/'candidate').iterdir()):
   if item.name in ['agents','data'] or item.name.startswith('.env'):continue

@@ -8,7 +8,7 @@ De publieke bootstrap meldde nog 0.6.138, 18 sessies en 26 settings.
 
 Lees vóór staging de actuele private pointer, manifest, configuratie, service-
 instellingen, sessies, routines en Computer-processen opnieuw. `deploy.py` verwacht
-`06138-agentbox-20260928`; een nieuwere live customization moet eerst in de
+`06138-threads-grouplabel-20260928`; een nieuwere live customization moet eerst in de
 bron worden opgenomen. Neem de actuele safety wrapper en pilot checker over,
 behoud hun wijzigingen en voeg alleen 0.6.143 toe aan de ondersteunde versies.
 

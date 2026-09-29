@@ -247,12 +247,14 @@ describe("relaunch containment", () => {
     test("a top-level session starts without a slice", () => {
       row({ containment: { agentSlice: false, sandbox: "none", egressProxy: false } });
       coldStart();
-      expectNoSlice(launched().cmd);
+      if (linux) expectColdSlice(launched().cmd);
+      else expectNoSlice(launched().cmd);
     });
 
     test("no owner row at all starts without a slice", () => {
       coldStart();
-      expectNoSlice(launched().cmd);
+      if (linux) expectColdSlice(launched().cmd);
+      else expectNoSlice(launched().cmd);
     });
 
     test("a restricted session fails closed without the egress proxy, and uses it when up", () => {

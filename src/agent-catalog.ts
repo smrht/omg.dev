@@ -41,6 +41,7 @@ export type SkillCatalogItem = {
 // 2026-09-24. They only order the picker, newest first. Add a row when a new
 // pinned id joins the list; an alias takes the newest date in its family.
 const CLAUDE_RELEASES: Record<string, string> = {
+  "claude-sonnet-5-5": "2026-09-28",
   "claude-opus-5-5": "2026-09-21",
   "claude-fable-5-1": "2026-08-28",
   "claude-opus-5": "2026-07-24",
@@ -50,9 +51,23 @@ const CLAUDE_RELEASES: Record<string, string> = {
   "claude-haiku-4-5-20251001": "2025-10-15",
 };
 
+// What each bare alias resolves to today (measured 2026-09-28 on claude
+// 2.1.284 with `claude -p --model <alias>`). An alias sorts on the release it
+// actually lands on, not on the newest pin in its family: `sonnet` still lands
+// on Sonnet 5 while the Sonnet 5.5 rollout runs, so it must not jump above
+// Opus 5.5 just because claude-sonnet-5-5 is pinned.
+const CLAUDE_ALIAS_TARGETS: Record<string, string> = {
+  opus: "claude-opus-5-5",
+  fable: "claude-fable-5-1",
+  sonnet: "claude-sonnet-5",
+  haiku: "claude-haiku-4-5-20251001",
+};
+
 function claudeReleaseDate(model: string): string | null {
   if (CLAUDE_RELEASES[model]) return CLAUDE_RELEASES[model];
   if (!/^(opus|fable|sonnet|haiku)$/.test(model)) return null;
+  const target = CLAUDE_ALIAS_TARGETS[model];
+  if (target && CLAUDE_RELEASES[target]) return CLAUDE_RELEASES[target];
   const family = Object.keys(CLAUDE_RELEASES).filter((id) => id.startsWith(`claude-${model}-`));
   return family.map((id) => CLAUDE_RELEASES[id]!).sort().at(-1) ?? null;
 }
@@ -69,10 +84,19 @@ export function sortClaudeModelsByRelease(models: readonly string[]): string[] {
     .map((item) => item.model);
 }
 
-// Agentbox: aliases only, one row per family. `opus` and `fable` already land
-// on 5.5 and 5.1 (claude 2.1.280); the pinned ids only produced a second row
-// per family. The picker shows the release via CLAUDE_ALIAS_LABELS.
-export const CLAUDE_MODELS: string[] = sortClaudeModelsByRelease(["opus", "fable", "sonnet", "haiku"]);
+// Agentbox: one row per family alias, plus `claude-sonnet-5-5` (28-09-2026).
+// Claude Code 2.1.284 knows Sonnet 5.5, but Anthropic's server-side model
+// config still resolves `sonnet` to Sonnet 5, so the pin is the only way to
+// reach 5.5 from the picker. When `claude -p --model sonnet` reports
+// claude-sonnet-5-5, drop the pin and bump CLAUDE_ALIAS_LABELS.sonnet instead.
+// The picker shows the release via CLAUDE_ALIAS_LABELS / claudeModelLabel.
+export const CLAUDE_MODELS: string[] = sortClaudeModelsByRelease([
+  "claude-sonnet-5-5",
+  "opus",
+  "fable",
+  "sonnet",
+  "haiku",
+]);
 export const CODEX_MODELS: string[] = [
   "gpt-6-astra",
   "gpt-6-sol",

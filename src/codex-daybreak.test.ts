@@ -802,7 +802,7 @@ describe("CodexAppServerClient", () => {
 describe("catalog carries discovered capability metadata", () => {
   const originalData = PATHS.data;
   function withCache(providers: Record<string, unknown>, run: () => Promise<void>): Promise<void> {
-    const root = join("/var/folders/rh/knlyzddx7n3bmksk2w0snhs00000gn/T/opencode", `daybreak-catalog-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const root = join(require("node:os").tmpdir(), `daybreak-catalog-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     mkdirSync(root, { recursive: true });
     return (async () => {
       await Bun.write(
