@@ -63,8 +63,10 @@ describe("omg.dev runtime capabilities", () => {
     // Headroom is deliberate: a line budget the contract already sits flush
     // against turns every future edit into a choice about which bullet to
     // delete, which is how shipping was lost in the first place.
-    expect(omgRuntimeContract().split("\n").length).toBeLessThanOrEqual(12);
-    expect(omgRuntimeContract().length).toBeLessThan(2_400);
+    // The private Agentbox storage/containment instruction adds one bounded
+    // bullet to upstream's contract. Keep it rather than dropping safety text.
+    expect(omgRuntimeContract().split("\n").length).toBeLessThanOrEqual(14);
+    expect(omgRuntimeContract().length).toBeLessThan(2_800);
   });
 
   test("does not duplicate the contract", () => {

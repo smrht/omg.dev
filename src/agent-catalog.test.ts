@@ -374,11 +374,11 @@ describe("Codex model catalog", () => {
     expect(out).toContain("gpt-6.1-luna");
   });
 
-  test("offers a new release only through discovery, never from the static fallback", () => {
-    // Entitlement comes from the account's live discovery/cache. The static
-    // list and its default must not gain models the box never discovered.
+  test("keeps Daybreak account-driven while offering the upstream Sol 6.1 fallback", () => {
+    // v0.6.145 adds Sol 6.1 to the bundled runtime's static catalog.
+    // Daybreak access still comes from account discovery, never a static alias.
     expect(CODEX_MODELS).not.toContain("gpt-daybreak-blue-latest");
-    expect(CODEX_MODELS).not.toContain("gpt-6.1-sol");
+    expect(CODEX_MODELS).toContain("gpt-6.1-sol");
     expect(MODEL_OPTIONS.codex.defaultModel).toBe("gpt-5.6-sol");
     expect(curateCodexModels(["gpt-5.6-sol"])).not.toContain("gpt-daybreak-blue-latest");
   });
@@ -390,11 +390,11 @@ describe("Codex model catalog", () => {
   });
 
   test.each(["codex", "codex-aisdk"] as const)(
-    "%s offers Astra while Sol remains the default",
+    "%s offers Sol 6.1 first while preserving the existing default",
     (key) => {
       const item = listModelCatalog([codingAgent(key, true)]).find((entry) => entry.key === key);
 
-      expect(item?.models[0]).toBe("gpt-6-astra");
+      expect(item?.models[0]).toBe("gpt-6.1-sol");
       expect(item?.models).toContain("gpt-6-astra");
       expect(item?.defaultModel).toBe("gpt-5.6-sol");
     },
