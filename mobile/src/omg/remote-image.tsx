@@ -25,6 +25,7 @@ import {
   Image,
   Modal,
   PanResponder,
+  Platform,
   Pressable,
   StatusBar,
   useWindowDimensions,
@@ -47,6 +48,8 @@ import { useOmg } from "./provider";
 import { Text } from "./text";
 import { ImageGalleryContext, ImageGalleryRow, type ImageRect } from "./image-gallery-context";
 import { galleryImageId, gallerySwipe } from "./image-gallery-data";
+import { saveImage } from "./image-save";
+import { MediaMenu, SaveMenu } from "./media-menu";
 
 type Load =
   | { status: "loading" }
@@ -149,6 +152,7 @@ export function AuthenticatedImage({
   fallback,
   style,
   accessibilityLabel,
+  saveable = true,
 }: {
   path: string;
   maxWidth: number;
@@ -170,6 +174,8 @@ export function AuthenticatedImage({
   fallback: React.ReactNode;
   style?: StyleProp<ImageStyle>;
   accessibilityLabel: string;
+  /** Press and hold to save. Off for a video poster: its path is the video. */
+  saveable?: boolean;
 }) {
   const load = useAuthenticatedImage(path);
 
@@ -195,7 +201,7 @@ export function AuthenticatedImage({
     );
   }
 
-  return <TappableImage path={path} uri={load.uri} {...{ width, height, radius, placeholderColor, style, accessibilityLabel }} />;
+  return <TappableImage path={path} uri={load.uri} {...{ width, height, radius, placeholderColor, style, accessibilityLabel, saveable }} />;
 }
 
 /**
@@ -238,6 +244,7 @@ function TappableImage({
   placeholderColor,
   style,
   accessibilityLabel,
+  saveable,
 }: {
   path: string;
   uri: string;
@@ -247,7 +254,10 @@ function TappableImage({
   placeholderColor: string;
   style?: StyleProp<ImageStyle>;
   accessibilityLabel: string;
+  saveable: boolean;
 }) {
+  const { client } = useOmg();
+  const save = client && saveable ? () => saveImage(p => client.transport.fetch(p), path) : undefined;
   const gallery = useContext(ImageGalleryContext);
   const rowKey = useContext(ImageGalleryRow);
   const galleryId = rowKey ? galleryImageId(rowKey, path) : null;
@@ -287,10 +297,9 @@ function TappableImage({
     });
   };
 
-  return (
-    <>
-      {/* `collapsable={false}`: without it this View is optimised out of the
-          native hierarchy and there is nothing left to measure. */}
+  // `collapsable={false}`: without it this View is optimised out of the
+  // native hierarchy and there is nothing left to measure.
+  const tile = (
       <View ref={thumb} collapsable={false}>
         <Pressable
           onPress={open}
@@ -310,10 +319,16 @@ function TappableImage({
           />
         </Pressable>
       </View>
+  );
+
+  return (
+    <>
+      {save ? <MediaMenu save={save} noun="image" testID="image">{tile}</MediaMenu> : tile}
 
       {origin ? (
         <ImageViewer
           uri={uri}
+          onSave={save}
           origin={origin}
           sourceRadius={radius}
           accessibilityLabel={accessibilityLabel}
@@ -347,8 +362,11 @@ export function ImageViewer({
   position = 1,
   count = 1,
   error = false,
+  onSave,
 }: {
   uri: string | null;
+  /** Press and hold opens the share sheet on the original. iOS only. */
+  onSave?: () => Promise<void>;
   imageId?: string;
   position?: number;
   count?: number;
@@ -364,6 +382,22 @@ export function ImageViewer({
   const screen = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const [ratio, setRatio] = useState<number | null>(null);
+  const [saving, setSaving] = useState<"idle" | "busy" | "failed">("idle");
+  const mountedRef = useRef(true);
+  // Read through a ref: a caller passes a fresh closure each render, and a new
+  // one must not rebuild the PanResponder in the middle of a gesture.
+  const onSaveRef = useRef(onSave);
+  onSaveRef.current = onSave;
+  const save = useCallback(() => {
+    const run = onSaveRef.current;
+    if (!run || Platform.OS !== "ios") return;
+    setSaving("busy");
+    run()
+      .then(() => { if (mountedRef.current) setSaving("idle"); })
+      .catch(() => { if (mountedRef.current) setSaving("failed"); });
+  }, []);
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
+  useEffect(() => { setSaving("idle"); }, [imageId]);
 
   useEffect(() => {
     let live = true;
@@ -581,6 +615,16 @@ export function ImageViewer({
     };
   });
 
+  const picture = uri ? <Image
+    source={{ uri }}
+    accessibilityLabel={accessibilityLabel}
+    accessible
+    // `contain`, so a tall screenshot is readable end to end rather than
+    // cropped to the middle of itself.
+    resizeMode="contain"
+    style={{ width: target.width, height: target.height }}
+  /> : null;
+
   const backdropStyle = useAnimatedStyle(() => {
     const pull = Math.min(1, Math.abs(dragY.value) / 320);
     return { opacity: progress.value * (1 - pull * 0.85) };
@@ -609,13 +653,7 @@ export function ImageViewer({
             backdropStyle,
           ]}
         />
-        {uri ? <Reanimated.Image
-          source={{ uri }}
-          accessibilityLabel={accessibilityLabel}
-          accessible
-          // `contain`, so a tall screenshot is readable end to end rather than
-          // cropped to the middle of itself.
-          resizeMode="contain"
+        {uri ? <Reanimated.View
           style={[
             {
               position: "absolute",
@@ -623,17 +661,32 @@ export function ImageViewer({
               top: target.y,
               width: target.width,
               height: target.height,
+              overflow: "hidden",
             },
             imageStyle,
           ]}
-        /> : <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+        >
+          {/* The same native menu the transcript tile and a video offer. The
+              animated frame above carries the open, drag and zoom transforms,
+              so the menu's preview is the picture itself. */}
+          {onSave && Platform.OS === "ios" ? <SaveMenu onSave={save}>{picture}</SaveMenu> : picture}
+        </Reanimated.View> : <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
           <Text style={{ color: "white" }}>{error ? "Image unavailable" : "Loading image…"}</Text>
         </View>}
       </View>
-      <View pointerEvents="box-none" style={{ position: "absolute", bottom: Math.max(insets.bottom, 16) + 12, left: 0, right: 0, alignItems: "center" }}>
+      <View pointerEvents="box-none" style={{ position: "absolute", bottom: Math.max(insets.bottom, 16) + 12, left: 0, right: 0, alignItems: "center", gap: 10 }}>
+        {saving === "idle" ? null : <Pressable accessibilityRole="button" disabled={saving === "busy"} onPress={save} testID="image-viewer-save-status"
+          accessibilityLabel={saving === "busy" ? "Preparing image" : "Could not download. Try again"}
+          style={{ borderRadius: 999, paddingHorizontal: 14, paddingVertical: 7, backgroundColor: "rgba(32,32,32,0.85)" }}>
+          <Text style={{ color: "white", fontSize: 13 }}>{saving === "busy" ? "Preparing image…" : "Could not download. Try again"}</Text>
+        </Pressable>}
         <View accessible accessibilityRole="adjustable" accessibilityLabel={`Image ${position} of ${count}`}
-          accessibilityActions={[{ name: "increment", label: "Next image" }, { name: "decrement", label: "Previous image" }]}
-          onAccessibilityAction={event => turnPage(event.nativeEvent.actionName === "increment" ? 1 : -1)}
+          accessibilityActions={[{ name: "increment", label: "Next image" }, { name: "decrement", label: "Previous image" }, ...(onSave && Platform.OS === "ios" ? [{ name: "save", label: "Save or Share" }] : [])]}
+          onAccessibilityAction={event => {
+            const name = event.nativeEvent.actionName;
+            if (name === "save") save();
+            else turnPage(name === "increment" ? 1 : -1);
+          }}
           style={{ borderRadius: 999, paddingHorizontal: 16, paddingVertical: 9, backgroundColor: "rgba(32,32,32,0.85)", borderWidth: 1, borderColor: "rgba(255,255,255,0.14)" }}>
           <Text style={{ color: "white", fontSize: 14, fontWeight: "600", fontVariant: ["tabular-nums"] }}>{position} / {count}</Text>
         </View>

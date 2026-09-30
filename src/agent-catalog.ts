@@ -1,4 +1,4 @@
-import { OMG_MODELS, OMG_THINKING_LEVELS_BY_MODEL, omgThinkingLevels } from "./omg-models.ts";
+import { OMG_DEFAULT_MODEL, OMG_MODELS, OMG_THINKING_LEVELS_BY_MODEL, omgThinkingLevels } from "./omg-models.ts";
 export { OMG_MODELS } from "./omg-models.ts";
 
 import type { Agent } from "./agents/registry.ts";
@@ -98,6 +98,7 @@ export const CLAUDE_MODELS: string[] = sortClaudeModelsByRelease([
   "haiku",
 ]);
 export const CODEX_MODELS: string[] = [
+  "gpt-6.1-sol",
   "gpt-6-astra",
   "gpt-6-sol",
   "gpt-6-luna",
@@ -115,6 +116,7 @@ export const CODEX_MODELS: string[] = [
 // reasons as CLAUDE_MODELS.
 export const AISDK_MODELS: string[] = [...CLAUDE_MODELS];
 export const CODEX_AISDK_MODELS: string[] = [
+  "gpt-6.1-sol",
   "gpt-6-astra",
   "gpt-6-sol",
   "gpt-6-luna",
@@ -357,7 +359,7 @@ export const MODEL_OPTIONS: Record<CodingAgentKind, { defaultModel: string; mode
   devin: { defaultModel: "adaptive", models: DEVIN_MODELS },
   hermes: { defaultModel: "nousresearch/hermes-4-405b", models: HERMES_MODELS },
   opencode: { defaultModel: "opencode/nemotron-3.5-lightning-free", models: OPENCODE_MODELS },
-  omg: { defaultModel: OMG_MODELS[0]!, models: OMG_MODELS },
+  omg: { defaultModel: OMG_DEFAULT_MODEL, models: OMG_MODELS },
   jcode: { defaultModel: "auto", models: JCODE_MODELS },
   pi: { defaultModel: "sonnet", models: PI_MODELS },
   copilot: { defaultModel: "claude-sonnet-4.5", models: COPILOT_MODELS },

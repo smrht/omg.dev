@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+  cacheProjectFilter,
   NO_PROJECT_FILTER,
+  PROJECT_FILTER_STORAGE_KEY,
+  readCachedProjectFilter,
   projectFilterAfterPress,
   resolveInitialProjectFilter,
   NO_PROJECT_FILTER_LABEL,
@@ -62,41 +65,21 @@ describe("projectFilterAfterPress", () => {
 describe("resolveInitialProjectFilter", () => {
   const options = [NO_PROJECT_FILTER, "duet", "lfg", "vibes"];
 
-  test("keeps a remembered folder that still exists", () => {
+  test("keeps a folder picked in this visit that still exists", () => {
     expect(resolveInitialProjectFilter({ saved: "lfg", options })).toBe("lfg");
     expect(resolveInitialProjectFilter({ saved: NO_PROJECT_FILTER, options })).toBe(
       NO_PROJECT_FILTER,
     );
   });
 
-  test("never parks on all, because the rail has no pill for it", () => {
-    expect(resolveInitialProjectFilter({ saved: "__all", options })).toBe("duet");
+  test("an unscoped list opens on no project, never on a folder nobody picked", () => {
+    // A new chat from Home goes where this points. Opening on a folder sent a
+    // first request into an old test repo (walkthrough 2026-09-29).
+    expect(resolveInitialProjectFilter({ saved: "__all", options })).toBe(NO_PROJECT_FILTER);
   });
 
-  test("a folder that has gone away falls to the preferred one", () => {
-    expect(
-      resolveInitialProjectFilter({ saved: "deleted", options, preferred: "vibes" }),
-    ).toBe("vibes");
-  });
-
-  test("a preferred folder that is not listed is ignored", () => {
-    expect(
-      resolveInitialProjectFilter({ saved: "__all", options, preferred: "gone" }),
-    ).toBe("duet");
-  });
-
-  test("prefers a real folder over the no-project scope", () => {
-    // That scope is for starting something new, not somewhere to be parked
-    // on by default.
-    expect(resolveInitialProjectFilter({ saved: "__all", options })).not.toBe(
-      NO_PROJECT_FILTER,
-    );
-  });
-
-  test("a box with only the no-project scope settles there", () => {
-    expect(
-      resolveInitialProjectFilter({ saved: "__all", options: [NO_PROJECT_FILTER] }),
-    ).toBe(NO_PROJECT_FILTER);
+  test("a folder that has gone away falls to no project", () => {
+    expect(resolveInitialProjectFilter({ saved: "deleted", options })).toBe(NO_PROJECT_FILTER);
   });
 
   test("with nothing to choose from, it changes nothing", () => {
@@ -108,4 +91,55 @@ describe("resolveInitialProjectFilter", () => {
   });
 });
 
-test("overview retains explicit all-projects scope across refreshes", () => { expect(resolveInitialProjectFilter({saved:"__all", options:["one","two"], preferred:"one", allowAll:true})).toBe("__all"); });
+test("overview retains explicit all-projects scope across refreshes", () => {
+  expect(
+    resolveInitialProjectFilter({ saved: "__all", options: ["one", "two"], preferred: "one", allowAll: true }),
+  ).toBe("__all");
+});
+
+describe("the remembered folder pick", () => {
+  function memoryStorage() {
+    const data = new Map<string, string>();
+    return {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => void data.set(key, value),
+      data,
+    };
+  }
+
+  test("an existing raw localStorage string is read back unchanged, on every read", () => {
+    // The pick is a sticky preference: no expiry, no re-parse, no drift
+    // between reads. It must survive the app update that changed the shape.
+    const storage = memoryStorage();
+    storage.setItem(PROJECT_FILTER_STORAGE_KEY, "duet");
+    expect(readCachedProjectFilter(storage)).toBe("duet");
+    expect(readCachedProjectFilter(storage)).toBe("duet");
+    expect(readCachedProjectFilter(storage)).toBe("duet");
+  });
+
+  test("the all-projects sentinel persists the same way as a folder", () => {
+    const storage = memoryStorage();
+    storage.setItem(PROJECT_FILTER_STORAGE_KEY, "__all");
+    expect(readCachedProjectFilter(storage)).toBe("__all");
+    expect(readCachedProjectFilter(storage)).toBe("__all");
+  });
+
+  test("the no-project scope is a value like any other, not a fallback", () => {
+    const storage = memoryStorage();
+    storage.setItem(PROJECT_FILTER_STORAGE_KEY, NO_PROJECT_FILTER);
+    expect(readCachedProjectFilter(storage)).toBe(NO_PROJECT_FILTER);
+  });
+
+  test("nothing stored, or no storage at all, reads as all projects", () => {
+    expect(readCachedProjectFilter(memoryStorage())).toBe("__all");
+    expect(readCachedProjectFilter(null)).toBe("__all");
+  });
+
+  test("a pick is written as a raw string and survives repeated reads", () => {
+    const storage = memoryStorage();
+    cacheProjectFilter("expo-go-probe", storage);
+    expect(storage.getItem(PROJECT_FILTER_STORAGE_KEY)).toBe("expo-go-probe");
+    expect(readCachedProjectFilter(storage)).toBe("expo-go-probe");
+    expect(readCachedProjectFilter(storage)).toBe("expo-go-probe");
+  });
+});

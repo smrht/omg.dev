@@ -2,6 +2,55 @@
 
 Recent product updates and deployment notes.
 
+## September 30, 2026 - Simulator auto-start, iOS crash fixes and Threads on Home (v0.6.150)
+
+- Expo preview card: the Simulator level can start by itself when you open the card. This option is off for now. While all simulators are busy, the card shows your place in line and a rough wait, such as "About 3 min".
+- When the Simulator level is available, the agent tells you in one sentence to tap Simulator on the card.
+- iPhone app: four TestFlight crash causes are fixed in the app code, including a crash while text draws after a reload. On build 84 and older, messages in the transcript no longer use the menu wrapper that caused three more crashes; a new build is needed for the full fix.
+- iPhone app: Home shows up to five threads as one-line titles, with See more in the Threads header. Titles use regular weight, so bold can mean unread.
+- iPhone app: the session list opens on your own sessions and shares the owner filter with the Computer, also on a shared Computer.
+- Connectors: signing in to Meta Ads with the pasted address no longer leaves a blank popup.
+- The agent list shows the installed version of each coding agent.
+
+## September 30, 2026 - GPT-6 Luna is the default omg agent model (v0.6.149)
+
+- New omg agent sessions use GPT-6 Luna when no model is picked. This includes the first build after signup and scheduled tasks.
+- GPT-6 Luna reads attached images and screenshots.
+- On a first-run app build, it finished in about 5 minutes for about $0.02, and its screens matched the design more closely than DeepSeek V4 Flash.
+- DeepSeek V4 Flash stays in the model list. A model that you picked stays picked.
+- In the iPhone app, hold a reply to open Copy and Select text, the same menu as a sent message.
+
+## September 30, 2026 - Hosted models see attached images (v0.6.148)
+
+- The omg agent on a Computer now receives attached images and screenshots with image-capable models, such as GLM 5.3 Flash, Qwen 3.7 Plus, MiniMax M3, Grok 4.7, Claude, and GPT-5.6. Before, every model answered as if no image was attached.
+- Text-only models, such as DeepSeek V4 Flash 0731, stay text-only, and the agent is told it cannot see images.
+- New Expo projects keep one home screen. `bun run typecheck` fails when a second file answers `/` or when screens are in a root `app/` folder that Expo Router ignores. Before, an app could keep showing the template to-do screen.
+
+## September 30, 2026 - Open on the limit sheet shows the chat (v0.6.147)
+
+- When all agents are in use, Open on the limit sheet now shows the chat even when it is in another project. Home switches to that chat's project first.
+
+## September 30, 2026 - The preview shows when the app is still being built (v0.6.146)
+
+- While the agent works, a small amber dot pulses on the app preview card. The preview can still change.
+- When the agent finishes, the dot turns into a green check for a moment, then goes away.
+- Hover the dot on the web, or use VoiceOver in the app, to read "Still building, updates live". With reduced motion, the dot does not move.
+
+## September 30, 2026 - Codex runtime 0.159.2 (v0.6.145)
+
+- Codex sessions use Codex CLI 0.159.2. The previous bundled runtime was 0.153.4.
+- The model list adds GPT-6.1 Sol, GPT-6 Sol, and GPT-6 Luna. Fast mode works for these models.
+- The default Codex model stays GPT-5.6 Sol.
+
+## September 29, 2026 - New chats start with no project, and the preview keeps up (v0.6.144)
+
+- A new chat from Home starts with no project. A folder you pick stays picked for this visit only, so an old folder no longer decides where a new request runs. The iPhone app does the same.
+- On a phone, sending from Home opens the new chat at once.
+- The inline app preview reloads when the agent finishes a turn, so it shows the agent's latest changes.
+- When all agents are in use on an omg.dev Computer, the limit sheet can list the live chats, with Open and Close for each. The sheet shows the list after the next omg.dev web update.
+- For a new phone app, the agent's final message offers "Create a free Expo account" when the Computer is not signed in to Expo.
+- In the iPhone app, you can long-press an image to save or share it, and the image viewer has the same menu.
+
 ## September 29, 2026 - Tailnet access needs sign-in (v0.6.143)
 
 - A new setting, `LFG_TAILNET_PORT`, opens a second local port for `tailscale serve`. Point `tailscale serve` at it to require sign-in for tailnet devices.

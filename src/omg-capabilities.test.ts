@@ -353,12 +353,47 @@ describe("first-run envelope", () => {
     expect(phone).toBeGreaterThan(web);
   });
 
+  test("the final message of a phone app carries the Expo account offer", async () => {
+    const { withFirstRunEnvelope } = await import("./omg-capabilities.ts");
+    const wrapped = withFirstRunEnvelope("Build a mobile app for my family", { seesImages: true })!;
+    const rule = wrapped.split("\n").find((line) => line.startsWith("- Final message for a phone app"));
+    expect(rule).toBeDefined();
+    expect(rule).toContain("`WARNING: Expo CLI is not signed in`");
+    expect(rule).toContain("end your final message with this offer");
+    expect(rule).toContain("Create a free Expo account");
+    expect(rule).toContain(`then "Create free account" (or "I have one")`);
+    expect(rule).toContain("Do not tell the user to try it in Expo Go");
+    // The rule precedes the user's request, so it applies to the whole session.
+    expect(wrapped.indexOf(rule!)).toBeLessThan(wrapped.indexOf("Build a mobile app for my family"));
+  });
+
+  test("the omg-app-builder skill tells the agent to end with the Expo account offer", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const skill = await readFile(new URL("../agents/skills/omg-app-builder/SKILL.md", import.meta.url), "utf8");
+    expect(skill).toContain("Your final message must also carry that offer while Expo CLI is not signed in");
+    expect(skill).toContain('Never end with "try it on your phone via Expo Go"');
+  });
+
+  test("a phone app first run is told to replace the template home screen", async () => {
+    // A DeepSeek build put its screens in app/(tabs)/index.tsx and "/" kept
+    // showing the template to-do app from src/app/index.tsx.
+    const { withFirstRunEnvelope } = await import("./omg-capabilities.ts");
+    const wrapped = withFirstRunEnvelope("Build a habit tracker app", { seesImages: false })!;
+    expect(wrapped).toContain("Replace the template home screen in `src/app/index.tsx`; do not add a second index route");
+  });
+
   test("the image rule is only for models that cannot see", async () => {
     const { withFirstRunEnvelope, modelSeesImages } = await import("./omg-capabilities.ts");
     expect(withFirstRunEnvelope("x", { seesImages: true })).not.toContain("You cannot see images");
     expect(withFirstRunEnvelope("x", { seesImages: true })).not.toContain("design image");
     expect(modelSeesImages("omg/deepseek/deepseek-v4-flash-0731")).toBe(false);
+    expect(modelSeesImages("omg/openai/gpt-6-luna")).toBe(true);
     expect(modelSeesImages("omg/deepseek/deepseek-v4-pro")).toBe(false);
+    // Hosted models follow the catalog that declares image input to OpenCode.
+    expect(modelSeesImages("omg/z-ai/glm-5.3-flash")).toBe(true);
+    expect(modelSeesImages("omg/openai/gpt-5.6-luna")).toBe(true);
+    expect(modelSeesImages("omg/z-ai/glm-5.2")).toBe(false);
+    expect(modelSeesImages("omg/qwen/qwen3-coder-next")).toBe(false);
     expect(modelSeesImages("opus")).toBe(true);
     expect(modelSeesImages(undefined)).toBe(true);
     expect(withFirstRunEnvelope("", { seesImages: true })).toBe("");

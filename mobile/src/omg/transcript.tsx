@@ -43,7 +43,6 @@ import { HumanMessageFrame } from "./human-message-frame";
 import { Sheet } from "./sheet";
 import { SendOriginContext, useSendEntrance } from "./send-motion";
 import * as Clipboard from "expo-clipboard";
-import MenuView, { type MenuAction } from "@expo/ui/community/menu";
 import * as Haptics from "expo-haptics";
 import type { AndroidSymbol, SFSymbol } from "expo-symbols";
 import { memo, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -75,7 +74,8 @@ import { workLabel } from "./work-label";
 import { WorkingIndicator } from "./working-indicator";
 import { stampTime } from "./format";
 import { CodeBlock, useBodyText } from "./markdown";
-import { TranscriptBody } from "./transcript-body";
+import { TranscriptBody, VirtualBoundary } from "./transcript-body";
+import { MessageTextActions, ReplyTextActions } from "./message-text-actions";
 import {
   parseMessageAttachments,
   type MessageAttachment,
@@ -736,10 +736,11 @@ export function TranscriptEntry({
   // header for that same "shipped code over spec.md" note.
   if (bot) {
     return (
-      <View
+      <VirtualBoundary enabled={virtualize}>
+      <ReplyTextActions
+        text={message.text ?? ""}
+        widthFraction={0.84}
         style={{
-          alignSelf: "flex-start",
-          maxWidth: "84%",
           borderRadius: radius.xl,
           borderWidth: StyleSheet.hairlineWidth,
           borderColor: colors.border,
@@ -748,8 +749,9 @@ export function TranscriptEntry({
           paddingVertical: 10,
         }}
       >
-        <TranscriptBody text={message.text ?? ""} streaming={message.streaming} virtualize={virtualize} />
-      </View>
+        <TranscriptBody text={message.text ?? ""} streaming={message.streaming} virtualize={false} inHoldMenu />
+      </ReplyTextActions>
+      </VirtualBoundary>
     );
   }
 
@@ -757,7 +759,12 @@ export function TranscriptEntry({
   // tint — exactly like the web transcript.
   return (
     <View style={{ alignSelf: "stretch", paddingHorizontal: space.xs }}>
-      <TranscriptBody text={message.text ?? ""} streaming={message.streaming} virtualize={virtualize} />
+      {/* The virtual boundary sits OUTSIDE the hold menu; see VirtualBoundary. */}
+      <VirtualBoundary enabled={virtualize}>
+        <ReplyTextActions text={message.text ?? ""}>
+          <TranscriptBody text={message.text ?? ""} streaming={message.streaming} virtualize={false} inHoldMenu />
+        </ReplyTextActions>
+      </VirtualBoundary>
     </View>
   );
 }
@@ -1676,7 +1683,7 @@ function SystemLine({ system, raw }: { system: SystemMessage; raw: string }) {
 export function UserMessage({ message, firstOfRun, lastOfRun }: { message: Entry; firstOfRun?: boolean; lastOfRun?: boolean }) {
   const identity = useContext(ChatIdentityContext);
   const sender = otherMessageSender(message, identity);
-  const { colors, type, space, isDark } = useTheme();
+  const { colors, type, space } = useTheme();
   const body = useBodyText();
   const sendEntrance = useSendEntrance();
   const [copied, setCopied] = useState(false);
@@ -1714,7 +1721,6 @@ export function UserMessage({ message, firstOfRun, lastOfRun }: { message: Entry
     if (copyTimer.current) clearTimeout(copyTimer.current);
     copyTimer.current = setTimeout(() => setCopied(false), 1500);
   };
-  const bubbleActions: MenuAction[] = [{ id: "copy", title: "Copy", image: "doc.on.doc" }];
 
   const [expanded, setExpanded] = useState(false);
 
@@ -1800,18 +1806,10 @@ export function UserMessage({ message, firstOfRun, lastOfRun }: { message: Entry
           entering={sender ? undefined : sendEntrance.entering}
           style={[settle, sender ? undefined : sendEntrance.bubbleStyle, { alignSelf: sender ? "flex-start" : "flex-end", maxWidth: "85%" }]}
         >
-        <MenuView
-          actions={bubbleActions}
-          shouldOpenOnLongPress
-          colorScheme={isDark ? "dark" : "light"}
-          onPressAction={({ nativeEvent }) => {
-            if (nativeEvent.event === "copy") copy();
-          }}
-          style={{ alignSelf: "stretch" }}
-        >
+        <MessageTextActions text={rawText} onCopy={copy}>
         <View
           accessibilityRole="text"
-          accessibilityHint="Press and hold to copy"
+          accessibilityHint="Press and hold for Copy and Select text"
           /**
            * SIZED TO ITS TEXT, and on the RIGHT. A sent message stretched to
            * the full column looked like another section of the page rather
@@ -1881,7 +1879,7 @@ export function UserMessage({ message, firstOfRun, lastOfRun }: { message: Entry
           ) : null}
           </View>
         </View>
-        </MenuView>
+        </MessageTextActions>
         </Reanimated.View>
       ) : null}
       <View

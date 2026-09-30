@@ -817,9 +817,11 @@ export function SectionHeader({
           hitSlop={8}
           accessibilityRole="button"
           accessibilityLabel={actionAccessibilityLabel ?? actionLabel}
-          style={({ pressed }) => ({ opacity: pressed ? 0.5 : 1 })}
+          style={({ pressed }) => ({ flexDirection: "row", alignItems: "center", gap: 2, opacity: pressed ? 0.5 : 1 })}
         >
           <Text style={{ ...type.subhead, color: colors.primary }}>{actionLabel}</Text>
+          {/* The action opens a page, so it carries the push chevron. */}
+          <Icon ios="chevron.right" android="chevron_right" size={12} color={colors.primary} />
         </Pressable>
       ) : null}
     </Pressable>
@@ -863,6 +865,8 @@ export const SESSION_ROW = {
   gap: 12,
   textGap: 4,
   paddingRight: 14,
+  /** A title-only row (home's thread list): one line, no preview. */
+  singleLineHeight: 40,
 } as const;
 
 /** The mark's centre, measured from the left edge of the row's column. */
@@ -890,11 +894,18 @@ export function SessionCard({
   compact = false,
   selected = false,
   hideAvatar = false,
+  singleLine = false,
 }: {
   sessionId?: string | null;
   title: string;
   /** A thread row is text only: the missing agent mark is what says "chat, not task". */
   hideAvatar?: boolean;
+  /**
+   * Title only, no preview line. Home's thread list uses it so a handful of
+   * threads costs little height above the tasks. The row is still a fixed
+   * height; it is just the one-line height.
+   */
+  singleLine?: boolean;
   /** Smaller filled card for a parent session's expanded subagent list. */
   compact?: boolean;
   selected?: boolean;
@@ -1022,14 +1033,16 @@ export function SessionCard({
              * and 16 gives it the same breathing room the title has from the
              * text beside it.
              */
-            paddingLeft: SESSION_ROW.padding,
+            // A title-only row has no mark, so its title lines up with the
+            // section header's label (SectionHeader's space.md) instead.
+            paddingLeft: singleLine ? space.md - SESSION_ROW.inset : SESSION_ROW.padding,
             // More room on the right than the left: the status dot is a 10pt
             // circle with no visual mass of its own, so an equal inset leaves
             // it looking stuck to the group's edge. The avatar on the left is
             // big enough not to need the same help.
             paddingRight: SESSION_ROW.paddingRight,
             // Reserve both text lines so activity updates do not resize rows.
-            height: compact ? 64 : SESSION_ROW.height,
+            height: compact ? 64 : singleLine ? SESSION_ROW.singleLineHeight : SESSION_ROW.height,
           })}
         >
           <SessionActivityField identity={sessionId ?? title} activity={activity} textBounds={textBounds} cornerRadius={radius.md}
@@ -1045,20 +1058,23 @@ export function SessionCard({
                   flexShrink: 1,
                   // Unread is not communicated by the dot alone: the title
                   // carries full strength weight while it is unread, and
-                  // settles back once it has been read.
-                  fontWeight: unread ? "700" : "600",
+                  // settles back once it has been read. A title-only row is
+                  // regular weight, so bold there means unread and nothing else.
+                  fontWeight: unread ? "700" : singleLine ? "400" : "600",
                   color: colors.text,
                 }}
               />
             </View>
             {/* Rendered unconditionally — see the prop's note. An empty
                 preview keeps its line rather than collapsing the row. */}
-            <Text
-              numberOfLines={1}
-              style={{ ...(compact ? type.caption : type.subhead), color: colors.textMuted }}
-            >
-              {subtitle ?? ""}
-            </Text>
+            {singleLine ? null : (
+              <Text
+                numberOfLines={1}
+                style={{ ...(compact ? type.caption : type.subhead), color: colors.textMuted }}
+              >
+                {subtitle ?? ""}
+              </Text>
+            )}
           </View>
           {/* WHEN IT LAST MOVED, then what state it is in.
               The list had no time on it at all, so a session that moved thirty

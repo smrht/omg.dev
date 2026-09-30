@@ -1,7 +1,8 @@
 import { OverviewToolbar, useOverviewPreferences, buildOverviewGroups, flattenOverview } from "./components/session-overview";
 import { DesktopWorkspace, type WorkspaceSummary } from "./components/desktop-workspace";
 import { SessionUsageControls } from "./components/session-usage-controls";
-import { OMG_MODELS } from "../../src/omg-models";
+import { WorkspaceFindingsMenu } from "./components/workspace-findings";
+import { OMG_DEFAULT_MODEL, OMG_MODELS } from "../../src/omg-models";
 import { omgModelLabel, omgModelSearchText, parseOmgModel } from "../../packages/protocol/src/omg-model-display";
 import { ModelProviderIcon } from "./lib/model-provider-icons";
 import { useRuntimeLifecycle } from "./lib/runtime-lifecycle";
@@ -62,6 +63,7 @@ import {
 } from "./lib/hosted-coach";
 import { HostedCoachCard } from "./components/hosted-coach-card";
 import { emitSessionCreatedToHost } from "./lib/embed-host-signal";
+import { filtersToShowSession, liveAgentsControl, planLimitLiveAgents, registerLiveAgents } from "./lib/plan-limit-live";
 import { isAuthorizationUrl } from "./lib/auth-popup";
 import { OmgBrandMark, omgBrandToneClass } from "./components/omg-brand-mark";
 import {
@@ -179,6 +181,7 @@ import {
   isSubagentUpdateText,
 } from "./lib/bot-transcript";
 import {
+  hostedStartUserFilter,
   initialUserFilter,
   reconcileUserFilter,
   sessionMatchesUserFilter,
@@ -381,6 +384,7 @@ import {
   clearLegacyPinnedSessions,
   readLegacyPinnedSessions,
   togglePinnedSession,
+  withPinnedFamilies,
 } from "./lib/session-pins";
 import { pendingLiveFocusRequest } from "./lib/live-focus";
 import {
@@ -738,6 +742,7 @@ export type CodingAgentInfo = {
   label: string;
   visible: boolean;
   status: {
+    version?: string;
     configured: boolean;
     accountConnected: boolean;
     omgCapabilityAccess: "mcp" | "contract-only";
@@ -1410,7 +1415,14 @@ type BootstrapPayload = {
   sessions?: Session[] | null;
   sessionPins?: string[] | null;
   /** Which conversation participant, if any, "I" am — see fetchBootstrap. */
-  viewer?: { managed: boolean; participantId: string | null } | null;
+  viewer?: {
+    managed: boolean;
+    participantId: string | null;
+    /** Verified viewer email. Managed boxes only. */
+    email?: string | null;
+    /** This viewer's saved owner filter on this box. Managed boxes only. */
+    userFilter?: string | null;
+  } | null;
   users?: User[] | null;
   repos?: Repo[] | null;
   auto?: { agents?: AutoAgent[] | null; tz?: string; findings?: AutoFinding[] | null };
@@ -1429,7 +1441,10 @@ type SlashSkillState = {
 // first, with the Sonnet 5.5 pin until the `sonnet` alias lands on it.
 const CLAUDE_MODELS = ["claude-sonnet-5-5", "opus", "fable", "sonnet", "haiku"];
 const CODEX_MODELS = [
+  "gpt-6.1-sol",
   "gpt-6-astra",
+  "gpt-6-sol",
+  "gpt-6-luna",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
@@ -1442,7 +1457,10 @@ const CODEX_MODELS = [
 // aliases). Kept in sync with the AISDK_MODELS allowlist in serve.ts.
 const AISDK_MODELS = CLAUDE_MODELS;
 const CODEX_AISDK_MODELS = [
+  "gpt-6.1-sol",
   "gpt-6-astra",
+  "gpt-6-sol",
+  "gpt-6-luna",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
@@ -1556,7 +1574,7 @@ const AGENT_DEFAULT_MODEL: Record<AgentKind, string> = {
   deepseek: "deepseek-v4-flash",
   devin: "adaptive",
   opencode: "opencode/nemotron-3.5-lightning-free",
-  omg: OMG_MODELS[0]!,
+  omg: OMG_DEFAULT_MODEL,
   jcode: "auto",
   pi: "sonnet",
   copilot: "claude-sonnet-4.5",
@@ -1814,9 +1832,15 @@ function usePlanLimitHandler(): (error: unknown, action: PlanLimitDetail["action
   return useCallback(
     (error, action) => {
       if (!onPlanLimit || !isPlanLimitError(error)) return false;
+      // The chats that hold the slots, with a way to open or close each. Home
+      // shows one project at a time, so most of them can be out of sight.
+      const live = liveAgentsControl();
       onPlanLimit({
         message: error instanceof Error ? error.message : String(error),
         action,
+        ...(live
+          ? { live: live.list(), openSession: live.open, closeSession: live.close }
+          : {}),
       });
       return true;
     },
@@ -3155,13 +3179,6 @@ function projectName(cwd: string): string {
 
 function repoProject(repo: Repo): string {
   return repo.project || projectName(repo.cwd);
-}
-
-/** The project key of a remembered cwd, if that folder is still listed. */
-function repoProjectForCwd(repos: Repo[], cwd: string | null): string | null {
-  if (!cwd) return null;
-  const repo = repos.find((candidate) => candidate.cwd === cwd);
-  return repo ? repoProject(repo) : null;
 }
 
 function autoAgentProject(agent: AutoAgent, repos: Repo[]): string {
@@ -6203,8 +6220,22 @@ export function App() {
   // Session references in rendered messages open through this page route.
   // The list is read through a ref so a click sees the latest sessions.
   const sessionsForRefs = useRef<Session[]>(sessions);
+  const openLiveAgentRef = useRef<(sid: string) => void>(() => {});
   const openThreadPageRef = useRef<(id: string) => void>(() => {});
   sessionsForRefs.current = sessions;
+  useEffect(() => {
+    registerLiveAgents({
+      list: () => planLimitLiveAgents(sessionsForRefs.current),
+      // Through a ref: the filters that decide whether the chat can show are
+      // declared further down, and the hand-off must see their latest values.
+      open: (sid) => openLiveAgentRef.current(sid),
+      close: async (sid) => {
+        await closeSessionRequest(sid, "plan_limit_sheet");
+        await refreshSessionsRef.current();
+      },
+    });
+    return () => registerLiveAgents(null);
+  }, []);
   useEffect(() => {
     registerSessionRefHandlers({
       navigate: openSessionPage,
@@ -6421,6 +6452,9 @@ export function App() {
   // which owns the list. The button only needs the current name for its label.
   const navMachineName = activeMachine().name;
   const didDefaultFilter = useRef(false);
+  const hostedFilterAppliedRef = useRef<number | null>(null);
+  const hostedSurfaceRef = useRef(hostedSurface);
+  hostedSurfaceRef.current = hostedSurface;
   const viewPrefs = useMemo(() => applyRoleViews(settings, roleViewer), [settings, roleViewer]);
   const hiddenPages = roleViewer.hiddenPages;
   const roleViewerState = useMemo<RoleViewerState>(
@@ -6717,6 +6751,24 @@ export function App() {
     }
     setViewerParticipantId(payload.viewer?.participantId ?? null);
     setUsers(payload.users ?? []);
+    // A managed box remembers the owner filter per viewer, because the host's
+    // localStorage copy is shared by every machine and can be reset. Apply it
+    // once per machine, so a later refresh does not undo a change made since.
+    const generation = omgTransportGeneration();
+    if (
+      hostedSurfaceRef.current &&
+      payload.viewer?.managed &&
+      hostedFilterAppliedRef.current !== generation
+    ) {
+      hostedFilterAppliedRef.current = generation;
+      const start = hostedStartUserFilter({
+        saved: payload.viewer.userFilter,
+        viewerEmail: payload.viewer.email,
+        users: payload.users ?? [],
+      });
+      // A session deep link opens on "__all" so the target is not hidden.
+      if (start && !sessionDeepLinkRef.current) setUserFilter(start);
+    }
     setRepos(payload.repos ?? []);
     setAutoAgents(payload.auto?.agents ?? []);
     setBots(botPayload.bots ?? []);
@@ -7246,9 +7298,8 @@ export function App() {
   }, [userFilter]);
 
   useEffect(() => {
-    // Project scope belongs to the LFG workspace even when the app is hosted
-    // inside omg, so remember it on every surface. Otherwise an embedded
-    // reload silently jumps back to "All projects" and exposes every folder.
+    // Remembered as a sticky preference (localStorage, raw string), on every
+    // surface, so an embedded reload — and an app update — keeps the folder.
     cacheProjectFilter(projectFilter);
   }, [projectFilter]);
 
@@ -7260,6 +7311,15 @@ export function App() {
     // the selected roster member through this standalone profile key.
     if (userFilterUpdatesStandaloneIdentity(value, hostedSurface)) {
       localStorage.setItem("lfg_user", value);
+    }
+    // A managed box keeps the choice per viewer (see loadCore). A local box
+    // answers 400, which is fine: localStorage already holds it there.
+    if (hostedSurface) {
+      void api("/api/session-user-filter", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filter: value }),
+      }).catch(() => {});
     }
   }, [hostedSurface]);
 
@@ -7300,13 +7360,16 @@ export function App() {
   // from the resume cache (see recentSessionRoster). Live-only derivatives
   // above (allLiveSessions, userScopedSessions) stay untouched — streams,
   // status ids and deep-link resolution must keep seeing only real processes.
-  const rosterSessions = useMemo(
+  // Named apart from the Chat roster's `rosterSessions` (pinned families,
+  // below) because both exist after the v0.6.150 merge and each has its own
+  // consumers.
+  const mergedRoster = useMemo(
     () => recentSessionRoster(allLiveSessions, recentResumable),
     [allLiveSessions, recentResumable],
   );
   const userScopedRoster = useMemo(
-    () => rosterSessions.filter((session) => sessionMatchesUserFilter(session, userFilter)),
-    [rosterSessions, userFilter],
+    () => mergedRoster.filter((session) => sessionMatchesUserFilter(session, userFilter)),
+    [mergedRoster, userFilter],
   );
 
   const projectOptions = useMemo(() => {
@@ -7341,18 +7404,21 @@ export function App() {
     [projectOptions],
   );
 
-  // Keep the overview's explicit all-projects scope across roster polls.
-  // Resolve only a remembered folder that no longer exists.
+  // The overview has a visible all-projects control, so its explicit scope is
+  // kept across roster polls; only a remembered folder that no longer exists
+  // is resolved. That fallback — and any unscoped value where allowAll is not
+  // set — lands on the no-project scope, never on a folder nobody picked: the
+  // rail has no "All" pill, and a new chat from Home goes where this points.
+  // See resolveInitialProjectFilter.
   useEffect(() => {
     if (loading || !projectOptions.length) return;
     const resolved = resolveInitialProjectFilter({
       saved: projectFilter,
       allowAll: true,
       options: projectOptions,
-      preferred: repoProjectForCwd(repos, localStorage.getItem("lfg_v2_repo")),
     });
     if (resolved !== projectFilter) setProjectFilter(resolved);
-  }, [loading, projectFilter, projectOptions, repos]);
+  }, [loading, projectFilter, projectOptions]);
 
   const liveSessions = useMemo(() => {
     if (projectFilter === "__all") return userScopedSessions;
@@ -7360,14 +7426,27 @@ export function App() {
       sessionMatchesProjectFilter(session, projectFilter),
     );
   }, [userScopedSessions, projectFilter]);
+  // The Chat roster adds pinned families from every project to the scoped
+  // list. The Board, the busy counts and the folder counts stay scoped.
+  const rosterSessions = useMemo(
+    () => withPinnedFamilies(liveSessions, userScopedSessions, topPinned),
+    [liveSessions, userScopedSessions, topPinned],
+  );
 
   // Same scope as liveSessions, but over the merged roster — this is what the
   // Live workspace renders. History rows join the list without joining the
-  // fleet: streams and expanded-id tracking below still key on liveSessions.
+  // fleet: streams and expanded-id tracking below still key on the live
+  // sessions (via rosterSessions, which adds only live pinned families).
+  // Pinned families from other projects join the same way the Chat roster
+  // adds them: a pin is a "keep this in front of me" choice, so a project
+  // filter must not hide it.
   const roster = useMemo(() => {
-    if (projectFilter === "__all") return userScopedRoster;
-    return userScopedRoster.filter((session) => session.project === projectFilter);
-  }, [userScopedRoster, projectFilter]);
+    const scoped =
+      projectFilter === "__all"
+        ? userScopedRoster
+        : userScopedRoster.filter((session) => session.project === projectFilter);
+    return withPinnedFamilies(scoped, userScopedRoster, topPinned);
+  }, [userScopedRoster, projectFilter, topPinned]);
 
   // Resolve a pending `/?session=<id>` deep link. This lives at the app level
   // (it used to be buried in the wide rail, so mobile ignored deep links
@@ -7409,8 +7488,8 @@ export function App() {
   // back to the list. The /api/live/status stream above still keys on
   // liveStatusIds only — a dead id has no status to ask for.
   const rosterStatusIds = useMemo(
-    () => rosterSessions.map((s) => s.sessionId).filter((id): id is string => !!id),
-    [rosterSessions],
+    () => mergedRoster.map((s) => s.sessionId).filter((id): id is string => !!id),
+    [mergedRoster],
   );
   const computerInspectionSessions = useMemo<ComputerInspectionSession[]>(
     () =>
@@ -7512,6 +7591,29 @@ export function App() {
     setTab("live");
     setLiveFocus({ sid: target.sessionId ?? sid, n: Date.now() });
   }, [allLiveSessions, loading, userFilter, projectFilter, identityGateOpen, setTab]);
+
+  // The plan-limit sheet's Open. The chats it lists are mostly the ones Home
+  // hides behind a project filter, and the session page renders only a chat
+  // the filters list, so scope to the chat first (as a deep link does), then
+  // focus it: the narrow layout opens its page, the wide one its column.
+  const openLiveAgent = useCallback(
+    (sid: string) => {
+      const target = allLiveSessions.find(
+        (session) => session.sessionId === sid || session.nativeSessionId === sid,
+      );
+      if (target) {
+        const next = filtersToShowSession(target, { userFilter, projectFilter });
+        if (next.userFilter) setUserFilter(next.userFilter);
+        if (next.projectFilter) setProjectFilter(next.projectFilter);
+      }
+      setTab("live");
+      setLiveFocus({ sid: target?.sessionId ?? sid, n: Date.now() });
+    },
+    [allLiveSessions, userFilter, projectFilter, setTab],
+  );
+  useEffect(() => {
+    openLiveAgentRef.current = openLiveAgent;
+  }, [openLiveAgent]);
 
   // ...and if it never shows up, open it as a FINISHED session instead of
   // reporting the link dead. A shipped post outlives its session — the human
@@ -7725,10 +7827,10 @@ export function App() {
   // Stream detailed transcripts only for sessions the UI has explicitly opened.
   // Wide-screen stage columns mark their session as expanded when previewed or
   // pinned; rail-only rows keep using lightweight list/status data.
-  const expandedIds = useExpandedIds(liveSessions, false);
+  const expandedIds = useExpandedIds(rosterSessions, false);
   const visibleTranscripts = useVisibleTranscriptSids(tab === "live");
-  const sseLiveStream = useLiveSessionStream(liveSessions, useWsLive ? [] : expandedIds);
-  const wsLiveStream = useLiveSocket(liveSessions, expandedIds, {
+  const sseLiveStream = useLiveSessionStream(rosterSessions, useWsLive ? [] : expandedIds);
+  const wsLiveStream = useLiveSocket(rosterSessions, expandedIds, {
     enabled: useWsLive,
     onStatusRows: applyLiveStatusRows,
     // The same identity every other per-person call already declares. A
@@ -10103,6 +10205,11 @@ export function App() {
                   ...(launchId ? { retireLaunchId: launchId } : {}),
                   seed: result?.session ?? null,
                 });
+                // Open the new chat. Staying on the list after send left the
+                // person looking for the chat they had just started
+                // (walkthrough 2026-09-29).
+                const sid = result?.sessionId ?? result?.session?.sessionId;
+                if (sid) openSessionPage(sid);
               }}
             />
           ) : null}
@@ -14168,7 +14275,31 @@ function RailStage({
         projectLabel={(value) => projectFilterLabel(value, shortProject)}
         headerControls={
           <>
-            {autoRailPill}
+            {/* The workspace header is a fixed 48px row, so the Updates list
+                opens in a popover anchored to a compact trigger
+                (workspace-findings.tsx) rather than the rail's inline panel,
+                which clipped inside headerControls. Shown while the workspace
+                is up regardless of railCollapsed; the inline panel stays in
+                the actual rail below. */}
+            {findings.length ? (
+              <WorkspaceFindingsMenu
+                findings={findings}
+                nameFor={nameFor}
+                onOpenReport={onOpenReport}
+                onTriageFindings={onTriageFindings}
+                onClearFindings={onClearFindings}
+                clearFindingsBusy={clearFindingsBusy}
+                triageBusy={autoTriageBusy}
+                actions={
+                  <AutoTriageButton
+                    count={findings.length}
+                    busy={autoTriageBusy}
+                    onClick={() => onTriageFindings()}
+                    compact
+                  />
+                }
+              />
+            ) : null}
             {onOpenAsk ? (
               <>
                 {hosted ? null : <UpdateNavButton />}
@@ -17874,7 +18005,7 @@ function SessionChatBody({
               rather than in ChatStream's TypingIndicator slot so the two can
               never be mistaken for each other. */}
           <HumanTypingIndicator participants={typingParticipants} />
-          <ProjectPreviewCard sessionId={sid} user={session.assignedUser} />
+          <ProjectPreviewCard sessionId={sid} user={session.assignedUser} agentBusy={chatBusy} />
           <BrowserLoginCard sessionId={sid} user={session.assignedUser} />
           {files.fileInput}
           <ComposerAttachmentChips

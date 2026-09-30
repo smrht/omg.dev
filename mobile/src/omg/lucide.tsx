@@ -29,8 +29,21 @@
 import { useFonts } from "expo-font";
 import { Text } from "react-native";
 
-/** Must match the key `useFonts` registers below, and nothing else uses it. */
-export const LUCIDE_FONT_FAMILY = "Lucide";
+/**
+ * Must match the key `useFonts` registers below, and nothing else uses it.
+ *
+ * The alias is new on every JS start, on purpose. expo-font keeps its alias
+ * registry across a JS reload, and loading an alias it already knows makes it
+ * UNREGISTER the font file and register it again. A Text drawn between the
+ * two gets the alias's name back from `fontNamesForFamilyName:`, a nil font
+ * from `fontWithName:`, and React Native segfaults in `RCTGetFontWeight`
+ * (TestFlight builds 63 to 84, `RCTFontUtils.mm:436`, main thread). `ota.ts`
+ * reloads into every fetched update, at launch and on return to the app, so
+ * that window came up in normal use. A fresh alias is unknown to the registry,
+ * so nothing is unregistered: the file is registered once per process and the
+ * repeat registration is ignored as a duplicate.
+ */
+export const LUCIDE_FONT_FAMILY = `Lucide-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
 /**
  * Codepoints from lucide-static@1.31.0, `font/codepoints.json`.
@@ -52,6 +65,9 @@ export const LUCIDE = {
   "calendar-clock": 0xe304,
   keyboard: 0xe284,
   "chevrons-up-down": 0xe211,
+  // The code block copy button inside a reply's hold menu (see markdown.tsx).
+  copy: 0xe09e,
+  check: 0xe06c,
 } as const;
 
 export type LucideName = keyof typeof LUCIDE;

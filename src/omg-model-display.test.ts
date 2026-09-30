@@ -11,6 +11,7 @@ describe("omg model display", () => {
   test("every hosted id gets a provider and a short name", () => {
     const labels = OMG_MODELS.map((id) => [id, parseOmgModel(id)!.provider, omgModelLabel(id)]);
     expect(labels).toEqual([
+      ["omg/openai/gpt-6-luna", "openai", "GPT-6 Luna"],
       ["omg/deepseek/deepseek-v4-flash-0731", "deepseek", "DeepSeek V4 Flash"],
       ["omg/deepseek/deepseek-v4-pro", "deepseek", "DeepSeek V4 Pro"],
       ["omg/z-ai/glm-5.3-flash", "z-ai", "GLM 5.3 Flash"],
@@ -88,7 +89,10 @@ describe("claude model display", () => {
   });
 
   test("Codex ids get the hosted GPT naming", () => {
-    expect(["gpt-6-astra", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4-mini", "gpt-5.3-codex-spark"].map((id) => omgModelLabel(id))).toEqual([
+    expect(["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4-mini", "gpt-5.3-codex-spark"].map((id) => omgModelLabel(id))).toEqual([
+      "GPT-6.1 Sol",
+      "GPT-6 Sol",
+      "GPT-6 Luna",
       "GPT-6 Astra",
       "GPT-5.6 Sol",
       "GPT-5.5",

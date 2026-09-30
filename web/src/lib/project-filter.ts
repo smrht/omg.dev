@@ -2,6 +2,11 @@ export const PROJECT_FILTER_STORAGE_KEY = "lfg_v2_project_filter";
 
 type ProjectFilterStorage = Pick<Storage, "getItem" | "setItem">;
 
+// localStorage, and raw strings, and deliberately so: the picked folder is a
+// preference of this browser that must survive restarts and app updates.
+// The 2026-09 upstream merge briefly moved this to expiring sessionStorage,
+// which silently dropped every existing pick on update — Sam's included.
+// A raw string cannot carry an expiry, which is the point.
 function browserStorage(): ProjectFilterStorage | null {
   try {
     return typeof window === "undefined" ? null : window.localStorage;
@@ -10,6 +15,7 @@ function browserStorage(): ProjectFilterStorage | null {
   }
 }
 
+/** The folder this browser last picked, or the all-projects scope. */
 export function readCachedProjectFilter(
   storage: ProjectFilterStorage | null = browserStorage(),
 ): string {
@@ -36,7 +42,7 @@ export function cacheProjectFilter(
  * The filter value for chats that were started without a project.
  *
  * It cannot be the empty string the server stores on the session, because
- * `readCachedProjectFilter` reads "" back as "no saved value" and falls to
+ * `readCachedProjectFilter` reads "" back as no saved value and falls to
  * "__all". It also cannot be a real project key, so it carries the same
  * "__"-prefix as "__all". It matches the group key `groupNodesByProject`
  * already uses for the folder-less group, so the rail group header and the
@@ -99,18 +105,15 @@ export function projectFilterAfterPress(pressed: string, current: string): strin
 }
 
 /**
- * The folder to open on, when nothing usable is remembered.
+ * The scope to open on, when nothing usable is remembered.
  *
- * The rail has no "All" pill any more, so starting unscoped left the list
- * showing every folder with no pill lit and nothing saying why. iOS has
- * never had an unscoped state at all: it resolves a concrete folder from
- * the machine's default, then the first one it can see.
- *
- * `preferred` is the caller's best guess before the first pill exists — the
- * project of the folder this browser last started a session in.
+ * The rail has no "All" pill, so an unscoped list showed every folder with no
+ * pill lit. It resolves to the no-project scope instead: that scope is also
+ * where a new chat from Home goes, and a new chat goes into a folder only when
+ * the person picked that folder in this visit.
  */
 export function resolveInitialProjectFilter(input: {
-  /** What storage remembered. May be "__all", or a folder that is gone. */
+  /** What this visit remembered. May be "__all", or a folder that is gone. */
   saved: string;
   /** Every selectable value, as the rail lists them. */
   options: readonly string[];
@@ -119,13 +122,16 @@ export function resolveInitialProjectFilter(input: {
   allowAll?: boolean;
 }): string {
   const { saved, options, preferred } = input;
-  if (!options.length || (input.allowAll && saved === "__all")) return saved;
+  if (!options.length) return saved;
+  if (input.allowAll && saved === "__all") return saved;
   const has = (value: string | null | undefined): value is string =>
     !!value && value !== "__all" && options.includes(value);
   if (has(saved)) return saved;
   if (has(preferred)) return preferred;
-  // A real folder before the no-project scope: that scope is for starting
-  // something new, not a place to be parked on by default.
-  const folder = options.find((option) => option !== NO_PROJECT_FILTER);
-  return folder ?? options[0]!;
+  // Never unscoped by default: the rail has no "All" pill, and a folder
+  // nobody picked is where a new chat from Home would land. An unscoped
+  // filter, or a folder that has gone away, resolves to the no-project
+  // scope — the same scope a new chat from Home goes to unless a folder
+  // was picked in this visit. See resolveInitialProjectFilter's callers.
+  return options.includes(NO_PROJECT_FILTER) ? NO_PROJECT_FILTER : options[0]!;
 }

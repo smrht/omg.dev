@@ -49,6 +49,9 @@ private final class LoginController: UIViewController, WKNavigationDelegate, WKU
   private let address = UILabel()
   private let progress = UIProgressView(progressViewStyle: .default)
   private var progressObservation: NSKeyValueObservation?
+  private var backObservation: NSKeyValueObservation?
+  private let browserMenuButton = UIBarButtonItem(image: UIImage(systemName: "ellipsis"),
+    style: .plain, target: nil, action: nil)
 
   init(url: URL, computer: String, finish: @escaping ([String: Any]) -> Void) {
     self.target = url
@@ -62,8 +65,18 @@ private final class LoginController: UIViewController, WKNavigationDelegate, WKU
     super.viewDidLoad()
     view.backgroundColor = .systemBackground
     title = "Website login"
-    navigationItem.leftBarButtonItem = UIBarButtonItem(title: "Cancel", style: .plain, target: self, action: #selector(cancel))
-    navigationItem.rightBarButtonItem = UIBarButtonItem(title: "Use login", style: .done, target: self, action: #selector(approve))
+    let closeButton = UIBarButtonItem(image: UIImage(systemName: "xmark"),
+      style: .plain, target: self, action: #selector(cancel))
+    closeButton.accessibilityLabel = "Cancel"
+    closeButton.accessibilityIdentifier = "browser-login-close"
+    browserMenuButton.accessibilityLabel = "Browser options"
+    browserMenuButton.accessibilityIdentifier = "browser-login-options"
+    let approveButton = UIBarButtonItem(image: UIImage(systemName: "checkmark"),
+      style: .done, target: self, action: #selector(approve))
+    approveButton.accessibilityLabel = "Use login"
+    approveButton.accessibilityIdentifier = "browser-login-use-login"
+    navigationItem.leftBarButtonItem = closeButton
+    navigationItem.rightBarButtonItems = [approveButton, browserMenuButton]
     address.font = .preferredFont(forTextStyle: .footnote)
     address.textColor = .secondaryLabel
     address.textAlignment = .center
@@ -89,17 +102,22 @@ private final class LoginController: UIViewController, WKNavigationDelegate, WKU
       stack.trailingAnchor.constraint(equalTo: view.trailingAnchor),
       address.heightAnchor.constraint(greaterThanOrEqualToConstant: 32)
     ])
-    toolbarItems = [
-      UIBarButtonItem(title: "Back", style: .plain, target: self, action: #selector(back)),
-      UIBarButtonItem(systemItem: .flexibleSpace),
-      UIBarButtonItem(title: "Reload", style: .plain, target: self, action: #selector(reload))
-    ]
-    navigationController?.setToolbarHidden(false, animated: false)
+    backObservation = web.observe(\.canGoBack, options: [.initial, .new]) { [weak self] web, _ in
+      self?.updateBrowserMenu()
+    }
     progressObservation = web.observe(\.estimatedProgress, options: [.new]) { [weak self] web, _ in
       self?.progress.progress = Float(web.estimatedProgress)
       self?.progress.isHidden = web.estimatedProgress >= 1
     }
     web.load(URLRequest(url: target))
+  }
+
+  private func updateBrowserMenu() {
+    browserMenuButton.menu = UIMenu(children: [
+      UIAction(title: "Back", image: UIImage(systemName: "chevron.left"),
+        attributes: web.canGoBack ? [] : .disabled) { [weak self] _ in self?.back() },
+      UIAction(title: "Reload", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in self?.reload() }
+    ])
   }
 
   @objc func cancel() { complete(["cancelled": true]) }

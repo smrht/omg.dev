@@ -426,7 +426,13 @@ type RailArrangement = { order: string[]; hidden: string[] };
 
 export function useProjectPicker() {
   const { repos, bindings, bindingId, client, probe } = useOmg();
-  const [chosen, setChosen] = useState<string | null>(null);
+  /**
+   * "" is the no-project tab, and it is where Home opens. A new chat goes
+   * into a folder only when the person picked that folder in this visit.
+   * Opening on the machine's default folder sent a first request from the
+   * 2026-09-29 walkthrough into an old test repo nobody had chosen.
+   */
+  const [chosen, setChosen] = useState<string | null>("");
   /**
    * THE RAIL'S ARRANGEMENT, per machine. Order and hidden set of folder
    * cwds, loaded once and written on every change. The machine's own list
@@ -458,8 +464,10 @@ export function useProjectPicker() {
   );
 
   useEffect(() => {
-    setChosen(null);
+    setChosen("");
   }, [bindingId]);
+  const selectUnassigned = useCallback(() => setChosen(""), []);
+
 
   const binding = useMemo(
     () => bindings.find((b) => b.id === bindingId) ?? null,
@@ -627,7 +635,7 @@ export function useProjectPicker() {
 
   return {
     unassigned,
-    selectUnassigned: () => setChosen(""),
+    selectUnassigned,
     cwd,
     label,
     options,

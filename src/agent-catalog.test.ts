@@ -19,9 +19,12 @@ import {
   OPENCODE_MODELS,
 } from "./agent-catalog.ts";
 
-test("offers Astra to Codex sessions", () => {
-  expect(CODEX_MODELS).toContain("gpt-6-astra");
-  expect(CODEX_AISDK_MODELS).toContain("gpt-6-astra");
+test("offers the current Codex models", () => {
+  for (const id of ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]) {
+    expect(CODEX_MODELS).toContain(id);
+    expect(CODEX_AISDK_MODELS).toContain(id);
+  }
+  expect(CODEX_MODELS[0]).toBe("gpt-6.1-sol");
 });
 
 // The `opus` alias already resolves to Opus 5.5, so this is about naming a
@@ -410,9 +413,10 @@ test("grok catalog defaults to Grok 4.7 and keeps the fast variant", async () =>
   expect(grok?.thinkingLevelsByModel?.["grok-4.5"]).toEqual(["low", "medium", "high"]);
 });
 
-test("omg agent lists the 14 routed models in hosted picker order", async () => {
+test("omg agent lists the 15 routed models in hosted picker order, default first", async () => {
   const { OMG_MODELS } = await import("./agent-catalog.ts");
   expect(OMG_MODELS).toEqual([
+    "omg/openai/gpt-6-luna",
     "omg/deepseek/deepseek-v4-flash-0731",
     "omg/deepseek/deepseek-v4-pro",
     "omg/z-ai/glm-5.3-flash",
@@ -444,10 +448,11 @@ test("omg thinking levels follow the model: effort where OpenRouter honours it, 
   expect(thinkingLevelsForAgent("omg", "omg/qwen/qwen3.7-plus")).toBeNull();
   expect(thinkingLevelsForAgent("omg", "omg/minimax/minimax-m3")).toBeNull();
   expect(thinkingLevelsForAgent("omg", "omg/x-ai/grok-4.7")).toEqual(["low", "medium", "high"]);
+  expect(thinkingLevelsForAgent("omg", "omg/openai/gpt-6-luna")).toEqual(["low", "medium", "high"]);
   expect(thinkingLevelsForAgent("omg")).toEqual(["low", "medium", "high"]);
   const item = listModelCatalog().find((entry) => entry.key === "omg")!;
   expect(item.thinkingLevels).toEqual(["low", "medium", "high"]);
-  expect(Object.keys(item.thinkingLevelsByModel ?? {})).toHaveLength(11);
+  expect(Object.keys(item.thinkingLevelsByModel ?? {})).toHaveLength(12);
   expect(item.thinkingLevelsByModel?.["omg/qwen/qwen3-coder-next"]).toBeUndefined();
 });
 

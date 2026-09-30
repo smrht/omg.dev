@@ -62,6 +62,11 @@ import {
   visibleSessionPins,
   setSessionPinned,
 } from "../session-pins.ts";
+import {
+  getSessionUserFilter,
+  isStorableUserFilter,
+  setSessionUserFilter,
+} from "../session-user-filter.ts";
 import { createConnectManager, readRelayBoxId } from "../connect-manager.ts";
 import { tailnetGateResponse, tailnetPortFromEnv } from "../tailnet-gate.ts";
 import { findProjectFavicon, projectFaviconMime } from "../project-favicon.ts";
@@ -5981,6 +5986,15 @@ a{color:#60a5fa}
       if (path === "/api/server/session-usage" && req.method === "GET") {
         return json({ usage: await sessionUsage() });
       }
+      if (path === "/api/session-user-filter" && req.method === "PUT") {
+        // Per-viewer, so only a caller the host proxy vouched for can save.
+        const viewer = botViewerFromRequest(req, undefined);
+        if (!viewer.managed) return err(400, "a managed viewer is required");
+        const body = (await req.json().catch(() => null)) as { filter?: unknown } | null;
+        if (!isStorableUserFilter(body?.filter)) return err(400, "invalid filter");
+        setSessionUserFilter(viewer.identity, body.filter);
+        return json({ filter: body.filter });
+      }
       if (path === "/api/session-pins" && req.method === "GET") {
         // A roster probe failure must not take the pins endpoint down: pins are
         // filtered against it, never deleted by it, so an empty set just renders
@@ -6235,6 +6249,21 @@ a{color:#60a5fa}
             { version: appVersion(), bootId: SERVER_INSTANCE_ID },
           );
         }
+        if (url.searchParams.get("view") === "owner-filter") {
+          // The session list's owner filter, for the native app: the roster
+          // plus who is asking and what they saved. Under /api/bootstrap on
+          // purpose, because that is the one path the host proxy merges the
+          // shared roster into. A tenth of the full payload to read on focus.
+          const viewer = botViewerFromRequest(req, undefined);
+          return json({
+            users: userRoster(),
+            viewer: {
+              managed: viewer.managed,
+              email: viewer.managed ? viewer.identity : null,
+              userFilter: viewer.managed ? savedUserFilter(viewer.identity) : null,
+            },
+          });
+        }
         const sessionsTask = listSessionsCached().then((sessions) => {
           warmChatTranscripts(sessions);
           return sessions;
@@ -6310,7 +6339,16 @@ a{color:#60a5fa}
             // bot conversation's message list can skip drawing a redundant
             // avatar on the viewer's own turns. See conversation-ui.ts on the
             // client for the comparison.
-            viewer: { managed: viewer.managed, participantId: viewerParticipantId },
+            viewer: {
+              managed: viewer.managed,
+              participantId: viewerParticipantId,
+              // The verified viewer email and that viewer's saved owner
+              // filter, so a managed surface can open on "my sessions" and
+              // keep the choice across reloads. Managed callers only: a local
+              // caller's identity is whatever the browser sent.
+              email: viewer.managed ? viewer.identity : null,
+              userFilter: viewer.managed ? savedUserFilter(viewer.identity) : null,
+            },
             users: boot.users ?? null,
             repos: boot.repos ?? null,
             auto: {
@@ -12616,4 +12654,13 @@ a{color:#60a5fa}
     log: (line) => console.log(line),
   });
 
+}
+
+/** A read failure must not fail bootstrap. The client falls back to its default. */
+function savedUserFilter(viewer: string): string | null {
+  try {
+    return getSessionUserFilter(viewer);
+  } catch {
+    return null;
+  }
 }
