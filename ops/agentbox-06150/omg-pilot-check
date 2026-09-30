@@ -1,0 +1,347 @@
+#!/bin/bash
+# omg-pilot-check — read-only deterministische gate voor de omg.dev-pilot (issue 504).
+#
+# Controleert op agentbox2 dat de omg.dev-pilot nog gezond en geisoleerd is:
+#   1. omg.service enabled + active als user-service
+#   2. origin luistert uitsluitend op 127.0.0.1:8766 (nooit 0.0.0.0/ander adres)
+#   3. tailnet-only HTTPS-endpoint geeft HTTP 200
+#   4. minimaal twee agent-backends configured+connected (API-readback)
+#   5. T3 en de CDP-browser-slots onveranderd actief
+#   6. omg-pilotdata persistent aanwezig (install.json + datadir)
+#   7. geen nieuwe failed units en geen OOM/cgroup-events sinds de laatste
+#      service-start (issue 521), of sinds een expliciete OMG_PILOT_SINCE
+#   8. chat-roster-overlay actief: package-versie in de ondersteunde lijst
+#      (0.6.7/0.6.9/0.6.10/0.6.13/0.6.14/0.6.16/0.6.17/0.6.18), index.html verwijst naar de overlay-entry, asset
+#      aanwezig (issue 521)
+#
+# Exit 0 alleen als ALLE verplichte checks groen zijn. Verandert niets.
+# Testbaar: --self-test draait de parse-helpers en de since-resolutie tegen
+# vaste fixtures;
+# de shelltest zet paden om via OMG_PILOT_* om de checks zelf te mocking-mogelijk.
+set -uo pipefail
+
+SERVICE="${OMG_PILOT_SERVICE:-omg.service}"
+API="${OMG_PILOT_API:-http://127.0.0.1:8766}"
+PRIVATE_URL="${OMG_PILOT_PRIVATE_URL:-https://agentbox2.tailda028c.ts.net:8445/}"
+DATA_DIR="${OMG_PILOT_DATA_DIR:-$HOME/omg/data}"
+SINCE="${OMG_PILOT_SINCE:-}"   # journalctl --since venster voor resource-events
+CDP_PORTS="${OMG_PILOT_CDP_PORTS:-9222 9223 9224 9225}"
+SS_SOURCE="${OMG_PILOT_SS_FILE:-}"          # fixture: ss -tln output
+AGENTS_SOURCE="${OMG_PILOT_AGENTS_FILE:-}"  # fixture: /api/coding-agents JSON
+FAILED_SOURCE="${OMG_PILOT_FAILED_FILE:-}"  # fixture: systemctl --failed --no-legend
+JOURNAL_SOURCE="${OMG_PILOT_JOURNAL_FILE:-}" # fixture: journalctl --user output
+ACTIVE_TS_SOURCE="${OMG_PILOT_ACTIVE_TS_FILE:-}" # fixture: systemctl show ActiveEnterTimestamp
+OMG_ROOT="${OMG_PILOT_OMG_ROOT:-$HOME/omg}" # omg-install voor de roster-gate
+ROSTER_ENTRY_JS="index-BTAKdc87.js"         # chat-stop overlay-entry (issue 521 follow-up 2;
+                                            # opvolger van roster-hide index-CZiBHlJ1.js)
+ROSTER_VERSIONS="0.6.7 0.6.9 0.6.10 0.6.13 0.6.14 0.6.16 0.6.17 0.6.18 0.6.24 0.6.33 0.6.35 0.6.36 0.6.37 0.6.38 0.6.40 0.6.43 0.6.47 0.6.53 0.6.55 0.6.57 0.6.63 0.6.66 0.6.68 0.6.69 0.6.71 0.6.74 0.6.85 0.6.86" # 0.6.10+ gebruiken version-locked full builds
+# Deze gate draait zowel vanuit de repo als vanuit ~/bin. Script-relatief
+# rekenen klopt alleen in het eerste geval: de geïnstalleerde kopie kwam zo uit
+# op /home/omg-fork en meldde een "ontbrekend" manifest (27-08-2026).
+FORK_ROOT="${OMG_PILOT_FORK_ROOT:-}"
+if [ -z "$FORK_ROOT" ]; then
+  FORK_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)/omg-fork"
+  [ -d "$FORK_ROOT" ] || FORK_ROOT="$HOME/sites-beheer/omg-fork"
+fi
+
+fail=0
+pass(){ echo "PASS: $1"; }
+bad(){ echo "FAIL: $1"; fail=1; }
+
+ss_output(){ if [ -n "$SS_SOURCE" ]; then cat "$SS_SOURCE"; else ss -tln 2>/dev/null; fi; }
+agents_json(){ if [ -n "$AGENTS_SOURCE" ]; then cat "$AGENTS_SOURCE"; else curl -s --max-time 10 "$API/api/coding-agents"; fi; }
+failed_output(){ if [ -n "$FAILED_SOURCE" ]; then cat "$FAILED_SOURCE"; else systemctl --user --failed --no-legend; systemctl --failed --no-legend; fi; }
+journal_output(){ if [ -n "$JOURNAL_SOURCE" ]; then cat "$JOURNAL_SOURCE"; else
+  local args=(--no-pager); [ -n "$SINCE" ] && args+=(--since "$SINCE")
+  journalctl --user "${args[@]}" 2>/dev/null; journalctl -k "${args[@]}" 2>/dev/null; fi; }
+
+check_service(){
+  local active enabled
+  active=$(systemctl --user is-active "$SERVICE" 2>/dev/null)
+  enabled=$(systemctl --user is-enabled "$SERVICE" 2>/dev/null)
+  [ "$active" = "active" ] && pass "service actief ($SERVICE)" || bad "service niet actief ($SERVICE: $active)"
+  [ "$enabled" = "enabled" ] && pass "service enabled ($SERVICE)" || bad "service niet enabled ($SERVICE: $enabled)"
+}
+
+check_bind(){
+  local out loopback other
+  out=$(ss_output | awk '$4 ~ /:8766$/ {print $4}')
+  loopback=$(printf '%s\n' "$out" | grep -c '^127\.0\.0\.1:8766$')
+  other=$(printf '%s\n' "$out" | grep -vc '^127\.0\.0\.1:8766$')
+  [ "$loopback" -ge 1 ] && pass "origin bind op 127.0.0.1:8766" || bad "geen listener op 127.0.0.1:8766"
+  [ "$other" -eq 0 ] && pass "geen non-loopback listener op 8766" || bad "non-loopback listener op 8766 gevonden"
+}
+
+check_private_url(){
+  local code
+  code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$PRIVATE_URL" 2>/dev/null)
+  [ "$code" = "200" ] && pass "private URL HTTP 200 ($PRIVATE_URL)" || bad "private URL geen 200 ($PRIVATE_URL: $code)"
+}
+
+check_agents(){
+  local n
+  n=$(agents_json | jq '[.agents[]? | select(.status.configured == true and .status.accountConnected == true)] | length' 2>/dev/null)
+  [ "${n:-0}" -ge 2 ] 2>/dev/null && pass "agent-backends configured+connected: $n (min 2)" || bad "minder dan 2 verbonden agent-backends ($n)"
+}
+
+check_t3_browser(){
+  local st en p code
+  st=$(systemctl --user is-active t3code.service 2>/dev/null)
+  en=$(systemctl --user is-enabled t3code.service 2>/dev/null)
+  # Issue 505: na de cutover is T3 bewust stopped+disabled; de pilot-gate
+  # accepteert die eindtoestand, de CDP-slots blijven verplicht.
+  if [ "$st" = "active" ]; then
+    pass "T3 actief (t3code.service)"
+  elif [ "$st" != "active" ] && [ "$en" = "disabled" ]; then
+    pass "T3 bewust uitgeschakeld na cutover (issue 505)"
+  else
+    bad "T3 niet actief ($st)"
+  fi
+  for p in $CDP_PORTS; do
+    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://127.0.0.1:$p/json/version" 2>/dev/null)
+    [ "$code" = "200" ] && pass "CDP-slot $p bereikbaar" || bad "CDP-slot $p niet bereikbaar ($code)"
+  done
+}
+
+check_persistence(){
+  local f="$DATA_DIR/install.json"
+  if [ -f "$f" ] && jq -e '.channel' "$f" >/dev/null 2>&1; then
+    pass "pilotdata persistent ($f, channel=$(jq -r .channel "$f"))"
+  else
+    bad "pilotdata ontbreekt of ongeldig ($f)"
+  fi
+}
+
+# Issue 521: het resource-venster start op de actuele service-start, niet op
+# installedAt — oude OOM-events vóór de laatste herstart mogen de gate niet
+# permanent rood houden. Een expliciete OMG_PILOT_SINCE wint exact; alleen als
+# systemd geen ActiveEnterTimestamp geeft, valt de vensterstart terug op
+# installedAt.
+resolve_since(){
+  local ts
+  if [ -n "$SINCE" ]; then printf '%s\n' "$SINCE"; return 0; fi
+  if [ -n "$ACTIVE_TS_SOURCE" ]; then ts=$(cat "$ACTIVE_TS_SOURCE" 2>/dev/null)
+  else ts=$(systemctl --user show "$SERVICE" -p ActiveEnterTimestamp 2>/dev/null); fi
+  ts=${ts#ActiveEnterTimestamp=}
+  if [ -n "$ts" ] && [ "$ts" != "0" ]; then
+    # "Thu 2026-08-21 09:14:02 CEST" -> "2026-08-21 09:14:02" (journalctl-formaat)
+    ts=$(printf '%s\n' "$ts" | sed -E -e 's/^[A-Za-z]+ //' -e 's/ [A-Za-z]{2,5}$//')
+    if [ -n "$ts" ]; then printf '%s\n' "$ts"; return 0; fi
+  fi
+  if [ -f "$DATA_DIR/install.json" ]; then
+    jq -r '.installedAt // empty' "$DATA_DIR/install.json" 2>/dev/null
+  fi
+}
+
+# Issue 521 (chat-roster): de Live-UI draait onze overlay-entry. Ondersteunde
+# releases staan in ROSTER_VERSIONS (0.6.9 is 25-08-2026 bewezen compatibel:
+# upstreamdiff raakt geen serverbestand, manifest-chunks content-gelijk, CSS
+# bijna-superset). Een omg-safe-update naar een niet-ondersteunde release faalt
+# in apply.sh (ExecStartPre, luid) en laat deze gate rood worden totdat de
+# overlay bewust is bijgewerkt; pas een nieuwe versie-spec hier + in omg-fork
+# maakt hem weer groen. Echoot "ok" of een concrete reden.
+roster_state(){
+  local ver idx entry manifest final_overlay_index final_entry
+  [ -f "$OMG_ROOT/package.json" ] || { echo "package.json ontbreekt ($OMG_ROOT)"; return 0; }
+  ver=$(jq -r '.version // ""' "$OMG_ROOT/package.json" 2>/dev/null)
+  if [ -z "$ver" ]; then
+    echo "omg-versie onleesbaar ($OMG_ROOT/package.json), verwacht een release uit ROSTER_VERSIONS voor de chat-roster-overlay"
+    return 0
+  fi
+  if [ "$ver" = "0.6.98" ] || [ "$ver" = "0.6.117" ] || [ "$ver" = "0.6.124" ] || [ "$ver" = "0.6.127" ] || [ "$ver" = "0.6.138" ] || [ "$ver" = "0.6.143" ] || [ "$ver" = "0.6.150" ]; then
+    if python3 "$HOME/.local/lib/omg-private/current/preserve.py" "$OMG_ROOT" >/dev/null; then
+      echo ok
+    else
+      echo "$ver private preservation check failed"
+    fi
+    return 0
+  fi
+  case " $ROSTER_VERSIONS " in
+    *" $ver "*) ;;
+    *) echo "omg-versie is '$ver', verwacht een release uit ROSTER_VERSIONS voor de chat-roster-overlay"; return 0 ;;
+  esac
+  entry="$ROSTER_ENTRY_JS"
+  if [ "$ver" = "0.6.10" ] || [ "$ver" = "0.6.13" ] || [ "$ver" = "0.6.14" ] || [ "$ver" = "0.6.16" ] || [ "$ver" = "0.6.17" ] || [ "$ver" = "0.6.18" ] || [ "$ver" = "0.6.24" ] || [ "$ver" = "0.6.33" ] || [ "$ver" = "0.6.35" ] || [ "$ver" = "0.6.36" ] || [ "$ver" = "0.6.37" ] || [ "$ver" = "0.6.38" ] || [ "$ver" = "0.6.40" ] || [ "$ver" = "0.6.43" ] || [ "$ver" = "0.6.47" ] || [ "$ver" = "0.6.53" ] || [ "$ver" = "0.6.55" ] || [ "$ver" = "0.6.57" ] || [ "$ver" = "0.6.63" ] || [ "$ver" = "0.6.66" ] || [ "$ver" = "0.6.68" ] || [ "$ver" = "0.6.69" ] || [ "$ver" = "0.6.71" ] || [ "$ver" = "0.6.74" ] || [ "$ver" = "0.6.85" ] || [ "$ver" = "0.6.86" ]; then
+    manifest="$FORK_ROOT/web-dist-$ver-chat-overlay/manifest.json"
+    [ -f "$manifest" ] || { echo "$ver-manifest ontbreekt ($manifest)"; return 0; }
+    entry="$(jq -r '.entry // empty' "$manifest" 2>/dev/null)"
+    [ -n "$entry" ] || { echo "$ver-manifest entry ontbreekt"; return 0; }
+  fi
+  # Een release kan na de basis chat-overlay nog een tweede, samengestelde
+  # webbuild krijgen. Op 0.6.38 voegde de banked-reset/refine-laag zo'n final
+  # build toe. Controleer dan de entry die apply.sh als laatste kopieert, niet
+  # de oudere basis-manifestentry; anders blokkeert de veilige updater op een
+  # fork die juist correct actief is.
+  final_overlay_index="$FORK_ROOT/web-dist-$ver-banked-reset/index.html"
+  if [ -f "$final_overlay_index" ]; then
+    final_entry=$(sed -n 's#.*type="module" crossorigin src="/assets/\([^"]*\.js\)".*#\1#p' "$final_overlay_index" | head -n 1)
+    [ -n "$final_entry" ] || { echo "$ver final-overlay entry ontbreekt ($final_overlay_index)"; return 0; }
+    entry="$final_entry"
+  fi
+  [ -f "$OMG_ROOT/web/dist/index.html" ] || { echo "web/dist/index.html ontbreekt"; return 0; }
+  # metrics-cpu (05-09-2026): patch_served_bundle.py schrijft de gepatchte
+  # entry als content-gehashte zus index-<base>-cpu-<sha12>.js naast het
+  # origineel (assets zijn immutable gecachet) en wijst index.html door. Die
+  # afgeleide naam is dezelfde overlay-entry en telt als actief.
+  local actual base
+  actual=$(sed -n 's#.*type="module" crossorigin src="/assets/\([^"]*\.js\)".*#\1#p' "$OMG_ROOT/web/dist/index.html" | head -n 1)
+  base="${entry%.js}"
+  case "$actual" in
+    "$entry") ;;
+    "$base"-cpu-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].js) entry="$actual" ;;
+  esac
+  idx=$(grep -c "type=\"module\" crossorigin src=\"/assets/$entry\"" "$OMG_ROOT/web/dist/index.html" || true)
+  [ "${idx:-0}" -ge 1 ] || { echo "index.html verwijst niet naar /assets/$entry"; return 0; }
+  [ -f "$OMG_ROOT/web/dist/assets/$entry" ] || { echo "roster-entry assets/$entry bestaat niet"; return 0; }
+  if [ "$ver" = "0.6.18" ]; then
+    grep -aFq 'Use "/fast", "/fast on", or "/fast off".' "$OMG_ROOT/web/dist/assets/$entry" \
+      || { echo "0.6.18 entry bevat geen zelfstandige Fast-chatcontrol"; return 0; }
+    grep -aFq 'Tibo mode is on: Fast service tier and High thinking' "$OMG_ROOT/web/dist/assets/$entry" \
+      || { echo "0.6.18 entry bevat geen Tibo Fast+High-control"; return 0; }
+  fi
+  echo ok
+}
+
+check_roster(){
+  local st
+  st=$(roster_state)
+  [ "$st" = "ok" ] && pass "chat-roster overlay actief (version-locked entry)" || bad "chat-roster overlay: $st"
+}
+
+# Een kale `oom`-match las elk Nederlands woord met "oom" erin als een
+# OOM-kill: "instroom" in een bot-prompt zette de hele gate op rood en
+# blokkeerde daarmee `omg-safe-update` (gemeten 28-08-2026, 2 valse regels).
+# Kernel en systemd schrijven de term hoofdletterig of met een underscore, dus
+# match hoofdlettergevoelig op de echte signalen en niet op los "oom".
+OOM_PATTERN='\bOOM\b|oom[-_]kill|oom_reaper|Out of memory|Killed process|memory\.max.*hit'
+
+check_resources(){
+  local cnt since
+  since=$(resolve_since)
+  cnt=$(failed_output | grep -c . || true)
+  [ "${cnt:-0}" -eq 0 ] && pass "geen failed units" || bad "failed units aanwezig (${cnt} regels)"
+  if [ -n "$since" ] && [ -z "$JOURNAL_SOURCE" ]; then
+    cnt=$(journalctl --user --no-pager --since "$since" 2>/dev/null | grep -vE 'OOM/cgroup-events|omg-pilot-check' | grep -cE "$OOM_PATTERN" || true)
+    cnt=$((cnt + $(journalctl -k --no-pager --since "$since" 2>/dev/null | grep -vE 'OOM/cgroup-events|omg-pilot-check' | grep -cE "$OOM_PATTERN" || true)))
+  else
+    cnt=$(journal_output | grep -vE 'OOM/cgroup-events|omg-pilot-check' | grep -cE "$OOM_PATTERN" || true)
+  fi
+  [ "${cnt:-0}" -eq 0 ] && pass "geen OOM/cgroup-events sinds ${since:-venster}" || bad "OOM/cgroup-events in venster (${cnt} regels)"
+}
+
+self_test(){
+  local tmp; tmp=$(mktemp -d); trap 'rm -rf -- "$tmp"' EXIT
+  # bind-parse: goed (alleen loopback) en fout (extra 0.0.0.0-listener)
+  printf 'LISTEN 0 512 127.0.0.1:8766 0.0.0.0:* users:(("bun",pid=1,fd=7))\n' > "$tmp/ss-good"
+  printf 'LISTEN 0 512 127.0.0.1:8766 0.0.0.0:*\nLISTEN 0 512 0.0.0.0:8766 0.0.0.0:*\n' > "$tmp/ss-bad"
+  local a b
+  a=$(awk '$4 ~ /:8766$/ {print $4}' "$tmp/ss-good" | grep -c '^127\.0\.0\.1:8766$')
+  b=$(awk '$4 ~ /:8766$/ {print $4}' "$tmp/ss-bad" | grep -vc '^127\.0\.0\.1:8766$')
+  [ "$a" -eq 1 ] || { echo "selftest bind-good faalt"; exit 1; }
+  [ "$b" -eq 1 ] || { echo "selftest bind-bad faalt"; exit 1; }
+  printf '{"agents":[{"key":"aisdk","status":{"configured":true,"accountConnected":true}},{"key":"codex-aisdk","status":{"configured":true,"accountConnected":true}},{"key":"opencode","status":{"configured":false,"accountConnected":false}}]}' > "$tmp/ag.json"
+  a=$(jq '[.agents[]? | select(.status.configured == true and .status.accountConnected == true)] | length' "$tmp/ag.json")
+  [ "$a" -eq 2 ] || { echo "selftest agents-json faalt ($a)"; exit 1; }
+  printf '{"channel":"release"}\n' > "$tmp/install.json"
+  jq -e '.channel' "$tmp/install.json" >/dev/null || { echo "selftest install.json faalt"; exit 1; }
+  # since-resolutie (issue 521): override wint exact, service-start verslaat
+  # installedAt, ontbrekende systemd-timestamp valt terug op installedAt.
+  local saved_dir="$DATA_DIR" saved_ts="$ACTIVE_TS_SOURCE"
+  mkdir -p "$tmp/data-ts"
+  printf '{"channel":"release","installedAt":"2026-08-01T00:00:00Z"}\n' > "$tmp/data-ts/install.json"
+  printf 'ActiveEnterTimestamp=Thu 2026-08-21 09:14:02 CEST\n' > "$tmp/ts-active"
+  printf 'ActiveEnterTimestamp=\n' > "$tmp/ts-empty"
+  DATA_DIR="$tmp/data-ts"; ACTIVE_TS_SOURCE="$tmp/ts-active"; SINCE=""
+  a=$(resolve_since)
+  [ "$a" = "2026-08-21 09:14:02" ] || { echo "selftest since-service-start faalt ($a)"; exit 1; }
+  SINCE="2026-08-20 08:00:00"
+  a=$(resolve_since)
+  [ "$a" = "2026-08-20 08:00:00" ] || { echo "selftest since-override faalt ($a)"; exit 1; }
+  SINCE=""; ACTIVE_TS_SOURCE="$tmp/ts-empty"
+  a=$(resolve_since)
+  [ "$a" = "2026-08-01T00:00:00Z" ] || { echo "selftest since-installedAt-fallback faalt ($a)"; exit 1; }
+  DATA_DIR="$saved_dir"; ACTIVE_TS_SOURCE="$saved_ts"; SINCE="${OMG_PILOT_SINCE:-}"
+  # roster-gate (issue 521 chat-roster): versie in de ondersteunde lijst,
+  # entry-swap, asset aanwezig.
+  local saved_root="$OMG_ROOT" saved_fork="$FORK_ROOT" r v610_entry v613_entry v618_entry
+  mkdir -p "$tmp/omg-ok/web/dist/assets" "$tmp/omg-ver" "$tmp/omg-ok69" "$tmp/omg-ok610/web/dist/assets" "$tmp/omg-ok613/web/dist/assets" "$tmp/omg-ok618/web/dist/assets" "$tmp/omg-entry" "$tmp/omg-asset"
+  printf '{"version":"0.6.7"}\n' > "$tmp/omg-ok/package.json"
+  printf '<script type="module" crossorigin src="/assets/%s"></script>\n' "$ROSTER_ENTRY_JS" > "$tmp/omg-ok/web/dist/index.html"
+  printf 'entry\n' > "$tmp/omg-ok/web/dist/assets/$ROSTER_ENTRY_JS"
+  cp -R "$tmp/omg-ok/." "$tmp/omg-ver/"
+  printf '{"version":"0.6.8"}\n' > "$tmp/omg-ver/package.json"
+  cp -R "$tmp/omg-ok/." "$tmp/omg-empty/"
+  printf '{}\n' > "$tmp/omg-empty/package.json"
+  cp -R "$tmp/omg-ok/." "$tmp/omg-ok69/"
+  printf '{"version":"0.6.9"}\n' > "$tmp/omg-ok69/package.json"
+  v610_entry="$(jq -r '.entry // empty' "$FORK_ROOT/web-dist-0.6.10-chat-overlay/manifest.json" 2>/dev/null)"
+  [ -n "$v610_entry" ] || { echo "selftest roster-0.6.10-manifest faalt"; exit 1; }
+  printf '{"version":"0.6.10"}\n' > "$tmp/omg-ok610/package.json"
+  printf '<script type="module" crossorigin src="/assets/%s"></script>\n' "$v610_entry" > "$tmp/omg-ok610/web/dist/index.html"
+  printf 'entry\n' > "$tmp/omg-ok610/web/dist/assets/$v610_entry"
+  v613_entry="$(jq -r '.entry // empty' "$FORK_ROOT/web-dist-0.6.13-chat-overlay/manifest.json" 2>/dev/null)"
+  [ -n "$v613_entry" ] || { echo "selftest roster-0.6.13-manifest faalt"; exit 1; }
+  printf '{"version":"0.6.13"}\n' > "$tmp/omg-ok613/package.json"
+  printf '<script type="module" crossorigin src="/assets/%s"></script>\n' "$v613_entry" > "$tmp/omg-ok613/web/dist/index.html"
+  printf 'entry\n' > "$tmp/omg-ok613/web/dist/assets/$v613_entry"
+  v618_entry="$(jq -r '.entry // empty' "$FORK_ROOT/web-dist-0.6.18-chat-overlay/manifest.json" 2>/dev/null)"
+  [ -n "$v618_entry" ] || { echo "selftest roster-0.6.18-manifest faalt"; exit 1; }
+  printf '{"version":"0.6.18"}\n' > "$tmp/omg-ok618/package.json"
+  printf '<script type="module" crossorigin src="/assets/%s"></script>\n' "$v618_entry" > "$tmp/omg-ok618/web/dist/index.html"
+  printf 'Use "/fast", "/fast on", or "/fast off".\nTibo mode is on: Fast service tier and High thinking\n' > "$tmp/omg-ok618/web/dist/assets/$v618_entry"
+  cp -R "$tmp/omg-ok/." "$tmp/omg-entry/"
+  printf '<script type="module" crossorigin src="/assets/index-Anders.js"></script>\n' > "$tmp/omg-entry/web/dist/index.html"
+  cp -R "$tmp/omg-ok/." "$tmp/omg-asset/"
+  rm "$tmp/omg-asset/web/dist/assets/$ROSTER_ENTRY_JS"
+  OMG_ROOT="$tmp/omg-ok"
+  [ "$(roster_state)" = "ok" ] || { echo "selftest roster-ok faalt"; exit 1; }
+  OMG_ROOT="$tmp/omg-ok69"
+  [ "$(roster_state)" = "ok" ] || { echo "selftest roster-ok-0.6.9 faalt"; exit 1; }
+  OMG_ROOT="$tmp/omg-ok610"
+  [ "$(roster_state)" = "ok" ] || { echo "selftest roster-ok-0.6.10 faalt"; exit 1; }
+  OMG_ROOT="$tmp/omg-ok613"
+  [ "$(roster_state)" = "ok" ] || { echo "selftest roster-ok-0.6.13 faalt"; exit 1; }
+  OMG_ROOT="$tmp/omg-ok618"
+  [ "$(roster_state)" = "ok" ] || { echo "selftest roster-ok-0.6.18 faalt"; exit 1; }
+  mkdir -p "$tmp/fork/web-dist-0.6.38-chat-overlay" "$tmp/fork/web-dist-0.6.38-banked-reset" "$tmp/omg-ok638/web/dist/assets"
+  printf '{"entry":"index-Basis.js"}\n' > "$tmp/fork/web-dist-0.6.38-chat-overlay/manifest.json"
+  printf '<script type="module" crossorigin src="/assets/index-Final.js"></script>\n' > "$tmp/fork/web-dist-0.6.38-banked-reset/index.html"
+  printf '{"version":"0.6.38"}\n' > "$tmp/omg-ok638/package.json"
+  cp "$tmp/fork/web-dist-0.6.38-banked-reset/index.html" "$tmp/omg-ok638/web/dist/index.html"
+  printf 'entry\n' > "$tmp/omg-ok638/web/dist/assets/index-Final.js"
+  FORK_ROOT="$tmp/fork"; OMG_ROOT="$tmp/omg-ok638"
+  [ "$(roster_state)" = "ok" ] || { echo "selftest roster-final-overlay-0.6.38 faalt"; exit 1; }
+  FORK_ROOT="$saved_fork"
+  OMG_ROOT="$tmp/omg-ver"
+  r=$(roster_state); case "$r" in *"0.6.8"*) : ;; *) echo "selftest roster-versie faalt ($r)"; exit 1 ;; esac
+  OMG_ROOT="$tmp/omg-empty"
+  r=$(roster_state); case "$r" in *"onleesbaar"*) : ;; *) echo "selftest roster-versie-leeg faalt ($r)"; exit 1 ;; esac
+  OMG_ROOT="$tmp/omg-entry"
+  r=$(roster_state); case "$r" in *"verwijst niet"*) : ;; *) echo "selftest roster-entry faalt ($r)"; exit 1 ;; esac
+  OMG_ROOT="$tmp/omg-asset"
+  r=$(roster_state); case "$r" in *"bestaat niet"*) : ;; *) echo "selftest roster-asset faalt ($r)"; exit 1 ;; esac
+  OMG_ROOT="$saved_root"
+  echo "SELFTEST OK"
+  exit 0
+}
+
+case "${1:-}" in
+  --self-test) self_test ;;
+  *) ;;
+esac
+
+check_service
+check_bind
+check_private_url
+check_agents
+check_t3_browser
+check_persistence
+check_roster
+check_resources
+
+if [ "$fail" -eq 0 ]; then
+  echo "OMG-PILOT-CHECK: ALLE CHECKS GROEN"
+  exit 0
+fi
+echo "OMG-PILOT-CHECK: FAIL (zie FAIL-regels)"
+exit 1
