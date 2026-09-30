@@ -61,7 +61,9 @@ else:
    ab=before.pop('sessionBindings',{});nb=after.pop('sessionBindings',{})
    assert before==after,'Claude account settings changed'
    assert all(nb.get(k)==v for k,v in ab.items()),'Existing Claude session binding changed'
-   new_ids=set(nb)-set(ab);assert new_ids<=set(now['sessions']),'New binding has no live session'
+   new_ids=set(nb)-set(ab)
+   unproven=[k for k in new_ids if k not in now['sessions'] and not ended_normally('http://127.0.0.1:8766',k)]
+   assert not unproven,'New binding has neither a live session nor a normally ended durable transcript'
    account_ids={a['id'] for a in after['accounts']}|{'default'}
    assert all(nb[k] in account_ids for k in new_ids),'New binding has unknown account'
    changed.remove(claude);print('CONCURRENT_CLAUDE_BINDINGS_ONLY',len(new_ids))

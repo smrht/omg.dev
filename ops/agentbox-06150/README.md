@@ -59,7 +59,8 @@ Running API and public browser both report 0.6.150. Private manifest: 9,676
 entries, zero changes on final replay. All 26 settings, 83 routines, baseline
 27 session identities/transcripts and three Computer process identities remain.
 The later `check-live <backup>` audit accepts only additional account bindings
-for new live chats; account records and all pre-existing bindings must still
+for new live chats or chats proved normally ended with a durable transcript;
+account records and all pre-existing bindings must still
 equal the verified backup. Activation `check` remains byte-exact.
 
 Public Firefox acceptance passed at desktop widths 1500/1200/1024 and mobile
