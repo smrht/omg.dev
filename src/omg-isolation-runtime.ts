@@ -3,6 +3,7 @@ import { readFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { ensureDiskBackedTmpdir } from "./tmp-reclaim.ts";
+import { agentboxResourceGate, agentboxResourcePolicyConfigured } from "./agentbox-resource-admission.ts";
 
 export function workerCommand(command: string[], name: string, cwd: string, slice = "lfg-agents.slice") {
   if (process.platform !== "linux") return command;
@@ -22,7 +23,30 @@ export function workerCommand(command: string[], name: string, cwd: string, slic
     "--", ...command];
 }
 
-function pressureHigh(): boolean {
+export class ResourceCapacityDeferred extends Error {}
+
+/** Shared policy for both scheduled backends and interactive thread replies. */
+export function sharedWorkerCapacityReason(mode = "auto", options?: {
+  stateFile?: string; env?: Record<string, string | undefined>; freshAvailableBytes?: number; pending?: number;
+}): string | null {
+  if (!options?.stateFile && !agentboxResourcePolicyConfigured(options?.env)) return null;
+  let available = options?.freshAvailableBytes;
+  if (available === undefined) {
+    try { available = Number(readFileSync("/proc/meminfo", "utf8").match(/^MemAvailable:\s+(\d+)\s+kB$/m)?.[1] ?? 0) * 1024; }
+    catch { available = 0; }
+  }
+  const gate = agentboxResourceGate(mode === "chat" ? "interactive" : "schedule", {
+    ...options, freshAvailableBytes: available,
+  });
+  if (gate.status === "refused") return gate.message;
+  if (gate.status === "allow" && gate.memory.availableBytes < gate.memory.reserveBytes + ((options?.pending ?? active) + 1) * gate.memory.launchBytes) {
+    return "shared memory reserve is needed by interactive work; background run stays pending";
+  }
+  return null;
+}
+
+function pressureHigh(mode: string): boolean {
+  if (agentboxResourcePolicyConfigured()) return sharedWorkerCapacityReason(mode) !== null;
   if (process.platform !== "linux") return false;
   const root = `/sys/fs/cgroup/user.slice/user-${process.getuid!()}.slice/user@${process.getuid!()}.service`;
   const paths = ["/proc/pressure/memory", `${root}/lfg.slice/lfg-agents.slice/memory.pressure`,
@@ -68,9 +92,9 @@ async function isolatedWorkerRun(
 ): Promise<string> {
   const deadline = Date.now() + input.capacityWaitMs;
   let announced = false;
-  while (active >= 3 || pressureHigh()) {
+  while (active >= 3 || pressureHigh(input.mode)) {
     if (!announced) { onLog("[isolation] waiting for background capacity or memory pressure to clear"); announced = true; }
-    if (Date.now() >= deadline) throw new Error(input.mode === "chat"
+    if (Date.now() >= deadline) throw new ResourceCapacityDeferred(input.mode === "chat"
       ? "Thread reply deferred: memory pressure or capacity persisted"
       : "Background run deferred: memory pressure or capacity persisted for 10 minutes");
     await Bun.sleep(2000);

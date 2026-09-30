@@ -16,6 +16,12 @@ import {
   computerAgentAdmissionContext,
   isScheduleSpawned,
 } from "../agent-admission.ts";
+import {
+  agentboxResourceGate,
+  agentboxResourcePolicyConfigured,
+  agentboxAdmissionMemory,
+  AgentboxResourceRefusal,
+} from "../agentbox-resource-admission.ts";
 import { PATHS, appVersion, installInfo, localServeBaseUrl } from "../config.ts";
 import { desktopRuntimeReadyPayload } from "../desktop-parent.ts";
 import { handleServerAccessRequest } from "../server-access.ts";
@@ -1027,14 +1033,39 @@ async function activationGate(
     kind === "schedule"
       ? (computer?.scheduleLimit ?? settings.maxLiveAgents)
       : (computer?.limit ?? settings.maxLiveAgents);
-  if (limit === 0) return { release: () => {} };
+  // Agentbox shared-memory policy (AGENTBOX_RESOURCE_STATE). When the operator
+  // configured it, it applies to every launch — including a count-unlimited
+  // self-hosted box — and a refused gate returns before admission, so no
+  // reclaim of any kind runs on a resource failure. When the variable is
+  // unset this stays `off` and every downstream branch is byte-for-byte the
+  // upstream one (Mac and default installs included).
+  const resourcePolicyActive = agentboxResourcePolicyConfigured();
+  const resourceGate = agentboxResourceGate(options?.kind === "bot" ? "bot" : kind, {
+    freshAvailableBytes: hostAvailableMemoryBytes(),
+  });
+  if (resourceGate.status === "refused") {
+    return err(429, resourceGate.message, resourceGate.code);
+  }
+  // An unlimited count is the owner's own preference and keeps its bypass —
+  // but only where no resource policy was configured. Under one, "unlimited"
+  // becomes NO_AGENT_LIMIT: the count stops mattering while the memory
+  // budget, the pending-launch reservations and the serialized transition
+  // all keep working. It must never become a zero-reservation bypass.
+  if (limit === 0 && !resourcePolicyActive) return { release: () => {} };
   const overLimit = !computer && options?.overLimit === true;
   const exemptFromCount = options?.kind === "bot";
-  const reservation = await agentAdmission.acquire(
-    overLimit || exemptFromCount ? NO_AGENT_LIMIT : limit,
+  let reservation: Awaited<ReturnType<typeof agentAdmission.acquire>>;
+  try {
+  reservation = await agentAdmission.acquire(
+    overLimit || exemptFromCount || (limit === 0 && resourcePolicyActive)
+      ? NO_AGENT_LIMIT
+      : limit,
     async () => {
-      const available = hostAvailableMemory();
       const sessions = await listSessions().catch(() => []);
+      const available = hostAvailableMemory();
+      const sharedMemory = agentboxAdmissionMemory(options?.kind === "bot" ? "bot" : kind, {
+        freshAvailableBytes: available.bytes,
+      });
       // Disjoint pools for Computer AND self-hosted boxes (issue 521):
       // interactive launches count only interactive residents, schedule
       // launches only schedule residents; persistent bots hold no slot.
@@ -1044,7 +1075,7 @@ async function activationGate(
         // Always measured, so every launch books its share of memory even on
         // the count-capped path. Only whether a shortfall REFUSES is
         // conditional.
-        memory: agentLaunchMemoryBudget(totalmem(), available.bytes),
+        memory: sharedMemory ?? agentLaunchMemoryBudget(totalmem(), available.bytes),
         // A self-hosted box trusts its own count-based cap. An override has
         // just discarded that cap, so the budget becomes the last thing between
         // "start one more" and an OOM — but only where the reading means what
@@ -1052,7 +1083,12 @@ async function activationGate(
         // reclaimable cache and would refuse every override on a perfectly
         // healthy Mac. Better to honour the owner's explicit decision about
         // their own machine than to block it on a number we know is wrong.
-        enforceMemory: computer !== null || (overLimit && available.trusted),
+        // A configured Agentbox resource policy overrides both: its budget
+        // came from the controller snapshot plus a fresh /proc reading, so
+        // every count-only path enforces memory too.
+        enforceMemory: sharedMemory !== undefined
+          ? true
+          : computer !== null || (overLimit && available.trusted),
       };
     },
     computer
@@ -1063,15 +1099,31 @@ async function activationGate(
     // A self-hosted interactive launch at its own live cap may trade the
     // oldest safe idle durable ordinary session for the slot instead of
     // refusing the owner (issue 521). Computer plans keep reclaim
-    // memory-pressure-only.
-    computer ? undefined : { reclaimOnLimit: kind === "interactive" },
+    // memory-pressure-only. This stays the existing cap-reclaim safety —
+    // only idle durable ordinary sessions, never active, persistent or
+    // non-durable ones — and a refused resource gate never reaches it.
+    { reclaimOnMemory: !resourcePolicyActive, reclaimOnLimit: !computer && kind === "interactive" },
   );
+  } catch (error) {
+    if (error instanceof AgentboxResourceRefusal) return err(429, error.message, "resource_pressure");
+    throw error;
+  }
   if (reservation.ok) return reservation;
   // Tagged `plan_limit` ONLY on a hosted Computer. An ordinary LFG install that
   // hits its own maxLiveAgents setting was stopped by a preference it can edit
   // in Settings, not by a plan — telling that person to upgrade would be
   // nonsense, and a host must not paint an upgrade sheet over it.
   if (reservation.reason === "memory") {
+    // Under the configured shared-memory policy the refusal is pressure, not
+    // a plan or a preference: no upgrade sheet, no close recommendation —
+    // just retry later.
+    if (resourcePolicyActive) {
+      return err(
+        429,
+        `shared memory is too low to start another agent safely (${formatMemory(reservation.availableBytes)} available, ${formatMemory(reservation.requiredBytes)} needed); retry when memory has freed up`,
+        "resource_pressure",
+      );
+    }
     return err(
       429,
       computer
@@ -2456,6 +2508,7 @@ function json(obj: unknown, init?: ResponseInit) {
  * snapshot, so clients do not have to parse this code or the prose for counts.
  */
 export type ApiErrorCode =
+  | "resource_pressure"
   | "plan_limit"
   | "agent_limit"
   | "bot_quota_limit"
@@ -11862,6 +11915,19 @@ a{color:#60a5fa}
           hideFromRosterWhenCached(m[1]);
           return json({ ok: true });
         }
+      }
+
+      if (path === "/api/agentbox/resource-admission" && req.method === "GET") {
+        const available = hostAvailableMemoryBytes();
+        const verdict = (kind: "interactive" | "schedule") => {
+          const gate = agentboxResourceGate(kind, { freshAvailableBytes: available });
+          if (gate.status === "off") return { enabled: false };
+          if (gate.status === "refused") return { enabled: true, canStart: false, reason: gate.message };
+          const availableBytes = Math.max(0, gate.memory.availableBytes - agentAdmission.reservedBytes);
+          const requiredBytes = gate.memory.reserveBytes + gate.memory.launchBytes;
+          return { enabled: true, canStart: availableBytes >= requiredBytes, availableBytes, requiredBytes };
+        };
+        return json({ interactive: verdict("interactive"), background: verdict("schedule"), pendingLaunches: agentAdmission.reserved });
       }
 
       if (path === "/api/agentbox/idle-child-policy" && req.method === "GET") {

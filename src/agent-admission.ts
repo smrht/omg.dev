@@ -278,7 +278,7 @@ export class AgentAdmissionController {
       enforceMemory?: boolean;
     }>,
     reclaim?: () => Promise<number>,
-    options?: { reclaimOnLimit?: boolean },
+    options?: { reclaimOnLimit?: boolean; reclaimOnMemory?: boolean },
   ): Promise<AgentAdmission> {
     let releaseTransition!: () => void;
     const previous = this.transition;
@@ -296,7 +296,7 @@ export class AgentAdmissionController {
       if (
         !admission.ok &&
         reclaim &&
-        (admission.reason === "memory" ||
+        ((options?.reclaimOnMemory !== false && admission.reason === "memory") ||
           (options?.reclaimOnLimit && admission.reason === "limit"))
       ) {
         const reclaimed = await reclaim();
