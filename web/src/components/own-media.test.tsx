@@ -133,10 +133,10 @@ beforeEach(() => {
 });
 afterEach(() => ui.cleanup());
 
-async function renderPanel(api: FakeApi, threadId?: string) {
+async function renderPanel(api: FakeApi) {
   const { OwnMediaPanel } = await import("./own-media");
   await ui.flushAsync(async () => {
-    ui.render(<OwnMediaPanel api={api} threadId={threadId ?? null} />);
+    ui.render(<OwnMediaPanel api={api} />);
   });
 }
 
@@ -216,7 +216,7 @@ describe("OwnMediaPanel", () => {
 
   test("browser handoff: submit stores the job, opens nothing, and completes by upload", async () => {
     const api = fakeApi();
-    await renderPanel(api, "11111111-1111-4111-8111-111111111111");
+    await renderPanel(api);
     setInput('input[name="modelHint"]', "wat ChatGPT aanbiedt");
     setInput('textarea[name="prompt"]', "een rode fiets");
     click("button[type=submit]");
@@ -224,7 +224,7 @@ describe("OwnMediaPanel", () => {
 
     expect(api.submitted).toHaveLength(1);
     expect(api.submitted[0].provider).toBe("chatgpt");
-    expect(api.submitted[0].threadId).toBe("11111111-1111-4111-8111-111111111111");
+    expect(api.submitted[0].threadId).toBeUndefined();
     expect(api.submitted[0].costAcknowledged).toBeUndefined();
 
     const handoff = ui.query('a[href="https://chatgpt.com"]');

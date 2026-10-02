@@ -102,9 +102,7 @@ import {
 } from "./lib/project-filter";
 import { ChatStarterRow } from "./components/chat-starter-row";
 import { groupNodesByProject, type ProjectGroup } from "./lib/session-groups";
-import { pathnameToSessionId, pathnameToThreadId, sessionToPath, threadToPath } from "./lib/app-search";
-import { NEW_THREAD_ID, ThreadChat, ThreadRailSection, useTypingReport, type ThreadComposerProps } from "./components/threads";
-import { PullToThread } from "./components/pull-to-thread";
+import { pathnameToSessionId, sessionToPath } from "./lib/app-search";
 import { DaybreakProgramSelect, SessionDaybreakSubmenu } from "./components/session-daybreak-control";
 import {
   cyberAccessProgramsFor,
@@ -115,8 +113,6 @@ import {
   setSessionCyberAccessProgram,
   type CyberAccessProgram,
 } from "./lib/session-daybreak";
-import { useThreads } from "./lib/threads";
-import { THREAD_MENTIONS, threadPreview, type ThreadMentionOption, type ThreadSummary } from "../../packages/protocol/src/threads";
 import {
   BOT_ROSTER_ROW_CLASS,
   isPrimarySurfaceTab,
@@ -6221,7 +6217,6 @@ export function App() {
   // The list is read through a ref so a click sees the latest sessions.
   const sessionsForRefs = useRef<Session[]>(sessions);
   const openLiveAgentRef = useRef<(sid: string) => void>(() => {});
-  const openThreadPageRef = useRef<(id: string) => void>(() => {});
   sessionsForRefs.current = sessions;
   useEffect(() => {
     registerLiveAgents({
@@ -6240,24 +6235,12 @@ export function App() {
     registerSessionRefHandlers({
       navigate: openSessionPage,
       peekSessions: () => sessionsForRefs.current,
-      navigateThread: (id) => openThreadPageRef.current(id),
     });
     return () => registerSessionRefHandlers(null);
   }, [openSessionPage]);
   const closeSessionPage = useCallback(() => {
     void navigate({ to: "/", search: keepHostSearch });
   }, [navigate, keepHostSearch]);
-  // `/threads/<id>` is one thread, open (`/threads/new` for an empty one).
-  const openThreadId = pathnameToThreadId(pathname);
-  const openThreadPage = useCallback(
-    (id: string) => {
-      if (!id) return;
-      void navigate({ to: threadToPath(id), search: keepHostSearch });
-    },
-    [navigate, keepHostSearch],
-  );
-  // Thread references in rendered messages (`#Title` links) open through this.
-  openThreadPageRef.current = openThreadPage;
   const selectedBotConversationId = selectedBotId ? routeSearch.conversation ?? null : null;
   // A terminal is on screen — as the Terminal tab, or pulled up over any tab.
   // Both need the same soft-keyboard treatment: the shell pinned to the visible
@@ -9718,10 +9701,6 @@ export function App() {
             aria-hidden={!workspaceVisible}
           >
             <LiveView
-              threadViewer={botUnreadIdentity}
-              threadReplies={openThreadId ? routeSearch.replies ?? null : null}
-              openThreadId={openThreadId}
-              onOpenThread={openThreadPage}
               openSessionId={openSessionId}
               onOpenSessionPage={openSessionPage}
               onCloseSessionPage={closeSessionPage}
@@ -12059,10 +12038,6 @@ function LiveView({
   // unconditionally below (the original `findings.length` crash site). The fetch
   // layer already guards these to [], but default here too so any future caller
   // passing `undefined` degrades to an empty render instead of crashing the view.
-  openThreadId = null,
-  onOpenThread,
-  threadViewer = "",
-  threadReplies = null,
   openSessionId = null,
   onOpenSessionPage,
   onCloseSessionPage,
@@ -12129,13 +12104,6 @@ function LiveView({
   shippedReview?: Session | null;
   /** The session `/sessions/<id>` names, or null on the plain list. */
   openSessionId?: string | null;
-  /** The open thread (`/threads/<id>`), or null. */
-  openThreadId?: string | null;
-  /** Who writes in a thread from this browser; see lib/threads.ts. */
-  threadViewer?: string;
-  /** Replies to open in the thread, from `?replies=` (a push link). */
-  threadReplies?: string | null;
-  onOpenThread?: (id: string) => void;
   onOpenSessionPage?: (sid: string) => void;
   onCloseSessionPage?: () => void;
   liveSessionIds: string[];
@@ -12330,13 +12298,6 @@ function LiveView({
     [onOpenSessionPage],
   );
 
-  // Threads: people-first chat, above the sessions on both layouts.
-  const { threads } = useThreads();
-  const openThreadTask = useCallback(
-    (sid: string) => onOpenSessionPage?.(sid),
-    [onOpenSessionPage],
-  );
-
   // Same grouping the rail uses, from the same helper, so the two lists cannot
   // drift apart again.
   const originalProjectGroups = useMemo(
@@ -12403,16 +12364,14 @@ function LiveView({
     !working.length &&
     !idle.length &&
     !findings.length &&
-    !shippedReview &&
-    !threads.length &&
-    !openThreadId
+    !shippedReview
   ) {
     return (
       <div className="flex flex-col gap-5">
         {coach}
-        <PullToThread onStart={() => onOpenThread?.(NEW_THREAD_ID)}>
+        <>
           <RuntimeEmptyState />
-        </PullToThread>
+        </>
       </div>
     );
   }
@@ -12518,13 +12477,6 @@ function LiveView({
   if (isWide) {
     return (
       <RailStage
-        threads={threads}
-        threadViewer={threadViewer}
-        threadReplies={threadReplies}
-        openThreadId={openThreadId}
-        onOpenThread={onOpenThread}
-        onCloseThread={onCloseSessionPage}
-        onOpenThreadTask={openThreadTask}
         sessions={sessions}
         shippedReview={shippedReview}
         users={users}
@@ -12654,14 +12606,8 @@ function LiveView({
           transcript lives on the session's own page. */}
       <OverviewToolbar prefs={overviewPrefs} count={overviewGroups.reduce((n,g) => n+g.count,0)} project={projectFilter !== "__all" ? shortProject(projectFilter) : undefined} onClearProject={() => onProjectChange?.("__all")} />
       {!overviewGroups.length && <p role="status" className="px-4 py-6 text-sm text-muted-foreground">Geen gesprekken gevonden. Pas je zoekopdracht of filters aan.</p>}
-      {/* Pull the list down past the top to start a thread, as on iOS. */}
-      <PullToThread onStart={() => onOpenThread?.(NEW_THREAD_ID)}>
-        <ThreadRailSection
-          threads={threads}
-          activeId={openThreadId}
-          onOpen={(id) => onOpenThread?.(id)}
-          onNew={() => onOpenThread?.(NEW_THREAD_ID)}
-        />
+      <>
+
       <SessionGroups
         groups={overviewGroups}
         pinnedNodes={[]}
@@ -12671,7 +12617,7 @@ function LiveView({
         renderItem={renderMobileItem}
       />
 
-      </PullToThread>
+      </>
     </div>
     {/* Open findings live behind a pill, not at the end of the list. A group
         of them there put more work under a list that is already about work,
@@ -12748,26 +12694,6 @@ function LiveView({
         onClose={() => onCloseSessionPage?.()}
       />
     ) : null}
-    {/* An open thread is a page over the list, at the session sheet's layer
-        (z-90, above the bottom composer) and portalled to <body> for the same
-        reason: a host's stacking context must not clip it. */}
-    {openThreadId
-      ? createPortal(
-          <div className="fixed inset-0 z-[90] flex bg-background pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
-            <ThreadChat
-              threadId={openThreadId}
-              viewer={threadViewer}
-              initialReplies={threadReplies}
-              renderComposer={renderThreadComposer}
-              repos={repos}
-              onCreated={(id) => onOpenThread?.(id)}
-              onOpenTask={openThreadTask}
-              onBack={() => onCloseSessionPage?.()}
-            />
-          </div>,
-          document.body,
-        )
-      : null}
     </>
   );
 }
@@ -12832,23 +12758,7 @@ function RailStage({
   workspaceComposer,
   stageOverride = null,
   hostSettingsInMenu = false,
-  threads = [],
-  threadViewer = "",
-  threadReplies = null,
-  openThreadId = null,
-  onOpenThread,
-  onCloseThread,
-  onOpenThreadTask,
 }: {
-  threadViewer?: string;
-  threadReplies?: string | null;
-  /** Threads, listed above the sessions; see components/threads.tsx. */
-  threads?: ThreadSummary[];
-  /** The open thread fills the stage while it is open. */
-  openThreadId?: string | null;
-  onOpenThread?: (id: string) => void;
-  onCloseThread?: () => void;
-  onOpenThreadTask?: (sid: string) => void;
   sessions: Session[];
   shippedReview?: Session | null;
   users: User[];
@@ -13016,7 +12926,7 @@ function RailStage({
   // Mirror of the workspace list's scroll offset, restored when the workspace
   // becomes visible again (some engines drop it under display:none).
   const workspaceListScrollRef = useRef(0);
-  const workspaceUp = !!workspaceComposer && railSurface === "sessions" && !stageMode && !openThreadId;
+  const workspaceUp = !!workspaceComposer && railSurface === "sessions" && !stageMode;
 
   const bySid = useMemo(() => {
     const m = new Map<string, Session>();
@@ -13327,14 +13237,12 @@ function RailStage({
       // stage is showing the schedule list, and a preview set underneath it
       // would be an open session nobody can see.
       if (railSurface === "auto") onOpenSessions();
-      // A session picked while a thread fills the stage replaces the thread.
-      if (openThreadId) onCloseThread?.();
       // Board mode shows one session beside the board, pinned or not.
       setStageMode(true);
       if (railSurface !== "board" && validPinned.includes(sid)) return; // already a persistent column
       setPreview(sid);
     },
-    [validPinned, railSurface, onOpenSessions, openThreadId, onCloseThread],
+    [validPinned, railSurface, onOpenSessions],
   );
   // Arriving on the Board shows the board alone; whatever Live was previewing
   // is not what you came to look at.
@@ -14164,10 +14072,7 @@ function RailStage({
         ? boardStageColumns
         : stageColumns;
   // The board pane counts toward the grid shape.
-  // An open thread takes the whole stage.
-  const stagePaneCount = openThreadId && railSurface === "sessions"
-    ? 1
-    : activeStageColumns.length + (railSurface === "board" ? 1 : 0);
+  const stagePaneCount = activeStageColumns.length + (railSurface === "board" ? 1 : 0);
 
   // The bot list is the session list's sibling, not a page: same rail, same
   // rows, same click-to-open-a-column behaviour. A bot row IS a session row —
@@ -14356,8 +14261,7 @@ function RailStage({
         listScrollMemory={workspaceListScrollRef}
         active={workspaceUp}
       >
-        <ThreadRailSection threads={threads} activeId={openThreadId}
-          onOpen={(id) => onOpenThread?.(id)} onNew={() => onOpenThread?.(NEW_THREAD_ID)} />
+
         {!overviewGroups.length ? (
           <p role="status" className="px-3 py-6 text-sm text-muted-foreground">
             Geen gesprekken gevonden. Pas je zoekopdracht of filters aan.
@@ -14496,15 +14400,7 @@ function RailStage({
           />
         ) : null}
         <div data-overview-density={railSurface !== "chat" ? overviewPrefs.density : undefined} className="session-overview session-list-scroll min-h-0 flex-1 overflow-y-auto px-1.5 py-2">
-          {railSurface === "chat" ? botRailList : <PullToThread fill={false} onStart={() => onOpenThread?.(NEW_THREAD_ID)}>
-          {!railCollapsed && railSurface === "sessions" ? (
-            <ThreadRailSection
-              threads={threads}
-              activeId={openThreadId}
-              onOpen={(id) => onOpenThread?.(id)}
-              onNew={() => onOpenThread?.(NEW_THREAD_ID)}
-            />
-          ) : null}
+          {railSurface === "chat" ? botRailList : <>
 
           {/* Leads the list, the way New bot leads the roster: it belongs to
               the thing it adds to, under the switch bar that says which list
@@ -14585,7 +14481,7 @@ function RailStage({
             headerless={showFolderMenu}
             dense
           />
-          </PullToThread>}
+          </>}
         </div>
         {/* Host-owned footer. A host embedding LFG as its whole desktop surface
             (omg) has nowhere to put its own top-level navigation: this layout
@@ -14701,21 +14597,7 @@ function RailStage({
               : "grid-cols-2 grid-rows-2",
         )}
       >
-        {openThreadId && railSurface === "sessions" ? (
-          // Flat, as a session column is on the stage: no card border or radius.
-          <div className="h-full min-h-0 min-w-0 overflow-hidden">
-            <ThreadChat
-              threadId={openThreadId}
-              viewer={threadViewer}
-              initialReplies={threadReplies}
-              renderComposer={renderThreadComposer}
-              repos={repos}
-              onCreated={(id) => onOpenThread?.(id)}
-              onOpenTask={(sid) => onOpenThreadTask?.(sid)}
-              onBack={onCloseThread}
-            />
-          </div>
-        ) : railSurface === "auto" ? (
+        {railSurface === "auto" ? (
           <div className="h-full min-h-0 overflow-y-auto px-2 pt-2">{stageOverride}</div>
         ) : railSurface === "board" ? (
           <>
@@ -15216,49 +15098,6 @@ function RailGroup({
  * conversation) and which swipe actions, if any, make sense for what the row
  * represents.
  */
-/**
- * Threads in the session list, as on the iPad rail: a group like Pinned or a
- * folder, drawn only when there are threads, each row a session row without
- * an agent mark. There is no New button; a pull at the top of the list starts
- * a thread (PullToThread).
- */
-function ThreadRailGroup({
-  threads,
-  activeId,
-  collapsed,
-  dense = false,
-  onOpen,
-}: {
-  threads: ThreadSummary[];
-  activeId: string | null;
-  collapsed: boolean;
-  dense?: boolean;
-  onOpen: (id: string) => void;
-}) {
-  if (!threads.length) return null;
-  return (
-    <RailGroup label="Threads" count={threads.length} collapsed={collapsed} foldKey="__threads">
-      {threads.map((thread) => (
-        <RailRow
-          key={thread.id}
-          railKey={`thread:${thread.id}`}
-          collapsed={collapsed}
-          dense={dense}
-          active={activeId === thread.id}
-          cursored={false}
-          ariaLabel={`Thread ${thread.title}`}
-          tooltip={thread.title}
-          mark={null}
-          title={thread.title}
-          preview={threadPreview(thread)}
-          trailingStatic={relTime(thread.updatedAt)}
-          onActivate={() => onOpen(thread.id)}
-        />
-      ))}
-    </RailGroup>
-  );
-}
-
 const RailRow = memo(function RailRow({
   railKey,
   collapsed,
@@ -17050,128 +16889,6 @@ function SkillTextarea({
 // Shared growing field for the home and live-session chat composers. Keeping
 // the cap here prevents the two entry points from drifting back to different
 // viewport-relative heights, while SkillTextarea owns the resize/follow logic.
-/** A thread's `@` options as the picker draws them: omg's mark, the agent's icon, or the person's photo. */
-function threadPickerMentions(mentions: readonly ThreadMentionOption[] | undefined) {
-  return (mentions ?? THREAD_MENTIONS).map((row) => ({
-    id: row.id,
-    name: row.name,
-    hint: row.hint,
-    icon: row.kind === "agent" ? agentIconSrc(row.agent ?? "") : row.kind === "person" ? row.avatar || null : agentIconSrc("omg"),
-  }));
-}
-
-/**
- * THE SESSION CHAT BAR, IN A THREAD. The same pill, field, mic and send
- * button a session uses, so a thread does not grow a second-class input.
- * `@` offers omg (and, later, the people here) instead of the box's bots.
- * No attach button: a thread message is text.
- */
-function ThreadComposerBar({ testId, placeholder, onSend, autoFocus, onTyping, mentions }: ThreadComposerProps) {
-  const [text, setText] = useState("");
-  useTypingReport(text, onTyping);
-  const pickerMentions = useMemo(() => threadPickerMentions(mentions), [mentions]);
-  const [sending, setSending] = useState(false);
-  const [multiline, setMultiline] = useState(false);
-  // The session composer's file plumbing: eager uploads, paste, drop, annotate, HD.
-  const files = useComposerAttachments({
-    endpoint: (att) => `/api/uploads?filename=${encodeURIComponent(att.name)}`,
-    disabled: sending,
-  });
-  const [error, setError] = useState<string | null>(null);
-  const send = async (override?: string) => {
-    const body = (override ?? text).trim();
-    const attached = files.attachments;
-    if ((!body && !attached.length) || sending) return;
-    setSending(true);
-    setError(null);
-    setText("");
-    try {
-      // Uploads started when the files were attached; this waits only for bytes still in flight.
-      const uploaded = attached.length ? await Promise.all(attached.map(files.resolveUpload)) : [];
-      await onSend(body, uploaded.map((row) => ({ path: row.path, name: row.name })));
-      files.setAttachments([]);
-      files.forgetAllUploads();
-    } catch (e) {
-      setText(body);
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSending(false);
-    }
-  };
-  return (
-    <div className={cn("px-4 py-3", files.draggingFiles && "bg-primary/8")} {...files.dropZoneProps}>
-      {files.fileInput}
-      {files.annotator}
-      <ComposerAttachmentChips
-        className="mb-2"
-        items={files.attachments.map((att) => ({ att }))}
-        disabled={sending}
-        onAnnotate={files.setAnnotatingId}
-        onRemove={files.removeAttachment}
-        onToggleHd={files.setAttachmentHd}
-      />
-      <div
-        className={cn(
-          "lfg-gfield relative z-[1] flex gap-1 rounded-3xl px-2 py-1.5 md:gap-0.5 md:px-1.5 md:py-1",
-          multiline ? "items-end" : "items-center",
-        )}
-      >
-        <Button
-          size="icon"
-          type="button"
-          variant={files.draggingFiles ? "brand-soft" : "tint"}
-          className="size-10 shrink-0 rounded-full md:size-8"
-          onClick={files.openFilePicker}
-          aria-label="Attach files"
-          title="Attach files"
-          disabled={sending}
-        >
-          <Plus className="size-4" />
-        </Button>
-        <ComposerTextarea
-          data-testid={testId}
-          onPaste={files.onPasteFiles}
-          autoFocus={autoFocus}
-          value={text}
-          onValueChange={setText}
-          onMultilineChange={setMultiline}
-          plainMentions={pickerMentions}
-          mentionBots={false}
-          onKeyDown={(e) => {
-            if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
-            e.preventDefault();
-            void send();
-          }}
-          placeholder={placeholder}
-          disabled={sending}
-          rows={1}
-          className="min-h-10 resize-none border-0 bg-transparent px-2 py-2 text-base leading-5 shadow-none placeholder:text-muted-foreground focus-visible:border-0 focus-visible:ring-0 md:min-h-8 md:py-1.5 md:text-sm"
-        />
-        <MicButton
-          className="size-10 shrink-0 rounded-full bg-foreground/[0.06] text-foreground/70 hover:bg-foreground/[0.12] hover:text-foreground md:size-8"
-          baseText={text}
-          onText={setText}
-          onInterim={setText}
-          onAutoSubmit={(said, base) => void send(base.trim() ? `${base.trimEnd()} ${said}` : said)}
-          onCancel={(base) => setText(base)}
-        />
-        {text.trim() || files.attachments.length || sending ? (
-          <ComposerSendButton
-            className="size-10 shrink-0 md:size-8"
-            sending={sending}
-            defaultMode="steer"
-            onSend={() => void send()}
-            onQueue={() => void send()}
-          />
-        ) : null}
-      </div>
-      {error ? <p className="mt-1 px-2 text-[12px] text-destructive">{error}</p> : null}
-    </div>
-  );
-}
-
-const renderThreadComposer = (props: ThreadComposerProps) => <ThreadComposerBar {...props} />;
-
 function ComposerTextarea({ className, ...props }: SkillTextareaProps) {
   return (
     <SkillTextarea
@@ -25651,7 +25368,7 @@ function NewSessionDialog({
                 Beeld of video op een aanbieder die jij kiest, betaald met je eigen account of sleutel.
               </DialogDescription>
             </DialogHeader>
-            <OwnMediaPanel threadId={null} />
+            <OwnMediaPanel />
           </DialogContent>
         </Dialog>
       ) : null}

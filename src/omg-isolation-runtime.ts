@@ -145,24 +145,3 @@ export async function isolatedAutoBackend(agent: unknown, prompt: string, cwd: s
     ? agent.id.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 40) : mode;
   return isolatedWorkerRun({ agent, prompt, cwd, mode }, { task, mode, cwd, capacityWaitMs: 10 * 60_000 }, onLog);
 }
-
-/**
- * A thread's one-shot chat completion, contained on Linux like an auto run:
- * same slice, same memory/task caps, same cgroup-wide cleanup of the CLI
- * subtree an adapter spawns. The wait for capacity is short because a chat
- * reply that queues for minutes is a failure the thread should see, not hide.
- */
-export async function isolatedChatCompletion(input: {
-  agent: string;
-  model: string;
-  thinkingLevel?: string | null;
-  system: string;
-  user: string;
-  cwd?: string | null;
-}, onLog: (s: string) => void = () => {}): Promise<string> {
-  return isolatedWorkerRun(
-    { mode: "chat", completion: input },
-    { task: input.agent.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 40), mode: "chat", cwd: input.cwd || process.cwd(), capacityWaitMs: 30_000 },
-    onLog,
-  );
-}

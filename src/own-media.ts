@@ -72,7 +72,6 @@ import {
   type OwnMediaQuote,
   type OwnMediaSubmitInput,
 } from "../packages/protocol/src/own-media.ts";
-import { getConversation } from "./conversations.ts";
 
 export * from "../packages/protocol/src/own-media.ts";
 
@@ -538,8 +537,8 @@ function uploadsRootReal(root: string): string {
 }
 
 function defaultThreadExists(threadId: string): boolean {
-  const conversation = getConversation(threadId);
-  return conversation?.kind === "thread";
+  // Historical job metadata is retained, but new thread-bound jobs are unavailable.
+  return false;
 }
 
 function settings(opts: OwnMediaOptions): Settings {

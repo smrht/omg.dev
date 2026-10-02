@@ -27,37 +27,6 @@ import { desktopRuntimeReadyPayload } from "../desktop-parent.ts";
 import { handleServerAccessRequest } from "../server-access.ts";
 import { CloudAccountError, createCloudAccount } from "../cloud-account.ts";
 import { generateSessionTitle } from "../session-auto-title.ts";
-import {
-  answerMention,
-  appendThreadMessage,
-  bridgeTaskCompletion,
-  isThread,
-  listThreads,
-  mentionsOmg,
-  omgWake,
-  turnAnswer,
-  addMentionedPeople,
-  keepSessionFile,
-  threadPeople,
-  keepThreadUpload,
-  participantsForView,
-  setTyping,
-  threadTyping,
-  readThreadMessages,
-  setThreadNotifier,
-  startThread,
-  summarizeThread,
-  threadAuthor,
-  threadDisplayName,
-  threadParticipantId,
-  threadTasks,
-  threadUpdate,
-  type ThreadDeps,
-} from "../threads.ts";
-import { mentionAgents, mentionedAgent, threadPreview, type ThreadMedia, type ThreadSelection } from "../../packages/protocol/src/threads.ts";
-import { checkThreadSelectionForStore, resolveThreadTurn, threadSelectionOptions, type ThreadCatalogItem, type ThreadTurnPair } from "../thread-model.ts";
-import { codexFamilyCapabilities, dispatchThreadCompletion, visibleCompletionError } from "../thread-completion.ts";
-import { queueThreadAnswer } from "../threads.ts";
 import { COMPUTER_KIOSK_PATH } from "../../packages/protocol/src/computer-kiosk.ts";
 import { buildContinueSessionPrompt } from "../session-continue-prompt.ts";
 import { regenerateSessionTitle } from "../session-title-regenerate.ts";
@@ -292,7 +261,6 @@ import {
   ensureBotConversation,
   ensureConversationHuman,
   getConversation,
-  threadForTaskSession,
   leaveConversationParticipant,
   replaceConversationPrimaryRuntime,
   upsertConversationParticipant,
@@ -1327,353 +1295,6 @@ function renderReportHtml(raw: string): string {
   return html
     .replace(/<table>/g, '<div class="table-wrap"><table>')
     .replace(/<\/table>/g, "</table></div>");
-}
-
-// ---------- threads ----------
-
-/**
- * omg's thread replies run on the box's own connected accounts (one-shot,
- * tool-less adapters in thread-completion.ts). The hosted omg.dev chat
- * endpoint is deliberately NOT here, and there is no fallback to it: a pair
- * that cannot answer is an error the thread shows.
- */
-async function threadTurnFor(stored: ThreadSelection | null, mentioned: { key: string } | null): Promise<ThreadTurnPair> {
-  const codingAgents = await listCodingAgentsCached().catch(() => []);
-  const options = threadSelectionOptions(
-    listModelCatalog(codingAgents) as ThreadCatalogItem[],
-    codingAgents,
-    codexFamilyCapabilities(readModelDiscoveryCacheSync()),
-  );
-  const { defaultAgent, defaultModel } = getGlobalSettingsSync();
-  const turn = resolveThreadTurn({
-    stored,
-    options,
-    defaultAgent: defaultAgent?.trim() || null,
-    defaultModel: defaultModel?.trim() || null,
-    mentioned,
-  });
-  if (turn.kind === "error") throw new Error(turn.reason);
-  return { completion: turn.completion, task: turn.task };
-}
-
-/**
- * A selection a client wants to store: null clears it, an object must name a
- * connected thread-capable agent, one of its models, a level that model
- * supports, and an access program the live metadata offers. Anything else is
- * a 400, never a silently corrected choice.
- */
-async function threadSelectionFromBody(
-  value: unknown,
-): Promise<{ ok: true; selection: ThreadSelection | null } | { ok: false; reason: string }> {
-  if (value === null || value === undefined) return { ok: true, selection: null };
-  const codingAgents = await listCodingAgentsCached().catch(() => []);
-  const options = threadSelectionOptions(
-    listModelCatalog(codingAgents) as ThreadCatalogItem[],
-    codingAgents,
-    codexFamilyCapabilities(readModelDiscoveryCacheSync()),
-  );
-  const checked = checkThreadSelectionForStore(value, options);
-  return checked.ok ? { ok: true, selection: checked.selection } : { ok: false, reason: checked.reason };
-}
-
-const threadDeps: ThreadDeps = {
-  resolveTurn: threadTurnFor,
-  complete: async (system, user, pair) => {
-    if (!pair) throw new Error("no connected agent is available for thread replies");
-    try {
-      return await dispatchThreadCompletion({ ...pair, system, user });
-    } catch (error) {
-      throw new Error(visibleCompletionError(error));
-    }
-  },
-  // Through the normal creation route, so a task gets every rule a session
-  // started from the composer gets: admission, worktree, user tag, title.
-  startTask: async ({ prompt, title, cwd, user, agent, model, thinkingLevel }) => {
-    // The thread's frozen pair names the agent and model when it resolved one;
-    // otherwise Settings' "Default agent and model" applies, as it always did.
-    const { defaultAgent, defaultModel } = getGlobalSettingsSync();
-    const agentChoice = agent
-      ? { agent, ...(model ? { model } : {}), ...(thinkingLevel ? { thinkingLevel } : {}) }
-      : defaultAgent?.trim()
-        ? { agent: defaultAgent.trim(), ...(defaultModel?.trim() ? { model: defaultModel.trim() } : {}) }
-        : {};
-    const response = await fetch(
-      `http://127.0.0.1:${PORT}/api/sessions/${cwd ? "new" : "new-unassigned"}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt,
-          title,
-          ...agentChoice,
-          ...(cwd ? { cwd } : {}),
-          ...(user.includes("@") ? { user } : {}),
-        }),
-      },
-    );
-    const body = await response.json().catch(() => null) as { sessionId?: string; error?: string } | null;
-    if (!response.ok || !body?.sessionId) throw new Error(body?.error || `session start failed (${response.status})`);
-    return body.sessionId;
-  },
-  // Through the normal send route, as if the person typed it in the task.
-  tellTask: async ({ sessionId, text, user }) => {
-    const response = await fetch(`http://127.0.0.1:${PORT}/api/sessions/${sessionId}/send`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, ...(user.includes("@") ? { user } : {}) }),
-    });
-    if (!response.ok) {
-      const body = await response.json().catch(() => null) as { error?: string } | null;
-      throw new Error(body?.error || `send failed (${response.status})`);
-    }
-  },
-};
-
-function threadViewer(req: Request, requested: string | null | undefined): { identity: string; name: string | null } {
-  const identity = botViewerFromRequest(req, requested).identity;
-  const profile = userRoster().find((row) => row.email.toLowerCase() === identity.toLowerCase());
-  return { identity, name: profile?.name || null };
-}
-
-
-/**
- * The answer of a task's turn that just finished, read from its transcript.
- * The completion can arrive a moment before the transcript has the final
- * answer, so it looks again for a few seconds before giving up.
- */
-async function taskTurnAnswer(sessionId: string): Promise<string | null> {
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const path = await resolveTranscript(sessionId).catch(() => null);
-    if (path) {
-      await ensureChatTranscriptCaughtUp(path, sessionId, "thread-task-result");
-      const page = await indexedMessagePage(path, sessionId, { limit: 80 }).catch(() => null);
-      const answer = page ? turnAnswer(page.messages) : null;
-      if (answer) return answer;
-    }
-    await Bun.sleep(750);
-  }
-  return null;
-}
-
-/** Threads for the `#` picker, in its row shape, marked `kind: "thread"`. */
-function mentionableThreads(query: string | undefined) {
-  const terms = sessionMentionTerms(query);
-  return listThreads()
-    .filter((thread) => terms.every((term) => thread.title.toLowerCase().includes(term)))
-    .slice(0, 5)
-    .map((thread) => ({
-      kind: "thread" as const,
-      sessionId: thread.id,
-      title: thread.title,
-      cwd: thread.project?.cwd ?? null,
-      project: thread.project?.name ?? "",
-      lastUserText: thread.lastMessage ? threadPreview(thread) : null,
-      lastActivityAt: thread.updatedAt,
-      agent: "thread",
-      live: false,
-      sameFolder: false,
-    }));
-}
-
-/** A message's files, as a client names them: uploaded first through POST /api/uploads, each { path, name }. */
-function threadAttachmentsFrom(value: unknown): { path: string; name: string | null }[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .flatMap((row) => {
-      const item = row as { path?: unknown; name?: unknown } | null;
-      return typeof item?.path === "string" ? [{ path: item.path, name: typeof item.name === "string" ? item.name : null }] : [];
-    })
-    .slice(0, 10);
-}
-
-async function handleThreadRequest(req: Request, url: URL, path: string): Promise<Response | null> {
-  if (path === "/api/threads" && req.method === "GET") return json({ threads: listThreads() });
-  if (path === "/api/threads" && req.method === "POST") {
-    const body = (await req.json().catch(() => null)) as { text?: unknown; title?: unknown; user?: unknown; attachments?: unknown; selection?: unknown } | null;
-    const viewer = threadViewer(req, typeof body?.user === "string" ? body.user : url.searchParams.get("user"));
-    const selection = await threadSelectionFromBody(body?.selection);
-    if (selection && !selection.ok) return err(400, selection.reason);
-    const thread = startThread({
-      ...viewer,
-      title: typeof body?.title === "string" ? body.title : null,
-      ...(selection?.ok ? { selection: selection.selection } : {}),
-    });
-    const text = typeof body?.text === "string" ? body.text.trim() : "";
-    const attachments = threadAttachmentsFrom(body?.attachments);
-    if (text || attachments.length) {
-      let media: ThreadMedia[];
-      try {
-        media = await Promise.all(attachments.map((row) => keepThreadUpload(thread.id, row.path, row.name)));
-      } catch (error) {
-        return err(400, error instanceof Error ? error.message : String(error));
-      }
-      postThreadMessage(thread.id, text, viewer, null, media);
-    }
-    return json({ thread: summarizeThread(thread) });
-  }
-  const one = path.match(/^\/api\/threads\/([0-9a-f-]{36})$/i);
-  const messages = path.match(/^\/api\/threads\/([0-9a-f-]{36})\/messages$/i);
-  const typing = path.match(/^\/api\/threads\/([0-9a-f-]{36})\/typing$/i);
-  const id = one?.[1] ?? messages?.[1] ?? typing?.[1];
-  if (!id) return null;
-  const conversation = getConversation(id);
-  if (!isThread(conversation)) return err(404, "thread not found");
-  if (one && req.method === "GET") {
-    const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit")) || 200));
-    const live = await listSessionsCached().catch(() => []);
-    const viewer = threadViewer(req, url.searchParams.get("user"));
-    return json({
-      // Which author is the caller, so a client can put their own bubbles on the right.
-      me: threadParticipantId(viewer.identity),
-      thread: summarizeThread(conversation),
-      participants: participantsForView(conversation, userRoster()),
-      people: threadPeople(conversation, userRoster()),
-      messages: readThreadMessages(id, limit),
-      tasks: threadTasks(conversation, live),
-      typing: threadTyping(id, threadParticipantId(viewer.identity)),
-    });
-  }
-  if (one && req.method === "PATCH") {
-    const body = (await req.json().catch(() => null)) as { title?: unknown; projectCwd?: unknown; archived?: unknown; selection?: unknown } | null;
-    let project: { cwd: string; name: string } | null | undefined;
-    if (body?.projectCwd === null) project = null;
-    else if (typeof body?.projectCwd === "string") {
-      const repo = (await listRepos()).find((row) => row.cwd === body.projectCwd);
-      if (!repo) return err(400, "unknown project");
-      project = { cwd: repo.cwd, name: repo.project || repo.name };
-    }
-    let selection: Awaited<ReturnType<typeof threadSelectionFromBody>> | undefined;
-    if (body?.selection !== undefined) {
-      selection = await threadSelectionFromBody(body.selection);
-      if (!selection.ok) return err(400, selection.reason);
-    }
-    const updated = threadUpdate(id, {
-      ...(typeof body?.title === "string" || body?.title === null ? { title: body.title as string | null } : {}),
-      ...(project !== undefined ? { project } : {}),
-      ...(selection?.ok ? { selection: selection.selection } : {}),
-      ...(typeof body?.archived === "boolean" ? { archived: body.archived } : {}),
-    });
-    return updated ? json({ thread: summarizeThread(updated) }) : err(404, "thread not found");
-  }
-  if (one && req.method === "DELETE") {
-    threadUpdate(id, { archived: true });
-    return json({ ok: true });
-  }
-  if (typing && req.method === "POST") {
-    // A ping, not a message: it names nobody new in the thread and writes nothing to disk.
-    const body = (await req.json().catch(() => null)) as { typing?: unknown; user?: unknown; replyTo?: unknown } | null;
-    const viewer = threadViewer(req, typeof body?.user === "string" ? body.user : url.searchParams.get("user"));
-    const author = {
-      kind: "human" as const,
-      participantId: threadParticipantId(viewer.identity),
-      name: threadDisplayName(viewer.identity, viewer.name),
-    };
-    const replyTo = typeof body?.replyTo === "string" && body.replyTo ? body.replyTo : null;
-    setTyping(id, author, body?.typing !== false, replyTo);
-    return json({ ok: true });
-  }
-  // An agent session posting as omg (omg_send_thread_message). It names the
-  // files it shows by path, as omg_display_image does; a person attaches uploads.
-  const callerSession = messages && req.method === "POST" ? req.headers.get("x-omg-caller-session-id")?.trim() || null : null;
-  if (messages && req.method === "POST" && callerSession) {
-    const body = (await req.json().catch(() => null)) as { text?: unknown; replyTo?: unknown; mediaPaths?: unknown } | null;
-    const text = typeof body?.text === "string" ? body.text.trim() : "";
-    const paths = Array.isArray(body?.mediaPaths) ? body.mediaPaths.filter((p): p is string => typeof p === "string").slice(0, 10) : [];
-    if (!text && !paths.length) return err(400, "text or mediaPaths is required");
-    const replyTo = typeof body?.replyTo === "string" && body.replyTo ? body.replyTo : null;
-    const rows = readThreadMessages(id, 5_000);
-    const root = replyTo ? rows.find((row) => !row.replyTo && row.id.startsWith(replyTo)) : null;
-    if (replyTo && !root) return err(400, "replyTo must be a top-level message in this thread");
-    let media: ThreadMedia[];
-    try {
-      media = await Promise.all(paths.map((path) => keepSessionFile(callerSession, path)));
-    } catch (error) {
-      return err(400, error instanceof Error ? error.message : String(error));
-    }
-    const session = (await listSessionsCached().catch(() => [])).find(
-      (row) => row.sessionId === callerSession || row.nativeSessionId === callerSession,
-    );
-    const message = appendThreadMessage(id, {
-      author: { kind: "omg" },
-      text,
-      replyTo: root?.id ?? null,
-      media,
-      via: { sessionId: session?.sessionId ?? callerSession, title: session?.title ?? null, agent: session?.agent ?? null },
-    });
-    return json({ message });
-  }
-  if (messages && req.method === "POST") {
-    const body = (await req.json().catch(() => null)) as { text?: unknown; user?: unknown; replyTo?: unknown; attachments?: unknown } | null;
-    const text = typeof body?.text === "string" ? body.text.trim() : "";
-    const attachments = threadAttachmentsFrom(body?.attachments);
-    if (!text && !attachments.length) return err(400, "text or an attachment is required");
-    let media: ThreadMedia[];
-    try {
-      media = await Promise.all(attachments.map((row) => keepThreadUpload(id, row.path, row.name)));
-    } catch (error) {
-      return err(400, error instanceof Error ? error.message : String(error));
-    }
-    const replyTo = typeof body?.replyTo === "string" && body.replyTo ? body.replyTo : null;
-    // Replies are one level deep, as in Slack: only a top-level message has them.
-    if (replyTo && !readThreadMessages(id).some((row) => row.id === replyTo && !row.replyTo)) {
-      return err(400, "replyTo must be a top-level message in this thread");
-    }
-    const viewer = threadViewer(req, typeof body?.user === "string" ? body.user : url.searchParams.get("user"));
-    return json({ message: postThreadMessage(id, text, viewer, replyTo, media) });
-  }
-  return err(405, "method not allowed");
-}
-
-/**
- * Store a person's message, then let omg answer in the background if
- * mentioned. omg answers in the replies: of this message, or of the message
- * this one replies to.
- *
- * The thread's stored selection is read HERE, synchronously, before the
- * answer is queued: a selection changed while a reply is in flight applies to
- * the next message, never the one already on its way. The queued answers of
- * one thread run one at a time, oldest first.
- */
-function postThreadMessage(
-  threadId: string,
-  text: string,
-  viewer: { identity: string; name: string | null },
-  replyTo: string | null = null,
-  media: ThreadMedia[] = [],
-) {
-  // Named with @: in the thread before the message is stored, so they are told.
-  addMentionedPeople(threadId, text, userRoster(), viewer.identity);
-  // Frozen for the reply this message starts.
-  const storedSelection = getConversation(threadId)?.threadSelection ?? null;
-  const message = appendThreadMessage(threadId, {
-    author: threadAuthor(threadId, viewer.identity, viewer.name),
-    text,
-    replyTo,
-    media,
-  });
-  // A mention always reaches omg; so does a reply in a reply thread omg is part of,
-  // and omg decides whether it has anything to say. `@codex` asks a coding agent
-  // by name: omg briefs it and it runs the task.
-  queueThreadAnswer(threadId, async () => {
-    const agent = mentionedAgent(text, mentionAgents(await listCodingAgentsCached().catch(() => [])));
-    const wake = agent ? "mention" : omgWake(message, readThreadMessages(threadId, 5_000));
-    if (!wake) return;
-    await answerMention(
-      threadId,
-      text,
-      viewer.identity,
-      threadDeps,
-      replyTo ?? message.id,
-      wake === "reply",
-      agent,
-      storedSelection,
-    );
-  }).catch((error) => {
-    // Redacted on the way to the log: a raw provider error can carry prompts
-    // or credentials, and the console is not the place for either.
-    console.error(`[threads] @omg failed in ${threadId}: ${visibleCompletionError(error, "unknown error")}`);
-  });
-  return message;
 }
 
 async function listRepos() {
@@ -5995,36 +5616,11 @@ a{color:#60a5fa}
         });
         if (handled) return handled;
       }
-      // Own media: a provider the user picked, paid by the user's own
-      // subscription or API key (src/own-media.ts). No omg credits, no
-      // inference from @omg: the only automatic side effect is one thread
-      // message carrying the finished file. onJobCompleted fires from an
-      // atomic success transition, so duplicate CONCURRENT callbacks are
-      // avoided and a refresh or a retried poll cannot post twice. A crash
-      // between that transition and this post can still lose the thread
-      // delivery (the job state stays the truth; the panel keeps showing it);
-      // there is deliberately no outbox retry here.
+      // Own media uses the selected provider and returns results in its panel.
       if (path === "/api/own-media/providers" || path === "/api/own-media/jobs" || path.startsWith("/api/own-media/jobs/")) {
         server.timeout(req, 360);
         const { handleOwnMediaRequest } = await import("../own-media.ts");
-        const handled = await handleOwnMediaRequest(req, url, {
-          onJobCompleted: (job, media) => {
-            if (!job.threadId) return;
-            appendThreadMessage(job.threadId, {
-              author: { kind: "omg" },
-              text: `Media klaar via ${job.provider}.`,
-              media: [
-                {
-                  kind: job.kind,
-                  path: media.urlPath,
-                  name: media.name,
-                  ...(media.width != null ? { width: media.width } : {}),
-                  ...(media.height != null ? { height: media.height } : {}),
-                },
-              ],
-            });
-          },
-        });
+        const handled = await handleOwnMediaRequest(req, url);
         if (handled) return handled;
       }
       if (path === "/api/server/wake-tick" && req.method === "POST") {
@@ -7026,11 +6622,7 @@ a{color:#60a5fa}
         }
       }
 
-      // ---- threads: people-first chat, see src/threads.ts ----
-      if (path === "/api/threads" || path.startsWith("/api/threads/")) {
-        const handled = await handleThreadRequest(req, url, path);
-        if (handled) return handled;
-      }
+
 
       // ---- persistent bots ----
       if (path === "/api/bots") {
@@ -9353,12 +8945,7 @@ a{color:#60a5fa}
           excludeId,
           limit,
         });
-        // Threads are referenced with the same `#`, first, so a prompt can name
-        // one for the agent to read or post to (omg_send_thread_message). Only
-        // for a client that asks: an older app writes every row as a session
-        // link, and a thread written as `omg:session_<id>` names nothing.
-        const withThreads = url.searchParams.get("threads") === "1";
-        return json({ sessions: [...(withThreads ? mentionableThreads(query) : []), ...sessions] });
+        return json({ sessions });
       }
 
       if (path === "/api/sessions/find" && req.method === "POST") {
@@ -12651,24 +12238,6 @@ a{color:#60a5fa}
   // Bridge those same completions to Web Push, so an installed PWA hears
   // about a landed turn with the app closed. Must follow startFleetWatcher().
   startSessionPushBridge();
-  // Thread messages reach the people in them through the same push fan-out as
-  // everything else (web and iOS).
-  setThreadNotifier(({ user, notification }) => {
-    void notifyAll({ user: user ?? undefined, notification }).catch(() => {});
-  });
-  // A task started from a thread posts each finished turn back to it.
-  subscribeFleet(null, (ev) => {
-    if (ev.type !== "completed" || !threadForTaskSession(ev.sessionId)) return;
-    void (async () => {
-      const rows = await listSessionsCached();
-      const row = rows.find((session) => session.sessionId === ev.sessionId) ?? null;
-      // The answer comes from the task's own transcript, not the cached list's
-      // `last`: that can still be the thinking before the answer, or the
-      // message the task was sent, and the thread got "(thinking)" or nothing.
-      const answer = await taskTurnAnswer(ev.sessionId);
-      bridgeTaskCompletion(ev.sessionId, row ? { ...row, last: answer ? { role: "assistant", text: answer } : null } : null);
-    })().catch((error) => console.error("[threads] task result not posted:", error));
-  });
   // Keep SQLite as the chat read model for every active session. Transcript
   // JSONL files are treated as an import source; live draft deltas stay
   // ephemeral until the provider writes the completed turn.

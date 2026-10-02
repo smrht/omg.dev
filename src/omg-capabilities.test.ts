@@ -63,10 +63,10 @@ describe("omg.dev runtime capabilities", () => {
     // Headroom is deliberate: a line budget the contract already sits flush
     // against turns every future edit into a choice about which bullet to
     // delete, which is how shipping was lost in the first place.
-    // The private Agentbox storage/containment instruction adds one bounded
-    // bullet to upstream's contract. Keep it rather than dropping safety text.
+    // Includes the live Mac-first compute policy (2977 characters before
+    // Threads removal); preserve that safety policy within this bounded budget.
     expect(omgRuntimeContract().split("\n").length).toBeLessThanOrEqual(14);
-    expect(omgRuntimeContract().length).toBeLessThan(2_800);
+    expect(omgRuntimeContract().length).toBeLessThan(3_200);
   });
 
   test("does not duplicate the contract", () => {
@@ -173,7 +173,6 @@ describe("omg.dev runtime capabilities", () => {
       "omg_display_image / omg_display_video / omg_display_file",
       "omg_generate_image / omg_generate_video / omg_media_job / omg_media_models",
       "omg_input",
-      "omg_list_threads / omg_read_thread / omg_send_thread_message",
       "omg_find_sessions",
       "omg_close_session",
       "omg_create_subagent / omg_delegate_*",
@@ -402,18 +401,15 @@ describe("first-run envelope", () => {
   });
 });
 
-describe("thread task envelope", () => {
-  test("a thread's task is told to talk like a teammate, and titles still show only the ask", async () => {
-    const { withThreadTaskEnvelope, withOmgRuntimeContract, stripOmgRuntimeContract, sessionTitleFromPrompt, THREAD_TASK_HEADER } =
-      await import("./omg-capabilities.ts");
-    const ask = "Brainstorm course names that start with Super";
-    const wrapped = withThreadTaskEnvelope(ask, { threadTitle: "Name and logo design" });
-    expect(wrapped.startsWith(THREAD_TASK_HEADER)).toBe(true);
-    expect(wrapped).toContain('a team chat thread called "Name and logo design"');
-    expect(wrapped).toContain("The last message of each turn is posted into the thread");
-    expect(wrapped).toContain("Talk like a teammate in a chat, not a report");
-    const launched = withOmgRuntimeContract(wrapped)!;
-    expect(stripOmgRuntimeContract(launched)).toBe(ask);
-    expect(sessionTitleFromPrompt(launched)).toBe(ask);
+describe("historical thread task envelope", () => {
+  test("old task transcripts still expose the original user request", () => {
+    const ask = "Brainstorm course names";
+    const oldPrompt = "=== omg.dev THREAD TASK ===\nOld instructions\n=== USER TASK ===\n" + ask;
+    expect(stripOmgRuntimeContract(oldPrompt)).toBe(ask);
   });
+});
+
+test("capability discovery keeps sessions and omits the removed thread tools", () => {
+  expect(OMG_CAPABILITIES.some(row => row.tool.includes("omg_find_sessions"))).toBe(true);
+  expect(OMG_CAPABILITIES.some(row => /omg_(list_threads|read_thread|send_thread_message)/.test(row.tool))).toBe(false);
 });

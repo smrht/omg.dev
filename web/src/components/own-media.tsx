@@ -6,7 +6,7 @@
  * the provider does not enforce our cap. API submits stay disabled until an
  * admin-configured price exists and the user acknowledged it.
  *
- * Usable in a Thread (threadId set → the result is registered on that thread)
+ * Results are shown in the media panel.
  * or on the home surface. One bordered panel, no nested cards, no animation.
  * All element ids derive from useId, so several panels can coexist.
  */
@@ -32,12 +32,10 @@ const COMMON_RATIOS = ["1:1", "3:2", "2:3", "4:3", "3:4", "16:9", "9:16"];
 const POLL_FAILURES_BEFORE_ERROR = 2;
 
 export function OwnMediaPanel({
-  threadId = null,
   api,
   onJob,
   pollIntervalMs = 4000,
 }: {
-  threadId?: string | null;
   api?: OwnMediaApi;
   onJob?: (job: OwnMediaJob) => void;
   pollIntervalMs?: number;
@@ -105,7 +103,7 @@ export function OwnMediaPanel({
     setDuration((cur) => (model?.durations?.includes(cur) ? cur : model?.durations?.length ? "" : ""));
   }, [schemaKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const intentKey = `${providerId}|${kind}|${modelId}|${modelHint}|${prompt}|${aspectRatio}|${quality}|${resolution}|${background}|${duration}|${threadId ?? ""}`;
+  const intentKey = `${providerId}|${kind}|${modelId}|${modelHint}|${prompt}|${aspectRatio}|${quality}|${resolution}|${background}|${duration}`;
   const lastIntent = useRef(intentKey);
   useEffect(() => {
     if (lastIntent.current === intentKey) return;
@@ -201,7 +199,6 @@ export function OwnMediaPanel({
         ...(resolution ? { resolution } : {}),
         ...(background ? { background } : {}),
         ...(duration ? { duration } : {}),
-        ...(threadId ? { threadId } : {}),
         ...(provider!.route === "api" ? { costAcknowledged: true } : {}),
       });
       setJob(result.job);

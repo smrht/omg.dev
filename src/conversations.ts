@@ -169,58 +169,6 @@ export function ensureBotConversation(input: {
   return conversation;
 }
 
-/** A new thread, owned by whoever started it. */
-export function createThreadConversation(input: {
-  identity: string;
-  name?: string | null;
-  title?: string | null;
-  selection?: { agent: string; model: string; thinkingLevel?: string | null; cyberAccessProgram?: string | null } | null;
-  now?: number;
-}): Conversation {
-  const now = input.now ?? Date.now();
-  const conversation: Conversation = {
-    id: crypto.randomUUID(),
-    kind: "thread",
-    title: input.title?.trim() || null,
-    threadProject: null,
-    threadSelection: input.selection ?? null,
-    participants: [],
-    runtimeSessions: [],
-    createdAt: now,
-    updatedAt: now,
-  };
-  writeStore([...readStore(), conversation]);
-  return ensureConversationHuman({
-    conversationId: conversation.id,
-    identity: input.identity,
-    name: input.name,
-    role: "owner",
-    joinedAt: now,
-  }) ?? conversation;
-}
-
-/** Change a thread's title, project, model selection, archive state or activity time. */
-export function patchThreadConversation(
-  id: string,
-  patch: Partial<Pick<Conversation, "title" | "threadProject" | "threadSelection" | "archivedAt" | "updatedAt">>,
-): Conversation | null {
-  const rows = readStore();
-  const conversation = rows.find((row) => row.id === id && row.kind === "thread");
-  if (!conversation) return null;
-  Object.assign(conversation, patch);
-  if (patch.updatedAt === undefined) conversation.updatedAt = Date.now();
-  writeStore(rows);
-  return conversation;
-}
-
-/** The thread a task session was started from, if any. */
-export function threadForTaskSession(sessionId: string): Conversation | null {
-  return readStore().find((row) =>
-    row.kind === "thread" &&
-    row.runtimeSessions.some((entry) => entry.kind === "execution" && entry.sessionId === sessionId),
-  ) ?? null;
-}
-
 export function ensureConversationHuman(input: {
   conversationId: string;
   identity: string;

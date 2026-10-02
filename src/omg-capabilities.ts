@@ -60,12 +60,6 @@ export const OMG_CAPABILITIES = [
       "Prefer deciding autonomously — do NOT ask merely to check in. This is fire-and-forget: raise it once, do not poll or block; the answer arrives later as a user message.",
   },
   {
-    tool: "omg_list_threads / omg_read_thread / omg_send_thread_message",
-    useWhen: "A person referenced a team chat thread (a `[#Title](omg:thread_<id>)` link), or asked you to read one or post a message, picture or video to one.",
-    guidance:
-      "Pass the thread id as written in the link, or a prefix from omg_list_threads. omg_send_thread_message posts as omg, in the thread or in one message's replies (replyTo), and everyone in it is notified. Write it like a teammate in a chat: short and plain. Read the thread first when you need its context.",
-  },
-  {
     tool: "omg_find_sessions",
     useWhen: "An ended or historical omg.dev session must be located after its tmux pane or process disappeared.",
     guidance: "Filter by id/prefix, user, project/cwd, title/transcript text, or last-activity range; use omg_list_sessions for the current live fleet.",
@@ -255,7 +249,7 @@ const SUBAGENT_HEADERS = [
   "=== omg.dev SUBAGENT OPERATING CONTRACT ===",
   // Same shape: terminated by USER_TASK. See withFirstRunEnvelope.
   "=== omg.dev FIRST RUN ===",
-  // Same shape. See withThreadTaskEnvelope.
+  // Recognize historical task envelopes when reading old transcripts.
   "=== omg.dev THREAD TASK ===",
 ] as const;
 
@@ -317,36 +311,6 @@ export function withFirstRunEnvelope(prompt: string | undefined, opts: { seesIma
     "- Keep your messages to the user short and plain.",
     USER_TASK,
     text,
-  ].join("\n");
-}
-
-export const THREAD_TASK_HEADER = "=== omg.dev THREAD TASK ===";
-
-/**
- * The envelope for a task started from a thread: an agent working for a
- * group chat, not a person watching a transcript.
- *
- * Without it a thread task wrote like a task session: bolded headings,
- * numbered sections and a recap of every domain it checked, posted into a
- * chat that several people read on their phones. The team kept asking it to
- * "be more concise" (2026-09-28). The rules mirror the bot contract's reply
- * style, plus the one fact only a thread task has: the thread sees the last
- * message of each turn and nothing else (threads.ts, turnAnswer).
- */
-export function withThreadTaskEnvelope(prompt: string, opts: { threadTitle?: string | null } = {}): string {
-  const title = opts.threadTitle?.trim();
-  return [
-    THREAD_TASK_HEADER,
-    `You are working for a team chat thread${title ? ` called "${title}"` : ""}. Several people read it, mostly on their phones. These rules hold for the whole session.`,
-    "- The last message of each turn is posted into the thread as your reply. Nothing else you write is seen there, so that message must stand on its own.",
-    "- Talk like a teammate in a chat, not a report: a couple of short lines by default, plain words. Length is earned by the question. Answer what was asked first, then stop.",
-    "- No headings, no bolded label on every line, no recap of the steps you took, no closing \"want me to do X or Y?\". Use a short list only when you are giving options.",
-    "- Say what you think, once, plainly. If you recommend one option, say which and why in a line.",
-    "- Later messages from the thread reach you as new turns, relayed by omg with who said them. Answer that person, by name when it helps.",
-    "- Show a picture or a video with `omg_display_image` or `omg_display_video`: it appears in the thread. For a decision only a person can make, ask with `omg_input`; it shows in the thread too.",
-    "- Use `omg_ship` only for finished work that changed something (code, a deploy, a file). An answer in the thread needs no ship.",
-    USER_TASK,
-    prompt.trim(),
   ].join("\n");
 }
 
