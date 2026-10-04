@@ -25,6 +25,12 @@
   --foreground: #000000;
   --card: #ffffff;
   --card-foreground: #000000;
+  /* The desktop stage panel: content raised off the page the rail sits on. */
+  --stage-surface: #ffffff;
+  /* The desktop workspace page under the rail. Light keeps the grouped grey. */
+  --shell-surface: #f2f2f7;
+  /* A field (the composer bar) inside a stage panel. */
+  --stage-field: #ffffff;
   --popover: #ffffff;
   --popover-foreground: #000000;
   --primary: #007aff; /* iOS accent blue */
@@ -261,6 +267,19 @@ html[data-lfg-embed="true"].lfg-keyboard-open {
      for why. --popover moves with it. */
   --card: #242428;
   --card-foreground: #ffffff;
+  /* One step off --background, not --card: the panel holds cards of its own.
+     Neutral grey, like --background. #1c1c1e (iOS's secondary background)
+     carries a blue channel two steps up, and over a whole panel beside the
+     neutral #141414 page that read as a blue cast. */
+  --stage-surface: #191919;
+  /* The desktop workspace page the rail sits on: a step under --background,
+     so the rail recedes and the panel holds the same lift over it. Only the
+     desktop workspace uses it; every other surface keeps --background. */
+  --shell-surface: #0e0e0e;
+  /* A field inside a stage panel: a clear step over the #191919 panel, and
+     neutral. The global --lfg-field-fill (#1c1c1e) all but vanished on the
+     panel and carried the same blue cast the panel used to. */
+  --stage-field: #242424;
   --popover: #242428;
   --popover-foreground: #ffffff;
   --primary: #0a84ff;
@@ -455,6 +474,39 @@ html[data-lfg-embed="true"].lfg-keyboard-open {
 }
 
 @layer components {
+  .lfg-attachment-scroll {
+    --attachment-scroll-thumb: color-mix(in srgb, var(--foreground) 20%, transparent);
+  }
+
+  .lfg-attachment-scroll:hover,
+  .lfg-attachment-scroll:focus-within {
+    --attachment-scroll-thumb: color-mix(in srgb, var(--foreground) 35%, transparent);
+  }
+
+  .lfg-attachment-scroll::-webkit-scrollbar {
+    height: 4px;
+  }
+
+  .lfg-attachment-scroll::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .lfg-attachment-scroll::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background: var(--attachment-scroll-thumb);
+  }
+
+  .lfg-attachment-scroll::-webkit-scrollbar-button {
+    display: none;
+  }
+
+  @supports not selector(::-webkit-scrollbar) {
+    .lfg-attachment-scroll {
+      scrollbar-width: thin;
+      scrollbar-color: var(--attachment-scroll-thumb) transparent;
+    }
+  }
+
   /* The pulled-up session terminal. It sits in a band that is already exactly
      the visible viewport, so a percentage is measured against the space above
      the keyboard rather than the whole screen. Leaving a strip of the session
@@ -882,6 +934,14 @@ html[data-lfg-embed="true"].lfg-keyboard-open {
     );
   }
 
+  /* The transcript fades out under the pane header instead of meeting it at
+     a rule. Same mask approach as .session-list-scroll: purely visual, the
+     whole scroll surface stays interactive. */
+  .chat-stream-fade {
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, black 1.5rem);
+    mask-image: linear-gradient(to bottom, transparent 0, black 1.5rem);
+  }
+
   /* Host slots are opt-in: an unfilled one must cost nothing. The host portals
      into the node after we render it, so we cannot know at render time whether
      it will be used — :empty answers that continuously instead, and collapses
@@ -901,6 +961,17 @@ html[data-lfg-embed="true"].lfg-keyboard-open {
   .glass-island {
     position: relative;
     isolation: isolate;
+  }
+
+  /* The hosted phone header's island. It paints only while the host has
+     docked controls into its header-actions slot; alone, the avatar needs no
+     card. Padding follows the card. */
+  .lfg-dock-island:has([data-lfg-host-slot]:not(:empty)) {
+    padding-inline: 0.5rem;
+  }
+
+  .lfg-dock-island:not(:has([data-lfg-host-slot]:not(:empty)))::before {
+    content: none;
   }
 
   .glass-island::before {
@@ -2390,8 +2461,9 @@ html[data-lfg-embed="true"].lfg-keyboard-open {
      the element's own background instead: an opaque fill clipped to padding-box
      over a gradient clipped to border-box, above a 1px transparent border (the
      .tool-call-row / .user-bubble technique). Works on inputs, textareas, and
-     any wrapper. Set --lfg-field-fill to change the interior; on focus the edge
-     warms to the accent so the field reads as active without a layout shift.
+     any wrapper. Set --lfg-field-fill to change the interior; on focus the same
+     neutral edge brightens, with no accent colour and no glow ring, so the
+     field reads as active without a layout shift.
      `bg-clip-*`/`bg-*` utilities would fight the background shorthand, so drop
      those and lean on this class for the surface. */
   .lfg-gfield {
@@ -2416,12 +2488,11 @@ html[data-lfg-embed="true"].lfg-keyboard-open {
       linear-gradient(var(--lfg-field-fill), var(--lfg-field-fill)) padding-box,
       linear-gradient(
         160deg,
-        color-mix(in oklab, var(--primary) 80%, white),
-        color-mix(in oklab, var(--primary) 45%, transparent) 45%,
-        color-mix(in oklab, var(--primary) 28%, transparent) 72%,
-        color-mix(in oklab, var(--primary) 62%, white)
+        color-mix(in oklab, var(--foreground) 40%, transparent),
+        color-mix(in oklab, var(--foreground) 16%, transparent) 44%,
+        color-mix(in oklab, var(--foreground) 10%, transparent) 72%,
+        color-mix(in oklab, var(--foreground) 26%, transparent)
       ) border-box;
-    box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary) 22%, transparent);
   }
 
   /* Server status indicator: glass gradient border + green gradient fill,

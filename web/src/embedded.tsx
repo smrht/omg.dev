@@ -16,11 +16,13 @@ import {
   type HostPushConfig,
 } from "./lib/push";
 import { BareSurfaceProvider } from "./lib/bare-surface";
+import { configureHostToast, type OmgHostToast } from "./lib/host-toast";
 import {
   EmbeddedHostOptionsProvider,
   type EmbeddedAnalyticsEventHandler,
   type EmbeddedViewer,
   type HostedTranscription,
+  type HostedPreviewAuth,
   type HostMachines,
   type HostSettingsPage,
   type PlanLimitDetail,
@@ -35,10 +37,12 @@ export type {
   HostMachine,
   HostMachines,
   HostedTranscription,
+  HostedPreviewAuth,
   PlanLimitDetail,
 } from "./lib/embedded-host-options";
 export type { PlanLimitLiveAgent } from "./lib/plan-limit-live";
 export type { HostPushConfig } from "./lib/push";
+export type { OmgHostToast } from "./lib/host-toast";
 
 /**
  * The notification a host's push worker receives, already decrypted by the
@@ -89,6 +93,7 @@ export interface OmgAppSurfaceProps {
    * on a provider key the connected box may or may not hold.
    */
   hostedTranscription?: HostedTranscription;
+  hostedPreviewAuth?: HostedPreviewAuth;
   /**
    * A service-worker scope the host dedicates to OMG push notifications.
    *
@@ -136,6 +141,8 @@ export interface OmgAppSurfaceProps {
    * where they meant to go.
    */
   onOpenHostSettings?: () => void;
+  /** A user selects a page, session, thread, or new task in the desktop rail. */
+  onNavigate?: () => void;
   /**
    * The box refused an action because of the plan YOU sold, not because of
    * anything the person did — e.g. starting one more agent than their tier
@@ -149,6 +156,17 @@ export interface OmgAppSurfaceProps {
    * whole response.
    */
   onPlanLimit?: (detail: PlanLimitDetail) => void;
+  /**
+   * The host's toast function — pass Sonner's `toast` from the host's own
+   * bundle. Every toast this surface raises is then drawn by the host's
+   * Toaster, in the host's top layer, and the surface mounts no toast stack of
+   * its own.
+   *
+   * Omit it and the surface draws its own stack inside its container. That
+   * stack can never rise above whatever z-index the host gives the container,
+   * so the host's floating chrome, sheets and dialogs cover it.
+   */
+  hostToast?: OmgHostToast;
   /**
    * Central sink for client errors, in addition to the report that goes through
    * the transport into the user's own lfg instance. A hosted surface should set
@@ -207,6 +225,17 @@ export interface OmgSettingsSurfaceProps {
    * unhandled page still works.
    */
   onNavigate?: (page: OmgSettingsPage) => void;
+  /**
+   * The host's toast function — pass Sonner's `toast` from the host's own
+   * bundle. Every toast this surface raises is then drawn by the host's
+   * Toaster, in the host's top layer, and the surface mounts no toast stack of
+   * its own.
+   *
+   * Omit it and the surface draws its own stack inside its container. That
+   * stack can never rise above whatever z-index the host gives the container,
+   * so the host's floating chrome, sheets and dialogs cover it.
+   */
+  hostToast?: OmgHostToast;
   className?: string;
   errorSink?: OmgErrorSink;
   /**
@@ -266,6 +295,7 @@ export function OmgSettingsSurface({
   className,
   errorSink,
   hostedPush,
+  hostToast,
 }: OmgSettingsSurfaceProps) {
   const mounted = mountablePage(page);
   // The host owns the header, the back affordance and the account, so this
@@ -279,6 +309,7 @@ export function OmgSettingsSurface({
   // allowed to touch, not about which screen happens to be on.
   configureHostedSurface(true);
   configureHostPush(hostedPush ?? null);
+  configureHostToast(hostToast ?? null);
   const [router] = useState<AnyRouter>(() =>
     createOmgRouter(
       createMemoryHistory({ initialEntries: [`/${mounted}?embed=true`] }),
@@ -349,12 +380,15 @@ export function OmgAppSurface({
   onAnalyticsEvent,
   viewer,
   hostedTranscription,
+  hostedPreviewAuth,
   hostedPush,
   onOpenSettingsPage,
   onOpenHostSettings,
+  onNavigate,
   onPlanLimit,
   errorSink,
   machines,
+  hostToast,
 }: OmgAppSurfaceProps) {
   // A full LFG app is the sole owner of its runtime transport. Install it
   // synchronously so child effects cannot race the host boundary; there is no
@@ -363,6 +397,7 @@ export function OmgAppSurface({
   // Same reasoning as the transport: declare it before any child can read it.
   configureHostedSurface(true);
   configureHostPush(hostedPush ?? null);
+  configureHostToast(hostToast ?? null);
   const [router] = useState<AnyRouter>(() =>
     createOmgRouter(
       createMemoryHistory({ initialEntries: [initialPath(sessionId)] }),
@@ -382,6 +417,7 @@ export function OmgAppSurface({
           onAnalyticsEvent,
           viewer,
           hostedTranscription,
+          hostedPreviewAuth,
           onOpenSettingsPage,
           // Forwarding this is what makes the Pages-menu Settings entry
           // reachable at all: App.tsx gates both the entry and the
@@ -390,6 +426,7 @@ export function OmgAppSurface({
           // could ever supply one. The feature read as shipped from inside the
           // surface while being dead from the outside.
           onOpenHostSettings,
+          onNavigate,
           onPlanLimit,
           machines,
         }}

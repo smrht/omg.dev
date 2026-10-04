@@ -145,6 +145,44 @@ test("the Simulator level appears only when the Computer sends its state", async
   expect(posts.at(-1)).toBe(JSON.stringify({ action: "stop" }));
 }, 12_000);
 
+test("status token renewal keeps the stream page loaded; a new stream loads a new page", async () => {
+  let simulator = { state: "ready", streamId: "s1", streamUrl: "https://sim.example/stream/s1?token=first" };
+  globalThis.fetch = (async () => Response.json({ preview: EXPO_PREVIEW, live: true, simulator })) as typeof fetch;
+  ui.render(<ProjectPreviewCard sessionId="session-1" />);
+  await ui.flushAsync();
+  pickLevel("simulator");
+  const frame = document.querySelector('[data-testid="project-preview-simulator"] iframe');
+  expect(frame?.getAttribute("src")).toBe(simulator.streamUrl);
+
+  simulator = { ...simulator, streamUrl: "https://sim.example/stream/s1?token=renewed" };
+  await ui.flushAsync(() => new Promise((resolve) => setTimeout(resolve, 3_100)));
+  expect(document.querySelector('[data-testid="project-preview-simulator"] iframe')).toBe(frame);
+  expect(frame?.getAttribute("src")).toBe("https://sim.example/stream/s1?token=first");
+
+  simulator = { state: "ready", streamId: "s2", streamUrl: "https://sim.example/stream/s2?token=next" };
+  await ui.flushAsync(() => new Promise((resolve) => setTimeout(resolve, 3_100)));
+  const next = document.querySelector('[data-testid="project-preview-simulator"] iframe');
+  expect(next).not.toBe(frame);
+  expect(next?.getAttribute("src")).toBe(simulator.streamUrl);
+}, 12_000);
+
+test.each([
+  [{ state: "queued", queuePosition: 2, etaMs: 170_000 }, "All simulators are busy. You are number 2 in line. About 3 min.", null],
+  [{ state: "unavailable" }, "The simulator is not available now.", null],
+  [{ state: "error", message: "The simulator could not open this app." }, "The simulator could not open this app.", "Try again"],
+])("simulator wait state %j keeps the web preview usable", async (simulator, status, action) => {
+  globalThis.fetch = (async () => Response.json({ preview: EXPO_PREVIEW, live: true, simulator })) as typeof fetch;
+  ui.render(<ProjectPreviewCard sessionId="session-1" />);
+  await ui.flushAsync();
+  pickLevel("simulator");
+  expect(ui.text()).toContain(status);
+  expect(document.querySelector('[data-testid="project-preview-simulator-waiting"] iframe')?.getAttribute("src"))
+    .toBe("https://cap-token.preview.omgs.app");
+  expect(document.querySelector('[data-testid="project-preview-simulator-start"]')?.textContent ?? null).toBe(action);
+  pickLevel("web");
+  expect(document.querySelector('[data-testid="project-preview-web"] iframe')).not.toBeNull();
+});
+
 test("a web-only preview has no Expo Go guide", async () => {
   globalThis.fetch = (async () => Response.json({ preview: {
     sessionId: "session-1", title: "Site", url: "https://sandbox-5173.preview.omgs.app",
@@ -465,3 +503,67 @@ test("the up-to-date mark settles away after the turn ends", async () => {
   ui.render(<Probe busy />);
   expect(probe()).toBe("building");
 });
+
+test("the hosted owner preview waits for permission, bootstraps inline and fullscreen, and rejects unrelated frames", async () => {
+  const { EmbeddedHostOptionsProvider } = await import("../lib/embedded-host-options");
+  const preview = { ...EXPO_PREVIEW, appId: "my-app", projectId: "project", expoGoUrl: "exps://test-8081-1799999999-abcdef.preview.omgs.app" };
+  globalThis.fetch = (async () => Response.json({ preview, live: true })) as typeof fetch;
+  const calls: unknown[] = [];
+  const hostedPreviewAuth = { getToken: async (identity: unknown) => { calls.push(identity); return { token: "scoped-token", previewUrl: "https://test-8081-1799999999-abcdef.preview.omgs.app" }; } };
+  ui.render(<EmbeddedHostOptionsProvider value={{ hostedPreviewAuth }}><ProjectPreviewCard sessionId="session-1" user="person@example.com" /></EmbeddedHostOptionsProvider>);
+  await ui.flushAsync(); await ui.flushAsync();
+  let frame = document.querySelector('[data-testid="project-preview-web"] iframe') as HTMLIFrameElement;
+  expect(frame).not.toBeNull();
+  const origin = "https://test-8081-1799999999-abcdef.preview.omgs.app";
+  expect(frame.src.split("#")[0]).toBe(origin + "/");
+  expect(frame.src).toContain("__omg_preview_auth=");
+  expect(calls).toEqual([{ appId: "my-app", projectId: "project", previewUrl: origin }]);
+  const renewal = { type: "omg:preview-auth:request", appId: "my-app", requestId: "nonce" };
+  window.dispatchEvent(messageEvent({ source: window, origin, data: renewal }));
+  window.dispatchEvent(messageEvent({ source: frame.contentWindow, origin: "https://attacker.example", data: renewal }));
+  window.dispatchEvent(messageEvent({ source: frame.contentWindow, origin, data: { ...renewal, appId: "other-app" } }));
+  await ui.flushAsync(); expect(calls).toHaveLength(1);
+  window.dispatchEvent(messageEvent({ source: frame.contentWindow, origin, data: renewal }));
+  await ui.flushAsync(); expect(calls).toHaveLength(2);
+  ui.flush(() => (document.querySelector('[data-testid="project-preview-fullscreen"]') as HTMLElement).click());
+  await ui.flushAsync(); await ui.flushAsync();
+  frame = document.querySelector('[role="dialog"] iframe') as HTMLIFrameElement;
+  expect(frame.src).toContain("__omg_preview_auth=");
+});
+
+test("a failed hosted permission check shows a recoverable failure and never loads a frame", async () => {
+  const { EmbeddedHostOptionsProvider } = await import("../lib/embedded-host-options");
+  globalThis.fetch = (async () => Response.json({ preview: { ...EXPO_PREVIEW, appId: "my-app", projectId: "project" }, live: true })) as typeof fetch;
+  ui.render(<EmbeddedHostOptionsProvider value={{ hostedPreviewAuth: { getToken: async () => null } }}><ProjectPreviewCard sessionId="session-1" /></EmbeddedHostOptionsProvider>);
+  await ui.flushAsync(); await ui.flushAsync();
+  expect(ui.text()).toContain("Preview sign-in failed.");
+  expect(document.querySelector('[data-testid="project-preview-web"] iframe')).toBeNull();
+});
+
+test("closing the preview discards renewal and revocation returns no token", async () => {
+  const { EmbeddedHostOptionsProvider } = await import("../lib/embedded-host-options");
+  const preview = { ...EXPO_PREVIEW, appId: "my-app", projectId: "project", expoGoUrl: "exps://test-8081-1799999999-abcdef.preview.omgs.app" };
+  globalThis.fetch = (async () => Response.json({ preview, live: true })) as typeof fetch;
+  let renew: ((token: { token: string; previewUrl: string } | null) => void) | undefined;
+  let calls = 0;
+  const hostedPreviewAuth = { getToken: async () => ++calls === 1 ? { token: "initial-token", previewUrl: "https://test-8081-1799999999-abcdef.preview.omgs.app" } : new Promise<{ token: string; previewUrl: string } | null>(resolve => { renew = resolve; }) };
+  ui.render(<EmbeddedHostOptionsProvider value={{ hostedPreviewAuth }}><ProjectPreviewCard sessionId="session-1" /></EmbeddedHostOptionsProvider>);
+  await ui.flushAsync(); await ui.flushAsync();
+  const frame = document.querySelector('[data-testid="project-preview-web"] iframe') as HTMLIFrameElement;
+  const replies: unknown[] = [];
+  frame.contentWindow!.postMessage = ((...args: unknown[]) => { replies.push(args); }) as typeof window.postMessage;
+  const send = () => window.dispatchEvent(messageEvent({ source: frame.contentWindow, origin: new URL(frame.src).origin,
+    data: { type: "omg:preview-auth:request", appId: "my-app", requestId: "renewal" } }));
+  send(); await ui.flushAsync(); renew!(null); await ui.flushAsync();
+  expect(replies).toEqual([[{ type: "omg:preview-auth:response", appId: "my-app", requestId: "renewal", token: null }, new URL(frame.src).origin]]);
+  send(); await ui.flushAsync();
+  ui.render(<div>Another project</div>);
+  renew!({ token: "late-token", previewUrl: "https://test-8081-1799999999-abcdef.preview.omgs.app" }); await ui.flushAsync();
+  expect(replies).toHaveLength(1);
+});
+
+function messageEvent(values: { source: unknown; origin: string; data: unknown }) {
+  const event = new Event("message");
+  Object.defineProperties(event, Object.fromEntries(Object.entries(values).map(([key, value]) => [key, { value }])));
+  return event;
+}

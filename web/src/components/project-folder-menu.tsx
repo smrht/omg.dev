@@ -28,8 +28,8 @@ import {
   FolderMinus,
   FolderPlus,
   GripVertical,
+  Layers,
   Loader2,
-  Plus,
   Search,
   SlidersHorizontal,
 } from "lucide-react";
@@ -112,7 +112,7 @@ export function ProjectFolderMenu({
     setOpen(false);
   };
 
-  const label = value === "__all" ? "All folders" : labelFor(value);
+  const label = labelFor(value);
 
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
@@ -131,9 +131,9 @@ export function ProjectFolderMenu({
                 : "h-8 w-full gap-2 rounded-lg bg-secondary px-2.5 text-[13px] font-semibold hover:bg-muted",
             )}
           >
-            {value === NO_PROJECT_FILTER ? (
-              <Plus className={cn("shrink-0 text-muted-foreground", "size-3.5")} />
-            ) : (
+            {/* No project is a selection, not an action, and not a folder:
+                it gets no icon. Only real folders show the folder icon. */}
+            {value === NO_PROJECT_FILTER ? null : (
               <Folder className={cn("shrink-0 text-muted-foreground", "size-3.5")} />
             )}
             <span className="min-w-0 flex-1 truncate">{label}</span>
@@ -169,10 +169,20 @@ export function ProjectFolderMenu({
                   </div>
                 ) : null}
                 <div className="min-h-0 flex-1 overflow-y-auto">
+                  {/* Every folder at once. A view, not a place: a new chat
+                      under it still starts with no folder. */}
+                  {!needle ? (
+                    <PickRow
+                      selected={value === "__all"}
+                      icon={<Layers className="size-3.5" />}
+                      label={labelFor("__all")}
+                      onClick={() => choose("__all")}
+                    />
+                  ) : null}
                   {hasNoProject && !needle ? (
                     <PickRow
                       selected={value === NO_PROJECT_FILTER}
-                      icon={<Plus className="size-3.5" />}
+                      icon={<span className="block size-3.5" />}
                       label={labelFor(NO_PROJECT_FILTER)}
                       count={counts?.get(NO_PROJECT_FILTER)}
                       onClick={() => choose(NO_PROJECT_FILTER)}

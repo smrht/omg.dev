@@ -1,8 +1,11 @@
 import { createContext, useContext, type ReactNode } from "react";
 import type { AgentKind } from "./coding-agent-options";
 import type { PlanLimitLiveAgent } from "./plan-limit-live";
+import type { PreviewAuthContext, PreviewAppCredential } from "../../../packages/protocol/src/preview-auth";
 
 export interface EmbeddedHostOptions {
+  /** The host retains its session and supplies only an app-scoped preview JWT. */
+  hostedPreviewAuth?: HostedPreviewAuth;
   /** The agent used when this browser has no valid saved selection. */
   defaultAgent: AgentKind;
   /**
@@ -70,6 +73,8 @@ export interface EmbeddedHostOptions {
    * set when this callback exists.
    */
   onOpenHostSettings?: () => void;
+  /** A user selects a page, session, thread, or new task in the desktop rail. */
+  onNavigate?: () => void;
   /**
    * The box refused an action because of the plan the HOST sold, not because
    * of anything the person did.
@@ -92,6 +97,10 @@ export interface EmbeddedHostOptions {
    * Omit it and the hosted surface draws no switcher at all.
    */
   machines?: HostMachines;
+}
+
+export interface HostedPreviewAuth {
+  getToken(identity: PreviewAuthContext): Promise<PreviewAppCredential | null>;
 }
 
 /** One machine in a host-supplied list. `local` is the box serving the page. */

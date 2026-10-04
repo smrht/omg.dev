@@ -217,6 +217,31 @@ export function scheduleResidentCount(sessions: readonly AgentActivity[]): numbe
   return residentAgentCount(sessions.filter((session) => isScheduleSpawned(session.spawnedBy)));
 }
 
+export type AdmissionPoolKind = "interactive" | "schedule";
+
+/**
+ * The sessions one admission pool counts. The single definition shared by the
+ * launch gate (serve.ts activationGate) and the usage readout
+ * (/api/agents/usage), so the number a dashboard shows is the number that
+ * refuses the next launch.
+ *
+ * A self-hosted box (no Computer entitlement) has one pool: every session.
+ * On a Computer, scheduled runs are their own pool. Persistent bots never
+ * count.
+ */
+export function admissionPool<T extends AgentActivity>(
+  sessions: readonly T[],
+  onComputer: boolean,
+  kind: AdmissionPoolKind,
+): T[] {
+  const pool = !onComputer
+    ? sessions
+    : kind === "schedule"
+      ? sessions.filter((session) => isScheduleSpawned(session.spawnedBy))
+      : sessions.filter((session) => !isScheduleSpawned(session.spawnedBy));
+  return pool.filter((session) => !session.persistent);
+}
+
 /**
  * The sessions a launch of `kind` counts against its cap (issue 521).
  * Interactive and scheduled work occupy disjoint resident pools — on a

@@ -21,6 +21,7 @@ import {
 import { MODEL_FAVORITES_VISIBLE } from "./lib/model-favorites";
 import { useModelFavorites } from "./lib/use-model-favorites";
 import { pickerModelDisplay, pickerThinkingLabel } from "./lib/model-picker-display";
+import { ThinkingBar } from "./components/thinking-bar";
 import { activeMachine } from "./lib/machines";
 import { useHeaderProfile } from "./lib/header-profile";
 import { RuntimeAvailabilityContext, useRuntimeAvailability, shouldReloadRuntime } from "./lib/runtime-availability";
@@ -34,7 +35,7 @@ import {
 } from "./lib/execution-hosts";
 import { ExecutionHostChoice } from "./components/execution-host-control";
 import { RuntimeRecovery, RuntimeEmptyState, RuntimeStatusBrand, RuntimeStatusDot } from "./components/runtime-recovery";
-import { AutoAgentPage } from "./components/auto-agent-page";
+import { AutoAgentPage, AutoAgentPageInStage } from "./components/auto-agent-page";
 import { Component, createContext, type ComponentProps, forwardRef, memo, Suspense, useCallback, useContext, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import type {
@@ -369,7 +370,7 @@ import {
   sortFindings,
   type AgentReport,
 } from "./lib/finding-groups";
-import { resolveComposerRepo } from "./lib/composer-repo";
+import { composerStartsUnassigned, resolveComposerRepo } from "./lib/composer-repo";
 import type { ComputerInspectionSession } from "./views/computer-inspection-control";
 import { SessionComputerInspectionAction } from "./views/session-computer-inspection-action";
 import {
@@ -494,15 +495,17 @@ import {
 } from "lucide-react";
 import { toast } from "@/lib/notify";
 import { BrowserLoginCard } from "@/components/browser-login-card";
+import { isBrowserLoginCall } from "../../packages/protocol/src/browser-login";
 import { ProjectPreviewCard } from "@/components/project-preview-card";
 import { haptic } from "@/lib/haptics";
 import { feedback } from "@/lib/feedback";
-import { waitForRefine, type AutoAgentRefine } from "@/lib/auto-refine";
+import { type AutoAgentRefine } from "@/lib/auto-refine";
 import { useUiFeedbackPrefs, setUiFeedbackPrefs } from "@/lib/ui-feedback-prefs";
 import { useNavigationPrefs, setNavigationPrefs } from "@/lib/navigation-prefs";
 import { useFilmMode, setFilmMode } from "@/lib/film-mode";
 import { subscribeSelectionChange } from "./lib/selection-change";
-import { useProjectListPrefs, setProjectListPrefs } from "@/lib/project-list-prefs";
+import { useProjectListPrefs, setProjectListPrefs, projectListPrefsStore } from "@/lib/project-list-prefs";
+import { folderMenuPrefsStore, useFolderMenuPrefs } from "@/lib/folder-menu-prefs";
 import { useSendMorph } from "@/lib/use-send-morph";
 import { reportError } from "./lib/report-error";
 import {
@@ -571,6 +574,7 @@ import {
 } from "./voice-setup";
 import { fetchBootstrap } from "./bootstrap";
 import { Toaster } from "@/components/ui/sonner";
+import { hasHostToast } from "@/lib/host-toast";
 import { Button } from "@/components/ui/button";
 import { ShimmerText } from "@/components/ui/shimmer-text";
 import { MorphText } from "@/components/ui/morph-text";
@@ -604,6 +608,10 @@ const CodingAgentsPage = lazyWithReload("CodingAgentsPage", () =>
 // noVNC and the RFB plumbing only load when someone opens the Computer.
 const ComputerPage = lazyWithReload("ComputerPage", () => import("./views/computer-page"));
 const BoardPage = lazyWithReload("BoardPage", () => import("./views/board-page"));
+// Roles and connectors are a Settings destination; keep them off the eager path.
+const ConnectorsPage = lazyWithReload("ConnectorsPage", () =>
+  import("./views/connectors-page").then((m) => ({ default: m.ConnectorsPage })),
+);
 const ResumeSessionSheet = lazyWithReload("ResumeSessionSheet", () =>
   import("./views/resume-session-sheet"),
 );
@@ -690,7 +698,7 @@ import {
 import { RemoteAccessSettingsSection } from "./components/remote-access-settings";
 import { CloudAccountSettingsSection } from "./components/cloud-account-settings";
 import { MachineSwitcher } from "./components/machine-switcher";
-import { ConnectorsPage, ConnectorsRow } from "./views/connectors-page";
+import { ConnectorsRow } from "./views/connectors-row";
 import {
   UpdateNavButton,
   UpdateProvider,
@@ -1333,6 +1341,14 @@ type ServerStats = {
     totalBytes: number | null;
     freeBytes: number | null;
   };
+  /** One row per real volume. Absent on older servers, which only send `disk`. */
+  disks?: {
+    label: string;
+    mount: string;
+    totalBytes: number;
+    freeBytes: number;
+    badge?: string | null;
+  }[];
   cpu: { cores: number; load1: number; load5: number; load15: number };
   network?: { rxBps: number; txBps: number };
   // PSI — share of time tasks stalled on a resource. Leads "percent used".
@@ -2658,7 +2674,7 @@ function ComposerAttachmentChips({
 }) {
   if (!items.length) return null;
   return (
-    <div className={cn("flex gap-2 overflow-x-auto pb-0.5", className)}>
+    <div className={cn("lfg-attachment-scroll flex gap-2 overflow-x-auto pb-0.5", className)}>
       {items.map(({ att, locked }) =>
         // An image says what it is by being visible. The row that carried its
         // filename, its byte count and three buttons said all of that again in
@@ -5784,13 +5800,19 @@ function useResourceWarnings(): void {
         );
       }
 
-      if (s.disk.totalBytes && s.disk.freeBytes != null && s.disk.totalBytes > 0) {
-        const dPct = ((s.disk.totalBytes - s.disk.freeBytes) / s.disk.totalBytes) * 100;
+      const diskRows = s.disks?.length
+        ? s.disks
+        : s.disk.totalBytes && s.disk.freeBytes != null
+          ? [{ label: "Disk", mount: "", totalBytes: s.disk.totalBytes, freeBytes: s.disk.freeBytes }]
+          : [];
+      for (const row of diskRows) {
+        if (!row.totalBytes || row.freeBytes == null) continue;
+        const dPct = ((row.totalBytes - row.freeBytes) / row.totalBytes) * 100;
         fire(
-          "disk",
+          `disk:${row.mount || row.label}`,
           dPct >= 95 ? 2 : dPct >= 90 ? 1 : 0,
           "Disk almost full",
-          `${Math.round(dPct)}% of the data volume used.`,
+          `${row.mount || "Disk"} is ${Math.round(dPct)}% used. ${formatBytes(row.freeBytes)} available.`,
         );
       }
     };
@@ -6410,6 +6432,12 @@ export function App() {
   );
   const [managedComputer, setManagedComputer] = useState(false);
   const [settings, setSettings] = useState<GlobalSettings>(DEFAULT_GLOBAL_SETTINGS);
+  // Whether the box stores the folder display settings. null until the
+  // first bootstrap answers. An older box omits them, and then the folder
+  // menu keeps its browser-local copy.
+  const [boxOwnsFolderDisplay, setBoxOwnsFolderDisplay] = useState<boolean | null>(null);
+  // The phone pill rail follows the same arrangement as the folder menu.
+  const folderMenuPrefs = useFolderMenuPrefs();
   const [schedTz, setSchedTz] = useState<string>(DEFAULT_SCHED_TZ);
   const [findings, setFindings] = useState<AutoFinding[]>([]);
   const [autoTriageBusy, setAutoTriageBusy] = useState(false);
@@ -6726,6 +6754,7 @@ export function App() {
     setSettings(
       resolveGlobalSettings({ timeZone: payload.auto?.tz, ...payload.settings }),
     );
+    setBoxOwnsFolderDisplay(Array.isArray(payload.settings?.folderOrder));
     // Guard sessions to [] — it feeds `allLiveSessions`/`liveSessions` which
     // call `.filter()` unconditionally on render, so a malformed/empty payload
     // must degrade to an empty live view rather than crash.
@@ -8185,41 +8214,6 @@ export function App() {
     await start(false);
   }
 
-  // Feedback closes the loop on the agent, not the finding: the user says what
-  // this run should have done differently and we rewrite the originating auto
-  // agent's own instruction in place, so the correction is live before the next
-  // scheduled run. Fire-and-close under a toast — the rewrite is a real model
-  // call against the agent's repo and can take a while; nothing should block on
-  // it, and the sheet has already served its purpose. The server answers 202
-  // at once and we follow the rewrite through the agent's `refine` state:
-  // holding one fetch open for the whole call is what a phone's 60s timeout
-  // used to cut off, so the toast said "couldn't update" over an agent that
-  // had in fact changed.
-  function refineAgentFromFinding(f: AutoFinding, feedbackText: string) {
-    const name = agentName(f.agentId);
-    const id = encodeURIComponent(f.agentId);
-    setOpenFinding(null);
-    toast.promise(
-      api(`/api/auto/agents/${id}/refine`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ feedback: feedbackText, findingId: f.id }),
-      })
-        .then(() => refreshAuto())
-        .then(() =>
-          waitForRefine(() =>
-            api<{ agent: AutoAgent }>(`/api/auto/agents/${id}`).then((r) => r.agent.refine),
-          ),
-        )
-        .then(() => refreshAuto()),
-      {
-        loading: `Updating ${name}…`,
-        success: `${name} updated`,
-        error: (e) => (e instanceof Error ? e.message : "Couldn't update the agent"),
-      },
-    );
-  }
-
   async function saveAutoAgent(input: {
     id?: string;
     name: string;
@@ -8529,6 +8523,33 @@ export function App() {
     },
     [updateSettings],
   );
+  // The folder menu's order, hidden set and path toggle live on the box so
+  // every client shows the same thing. Each bootstrap or settings answer
+  // feeds the two stores; their writes go back through updateSettings.
+  useEffect(() => {
+    if (boxOwnsFolderDisplay === null) return;
+    if (!boxOwnsFolderDisplay) {
+      folderMenuPrefsStore.disconnect();
+      projectListPrefsStore.disconnect();
+      return;
+    }
+    folderMenuPrefsStore.connect(
+      { order: settings.folderOrder, hidden: settings.hiddenFolders },
+      !settings.folderOrder.length && !settings.hiddenFolders.length,
+      (value) => updateSettings({ folderOrder: value.order, hiddenFolders: value.hidden }),
+    );
+    projectListPrefsStore.connect(
+      { showPaths: settings.showProjectPaths },
+      !settings.showProjectPaths,
+      (value) => updateSettings({ showProjectPaths: value.showPaths }),
+    );
+  }, [
+    boxOwnsFolderDisplay,
+    settings.folderOrder,
+    settings.hiddenFolders,
+    settings.showProjectPaths,
+    updateSettings,
+  ]);
   // A hidden surface is not a destination. Land on Chat if the URL, a
   // shortcut, or a stale menu still names Bots or Schedules while it is off.
   useEffect(() => {
@@ -9144,7 +9165,8 @@ export function App() {
           onSessionChange={setCodingAgentAuth}
           onComplete={completeConnectionAuth}
         />
-        <Toaster position={isMobile ? "top-center" : "bottom-center"} />
+        {/* A host that owns the toast stack draws every toast; see host-toast.ts. */}
+        {hasHostToast() ? null : <Toaster position={isMobile ? "top-center" : "bottom-center"} />}
       </>
     );
   }
@@ -9277,8 +9299,62 @@ export function App() {
       />
     </Suspense>
   );
+  // Notifications, Artifacts, and Settings ride the workspace too, the way Schedules
+  // does: rail on the left, the page in the stage. Narrow layouts keep the
+  // standalone pages below (and their keep-alive mount).
+  const settingsInWorkspace = tab === "settings" && isWide && !bare;
+  const pageInWorkspace =
+    ((tab === "notifications" || tab === "artifacts") && isWide) || settingsInWorkspace;
+  const liveSessionIdSet = new Set(
+    liveSessions.flatMap((s) =>
+      [s.sessionId, s.nativeSessionId].filter((x): x is string => !!x),
+    ),
+  );
+  const notificationsPage = (active: boolean) => (
+    <Suspense fallback={<div className="py-10 text-center text-sm text-muted-foreground">Loading…</div>}>
+      <ShippedPage
+        active={active}
+        notificationIdentity={identity}
+        liveSessionIds={liveSessionIdSet}
+        onOpenSession={(sid) => {
+          openHistoricalSession({
+            sessionId: sid,
+            reviewLabel: "Question",
+          });
+        }}
+        onReviewSession={openShippedSession}
+      />
+    </Suspense>
+  );
+  const artifactsPage = (active: boolean) => (
+    <Suspense fallback={<div className="py-10 text-center text-sm text-muted-foreground">Loading…</div>}>
+      <ShippedPage
+        artifactsOnly
+        active={active}
+        liveSessionIds={new Set()}
+        onOpenSession={() => {}}
+        onOpenArtifactSession={openArtifactSession}
+      />
+    </Suspense>
+  );
+  const settingsPage = (
+    <SettingsView
+      user={userFilter !== "__all" && userFilter !== "__unassigned" ? userFilter : null}
+      onOpenCodingAgents={() => setTab("coding-agents")}
+      onOpenAuto={() => setTab("auto")}
+      onOpenStorage={() => setTab("storage")}
+      onOpenMore={() => setTab("more")}
+      onOpenCustomInstructions={() => setTab("instructions")}
+      onOpenConnectors={() => setTab("connectors")}
+      settings={settings}
+      onSettingsChange={updateSettings}
+      connection={useWsLive ? wsLiveStream.connection : null}
+      computerVersionReport={computerVersionReport}
+    />
+  );
   const workspaceVisible =
-    (tab === "live" || botsInWorkspace || autoInWorkspace || boardInWorkspace) && !botEditor;
+    (tab === "live" || botsInWorkspace || autoInWorkspace || boardInWorkspace || pageInWorkspace) &&
+    !botEditor;
   const liveDesktopWorkspace = workspaceVisible && isWide;
   // Surfaces that render their own chrome, so the app header must not also
   // render over them. Each one owes the user a way back by its own means:
@@ -9287,6 +9363,50 @@ export function App() {
   // here without that is how Notifications and Artifacts once ended up with no
   // route home at all -- see test/pages-nav.test.ts.
   const chromelessSurface = liveDesktopWorkspace || tab === "computer";
+
+  // An auto-agent report or finding. On the desktop workspace it opens in
+  // the stage beside the rail, the same two panes Schedules uses. Elsewhere
+  // it is the full-screen page.
+  const autoSheet = (
+    <>
+      {openFinding ? (
+        <FindingSheet
+          key={openFinding.id}
+          finding={openFinding}
+          agentName={agentName(openFinding.agentId)}
+          sourceAgent={autoAgents.find((a) => a.id === openFinding.agentId)}
+          codingAgents={codingAgents}
+          onClose={() => setOpenFinding(null)}
+          onReply={replyToFinding}
+          onDismiss={dismissFinding}
+        />
+      ) : null}
+
+      {openReport ? (
+        <AgentReportSheet
+          key={openReport}
+          agent={autoAgents.find((a) => a.id === openReport)}
+          agentName={agentName(openReport)}
+          findings={findings.filter((f) => f.agentId === openReport)}
+          tz={schedTz}
+          codingAgents={codingAgents}
+          onClose={() => setOpenReport(null)}
+          onReply={replyToFinding}
+          onDismiss={dismissFinding}
+          onDismissAll={(targets) => void clearAllFindings(targets)}
+          dismissAllBusy={clearFindingsBusy}
+          onEditAgent={(agent) => {
+            setOpenReport(null);
+            setEditingAgent(agent);
+          }}
+        />
+      ) : null}
+    </>
+  );
+  const closeAutoSheet = () => {
+    setOpenFinding(null);
+    setOpenReport(null);
+  };
 
   return (
     <AgentAccessModeContext.Provider
@@ -9328,6 +9448,9 @@ export function App() {
       data-startup-state={loading ? "connecting" : "ready"}
       className={cn(
         bare ? BARE_SHELL_CLASS : APP_SHELL_CLASS,
+        // The desktop workspace page sits a step darker than the panel it
+        // frames (--shell-surface). The rail is transparent over it.
+        !bare && liveDesktopWorkspace && "bg-[var(--shell-surface)]",
         // Embed: leave a blank band of our own background under the host
         // compact pill so list/inline composer sit above it. Full-bleed
         // portals (session sheet) use --lfg-safe-bottom on their own chrome.
@@ -9403,11 +9526,20 @@ export function App() {
             // shared roster is session data and stays in this surface. Pages
             // also has no other entry point on mobile, so the island carries
             // the roster filter, host actions, then our overflow menu.
-            <NavIsland className="shrink-0">
-              {/* Still a card here: the host portals its own actions into the
-                  slot below, so this island is usually holding several
-                  controls rather than the avatar alone. */}
-              <div className="glass-island flex h-11 items-center gap-1.5 rounded-full px-2">
+            <NavIsland
+              className={cn(
+                "shrink-0",
+                // The frame follows the card: none while the slot is empty.
+                "[&:not(:has([data-lfg-host-slot]:not(:empty)))]:bg-none [&:not(:has([data-lfg-host-slot]:not(:empty)))]:p-0 [&:not(:has([data-lfg-host-slot]:not(:empty)))]:shadow-none",
+              )}
+            >
+              {/* A card only while the host has docked something into the
+                  slot below. Current hosts put nothing here on a phone (the
+                  machine switcher and upgrade chip moved into the drawer), so
+                  the avatar stands alone, as in the unhosted header. An older
+                  host that still docks gets the card back: see
+                  .lfg-dock-island in index.css. */}
+              <div className="glass-island lfg-dock-island flex h-11 items-center gap-1.5 rounded-full">
                 {tab === "auto" ? null : (
                   <UserFilterMenu
                     value={userFilter}
@@ -9438,7 +9570,9 @@ export function App() {
                      into an older build must keep its gear, or the surface
                      ends up with no way to settings at all. */
                   data-lfg-host-settings={hostSettingsInMenu ? "menu" : undefined}
-                  className="flex items-center gap-1.5"
+                  // Out of the flex run while unfilled, so its gap does not
+                  // push the avatar off the corner.
+                  className="flex items-center gap-1.5 empty:hidden"
                 />
 
                 <PagesMenu
@@ -9656,7 +9790,10 @@ export function App() {
           session starts. */}
       {isMobile && tab === "live" && overviewView === "projects" && projectOptions.length > 0 ? (
         <ProjectPillRail
-          projects={projectPillsFor(projectOptions, shortProject)}
+          projects={projectPillsFor(projectOptions, shortProject, {
+            prefs: folderMenuPrefs,
+            selected: projectFilter,
+          })}
           value={projectFilter}
           onChange={(next) => setProjectFilter(projectFilterAfterPress(next, projectFilter))}
           touch
@@ -9744,11 +9881,31 @@ export function App() {
               onOpenSessions={() => setTab("live")}
               onOpenAuto={() => setTab("auto")}
               railSurface={
-                tab === "bots" ? "chat" : tab === "auto" ? "auto" : tab === "board" ? "board" : "sessions"
+                tab === "bots"
+                  ? "chat"
+                  : tab === "auto"
+                    ? "auto"
+                    : tab === "board"
+                      ? "board"
+                      : pageInWorkspace
+                        ? "page"
+                        : "sessions"
               }
               stageOverride={
-                autoInWorkspace ? autoManageView : boardInWorkspace ? boardStageView : null
+                autoInWorkspace
+                  ? autoManageView
+                  : boardInWorkspace
+                    ? boardStageView
+                    : pageInWorkspace
+                      ? tab === "notifications"
+                        ? notificationsPage(true)
+                        : tab === "artifacts"
+                          ? artifactsPage(true)
+                          : settingsPage
+                      : null
               }
+              stageSheet={openFinding || openReport ? autoSheet : null}
+              onCloseStageSheet={openFinding || openReport ? closeAutoSheet : undefined}
               bots={bots}
               selectedBotId={selectedBotId}
               onOpenBot={openBot}
@@ -9793,7 +9950,6 @@ export function App() {
                 rows: sideNavRows({
                   tab,
                   hiddenPages,
-                  showBots: settings.showBots,
                   showSchedules: settings.showSchedules,
                   showSettings: !embedded,
                   extensions: extNavTabs,
@@ -9831,6 +9987,8 @@ export function App() {
                   users={users}
                   repos={repos}
                   scopedProject={projectFilter}
+                  projectCounts={projectSessionCounts}
+                  onProjectChange={changeProjectFilter}
                   onReposChanged={loadCore}
                   codingAgents={codingAgents}
                   defaultUser={composerDefaultOwner(identity, userFilter)}
@@ -9973,41 +10131,14 @@ export function App() {
           />
           </Suspense>
         ) : null}
-        {keepShipped || tab === "notifications" ? (
+        {!isWide && (keepShipped || tab === "notifications") ? (
           <div className={tab === "notifications" ? undefined : "hidden"} aria-hidden={tab !== "notifications"}>
-            <Suspense fallback={<div className="py-10 text-center text-sm text-muted-foreground">Loading…</div>}>
-            <ShippedPage
-              active={tab === "notifications"}
-              notificationIdentity={identity}
-              liveSessionIds={
-                new Set(
-                  liveSessions.flatMap((s) =>
-                    [s.sessionId, s.nativeSessionId].filter((x): x is string => !!x),
-                  ),
-                )
-              }
-              onOpenSession={(sid) => {
-                openHistoricalSession({
-                  sessionId: sid,
-                  reviewLabel: "Question",
-                });
-              }}
-              onReviewSession={openShippedSession}
-            />
-            </Suspense>
+            {notificationsPage(tab === "notifications")}
           </div>
         ) : null}
-        {keepArtifacts || tab === "artifacts" ? (
+        {!isWide && (keepArtifacts || tab === "artifacts") ? (
           <div className={tab === "artifacts" ? undefined : "hidden"} aria-hidden={tab !== "artifacts"}>
-            <Suspense fallback={<div className="py-10 text-center text-sm text-muted-foreground">Loading…</div>}>
-              <ShippedPage
-                artifactsOnly
-                active={tab === "artifacts"}
-                liveSessionIds={new Set()}
-                onOpenSession={() => {}}
-                onOpenArtifactSession={openArtifactSession}
-              />
-            </Suspense>
+            {artifactsPage(tab === "artifacts")}
           </div>
         ) : null}
         {tab === "changelog" ? (
@@ -10027,7 +10158,11 @@ export function App() {
             onChange={(customInstructions) => updateSettings({ customInstructions })}
           />
         ) : null}
-        {tab === "connectors" ? <ConnectorsPage /> : null}
+        {tab === "connectors" ? (
+          <Suspense fallback={<div className="py-10 text-center text-sm text-muted-foreground">Loading…</div>}>
+            <ConnectorsPage />
+          </Suspense>
+        ) : null}
         {tab === "computer" ? (
           <Suspense
             fallback={<div className="py-10 text-center text-sm text-muted-foreground">Loading…</div>}
@@ -10102,20 +10237,9 @@ export function App() {
         tab !== "instructions" &&
         tab !== "connectors" &&
         tab !== "more" &&
+        !settingsInWorkspace &&
         !extNavTabs.some((t) => t.id === tab) ? (
-          <SettingsView
-            user={userFilter !== "__all" && userFilter !== "__unassigned" ? userFilter : null}
-            onOpenCodingAgents={() => setTab("coding-agents")}
-            onOpenAuto={() => setTab("auto")}
-            onOpenStorage={() => setTab("storage")}
-            onOpenMore={() => setTab("more")}
-            onOpenCustomInstructions={() => setTab("instructions")}
-            onOpenConnectors={() => setTab("connectors")}
-            settings={settings}
-            onSettingsChange={updateSettings}
-            connection={useWsLive ? wsLiveStream.connection : null}
-            computerVersionReport={computerVersionReport}
-          />
+          settingsPage
         ) : null}
         </>}
       </main>
@@ -10127,7 +10251,6 @@ export function App() {
           rows={sideNavRows({
             tab,
             hiddenPages,
-            showBots: settings.showBots,
             showSchedules: settings.showSchedules,
             // A host owns its own settings surface. Before the drawer, the
             // embedded header passed showSettings={false} unconditionally and
@@ -10210,40 +10333,7 @@ export function App() {
         </>
       ) : null}
 
-      {openFinding ? (
-        <FindingSheet
-          key={openFinding.id}
-          finding={openFinding}
-          agentName={agentName(openFinding.agentId)}
-          sourceAgent={autoAgents.find((a) => a.id === openFinding.agentId)}
-          codingAgents={codingAgents}
-          onClose={() => setOpenFinding(null)}
-          onReply={replyToFinding}
-          onDismiss={dismissFinding}
-          onRefineAgent={refineAgentFromFinding}
-        />
-      ) : null}
-
-      {openReport ? (
-        <AgentReportSheet
-          key={openReport}
-          agent={autoAgents.find((a) => a.id === openReport)}
-          agentName={agentName(openReport)}
-          findings={findings.filter((f) => f.agentId === openReport)}
-          tz={schedTz}
-          codingAgents={codingAgents}
-          onClose={() => setOpenReport(null)}
-          onReply={replyToFinding}
-          onDismiss={dismissFinding}
-          onDismissAll={(targets) => void clearAllFindings(targets)}
-          dismissAllBusy={clearFindingsBusy}
-          onRefineAgent={refineAgentFromFinding}
-          onEditAgent={(agent) => {
-            setOpenReport(null);
-            setEditingAgent(agent);
-          }}
-        />
-      ) : null}
+      {liveDesktopWorkspace ? null : autoSheet}
 
       {editingAgent === "new" ? (
         <NewAutoAgentComposer
@@ -10348,7 +10438,8 @@ export function App() {
           }
         }}
       />
-      <Toaster position={isMobile ? "top-center" : "bottom-center"} />
+      {/* A host that owns the toast stack draws every toast; see host-toast.ts. */}
+      {hasHostToast() ? null : <Toaster position={isMobile ? "top-center" : "bottom-center"} />}
     </div>
     {loading && bare ? <AppStartupStatus /> : null}
     {terminalSid ? (
@@ -12113,6 +12204,8 @@ function LiveView({
   stageComposer,
   workspaceComposer,
   stageOverride = null,
+  stageSheet = null,
+  onCloseStageSheet,
   hostSettingsInMenu = false,
 }: {
   sessions: Session[];
@@ -12139,7 +12232,7 @@ function LiveView({
   onOpenAuto: () => void;
   onOpenComputer?: () => void;
   /** Which list the rail is showing. Bots ride the same rail as sessions. */
-  railSurface?: "sessions" | "chat" | "auto" | "board";
+  railSurface?: "sessions" | "chat" | "auto" | "board" | "page";
   bots?: PersistentBot[];
   selectedBotId?: string | null;
   onOpenBot?: (id: string, conversationId?: string | null) => void;
@@ -12190,6 +12283,9 @@ function LiveView({
   workspaceComposer?: StageComposerRender;
   /** Desktop only. See RailStage. */
   stageOverride?: ReactNode;
+  /** Desktop only. See RailStage. */
+  stageSheet?: ReactNode;
+  onCloseStageSheet?: () => void;
   /** Desktop only. See RailStage. */
   hostSettingsInMenu?: boolean;
 }) {
@@ -12313,6 +12409,9 @@ function LiveView({
     [onOpenSessionPage],
   );
 
+  // Folder groups follow the box's saved folder order.
+  const folderOrder = useFolderMenuPrefs().order;
+
   // Same grouping the rail uses, from the same helper, so the two lists cannot
   // drift apart again.
   const originalProjectGroups = useMemo(
@@ -12321,9 +12420,10 @@ function LiveView({
         tree.roots.filter((item) => !nodeContainsPin(item) && !nodeIsBot(item)),
         (node) => tree.flatten([node]).length,
         shortProject,
+        folderOrder,
       ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tree, topPinned],
+    [tree, topPinned, folderOrder],
   );
 
   const pinnedNodes = tree.roots.filter(
@@ -12543,6 +12643,8 @@ function LiveView({
         stageComposer={stageComposer}
         workspaceComposer={workspaceComposer}
         stageOverride={stageOverride}
+        stageSheet={stageSheet}
+        onCloseStageSheet={onCloseStageSheet}
         hostSettingsInMenu={hostSettingsInMenu}
         topPinned={topPinned}
         onToggleTopPin={toggleTopPin}
@@ -12718,6 +12820,17 @@ function LiveView({
 // promotes it to a persistent column. The stage never reorders on its own, so a
 // session flipping working↔idle no longer makes the layout jump — that motion
 // is confined to the small status dot in the rail. Up to 4 columns.
+/**
+ * One desktop stage pane: content raised off the page the rail sits on, the
+ * way a desktop chat app separates content from navigation. Each pane in a
+ * multi-column stage is its own panel, so the grid gap reads as space between
+ * them rather than as a rule. Clips its child to the radius.
+ */
+// The ring is the panel's hairline edge. It is a box-shadow, so overflow-hidden
+// does not clip it and it costs no layout.
+const STAGE_PANEL =
+  "overflow-hidden rounded-2xl bg-[var(--stage-surface)] ring-1 ring-foreground/[0.07] [--lfg-pane-bg:var(--stage-surface)] [--lfg-field-fill:var(--stage-field)]";
+
 function RailStage({
   sessions = [],
   shippedReview,
@@ -12772,6 +12885,8 @@ function RailStage({
   stageComposer,
   workspaceComposer,
   stageOverride = null,
+  stageSheet = null,
+  onCloseStageSheet,
   hostSettingsInMenu = false,
 }: {
   sessions: Session[];
@@ -12791,7 +12906,7 @@ function RailStage({
   onOpenAuto: () => void;
   /** Direct Computer page navigation for the workspace's global nav. */
   onOpenComputer?: () => void;
-  railSurface?: "sessions" | "chat" | "auto" | "board";
+  railSurface?: "sessions" | "chat" | "auto" | "board" | "page";
   bots?: PersistentBot[];
   selectedBotId?: string | null;
   onOpenBot?: (id: string, conversationId?: string | null) => void;
@@ -12840,10 +12955,18 @@ function RailStage({
    */
   workspaceComposer?: StageComposerRender;
   /**
-   * Replaces the stage columns entirely while `railSurface === "auto"`: the
-   * Schedules list lives in the pane, the session rail stays on the left.
+   * Replaces the stage columns entirely while `railSurface` is "auto" or
+   * "page": Schedules, Notifications or Artifacts live in the pane, the
+   * session rail stays on the left.
    */
   stageOverride?: ReactNode;
+  /**
+   * An auto-agent report or finding, drawn in the stage beside the rail.
+   * It takes the whole stage on any surface, the way Schedules does, and
+   * picking a row in the rail closes it.
+   */
+  stageSheet?: ReactNode;
+  onCloseStageSheet?: () => void;
   /**
    * Hosted only: the Pages menu carries the host's Settings, so the
    * rail-footer slot tells the host its own gear is redundant here.
@@ -12851,7 +12974,7 @@ function RailStage({
   hostSettingsInMenu?: boolean;
 }) {
   // A host that supplies its own machine list gets the switcher too.
-  const hostMachines = useEmbeddedHostOptions().machines;
+  const { machines: hostMachines, onNavigate: onHostNavigate } = useEmbeddedHostOptions();
   const appDialog = useAppDialog();
   const { conversations: botConversationsForRail, selectedConversationId: selectedBotConversationForRail, markRead: markBotRowRead, any: botsUnreadAny } = useContext(BotUnreadContext);
   const { any: sessionsUnreadAny } = useContext(SessionUnreadContext);
@@ -13199,6 +13322,7 @@ function RailStage({
   // shortcut, the fresh session after Start) retires the in-pane composer, so
   // it can never linger behind a transcript.
   const startNew = () => {
+    onHostNavigate?.();
     // With the workspace up, the composer is already on screen: "c" puts the
     // caret in it instead of sliding the drawer over the page.
     if (workspaceUp) {
@@ -13251,13 +13375,15 @@ function RailStage({
       // From Schedules, picking a session in the rail goes back to Chat: the
       // stage is showing the schedule list, and a preview set underneath it
       // would be an open session nobody can see.
-      if (railSurface === "auto") onOpenSessions();
+      if (railSurface === "auto" || railSurface === "page") onOpenSessions();
+      // A report in the stage gives way to the session picked beside it.
+      onCloseStageSheet?.();
       // Board mode shows one session beside the board, pinned or not.
       setStageMode(true);
       if (railSurface !== "board" && validPinned.includes(sid)) return; // already a persistent column
       setPreview(sid);
     },
-    [validPinned, railSurface, onOpenSessions],
+    [validPinned, railSurface, onOpenSessions, onCloseStageSheet],
   );
   // Arriving on the Board shows the board alone; whatever Live was previewing
   // is not what you came to look at.
@@ -13361,6 +13487,8 @@ function RailStage({
   // row already shows on its own mark. It also fought the folder grouping:
   // scoped to one project you got Working/Idle, scoped to all you got folders,
   // so the rail reorganised itself whenever the filter changed.
+  // Folder groups follow the box's saved folder order, as the pills do.
+  const folderOrder = useFolderMenuPrefs().order;
   const projectRailGroups = useMemo(
     () =>
       groupNodesByProject(
@@ -13369,9 +13497,10 @@ function RailStage({
         ),
         (node) => railTree.flatten([node]).length,
         shortProject,
+        folderOrder,
       ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [railTree, topPinned],
+    [railTree, topPinned, folderOrder],
   );
 
   const overviewPrefs = useOverviewPreferences();
@@ -13468,6 +13597,7 @@ function RailStage({
   // so re-clicking an already-open column still points at which window it is.
   const activate = useCallback(
     (sid: string, shift: boolean) => {
+      onHostNavigate?.();
       if (workspaceUp) {
         // In the workspace a plain click READS: it selects the row for the
         // summary pane from data the roster already holds. Only an explicit
@@ -13494,7 +13624,7 @@ function RailStage({
       openSession(sid);
       pulseStage(sid);
     },
-    [workspaceUp, selectTo, openSession, pulseStage],
+    [workspaceUp, selectTo, openSession, pulseStage, onHostNavigate],
   );
 
   // "Open gesprek": leave the workspace for the full stage with this session
@@ -13980,7 +14110,7 @@ function RailStage({
         <section
           aria-label="Updates"
           data-testid="rail-findings-panel"
-          className="flex max-h-[50%] min-h-0 shrink-0 flex-col border-t border-border animate-in fade-in slide-in-from-bottom-8 duration-[380ms] ease-[cubic-bezier(0.25,0.8,0.25,1)] motion-reduce:animate-none"
+          className="group/updates flex max-h-[50%] min-h-0 shrink-0 flex-col border-t border-border animate-in fade-in slide-in-from-bottom-8 duration-[380ms] ease-[cubic-bezier(0.25,0.8,0.25,1)] motion-reduce:animate-none"
         >
           <div className="flex h-10 shrink-0 items-center gap-2 pl-3 pr-1.5">
             <button
@@ -13991,9 +14121,12 @@ function RailStage({
               className="flex min-w-0 items-baseline gap-2 text-left outline-none focus-visible:text-foreground"
             >
               <span className="text-[13px] font-semibold">Updates</span>
-              <span className="text-xs tabular-nums text-muted-foreground">{findings.length} open</span>
+              <span className="text-xs tabular-nums text-muted-foreground">{findings.length}</span>
             </button>
-            <span className="ml-auto flex items-center gap-1">
+            {/* Bulk actions wait for the pointer or focus. At rest the header
+                is a label and a fold, so the rows carry the eye. Each row
+                still has its own triage on hover. */}
+            <span className="ml-auto flex items-center gap-1 opacity-0 transition-opacity group-hover/updates:opacity-100 group-focus-within/updates:opacity-100">
               <ClearFindingsButton
                 count={findings.length}
                 busy={clearFindingsBusy}
@@ -14005,16 +14138,16 @@ function RailStage({
                 onClick={() => onTriageFindings()}
                 compact
               />
-              <button
-                type="button"
-                onClick={() => setRailFindingsOpen(false)}
-                aria-label="Hide updates"
-                title="Hide updates"
-                className="flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-              >
-                <ChevronDown className="size-4" />
-              </button>
             </span>
+            <button
+              type="button"
+              onClick={() => setRailFindingsOpen(false)}
+              aria-label="Hide updates"
+              title="Hide updates"
+              className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+            >
+              <ChevronDown className="size-4" />
+            </button>
           </div>
           <div className="flex min-h-0 flex-col gap-1 overflow-y-auto px-1.5 pb-2">
             {groupFindingsByAgent(findings).map((report) => (
@@ -14087,7 +14220,12 @@ function RailStage({
         ? boardStageColumns
         : stageColumns;
   // The board pane counts toward the grid shape.
-  const stagePaneCount = activeStageColumns.length + (railSurface === "board" ? 1 : 0);
+  // A page in the stage (Schedules, Notifications, Artifacts) is one pane.
+  const stagePaneCount = stageSheet ||
+    railSurface === "auto" ||
+    railSurface === "page"
+    ? 1
+    : activeStageColumns.length + (railSurface === "board" ? 1 : 0);
 
   // The bot list is the session list's sibling, not a page: same rail, same
   // rows, same click-to-open-a-column behaviour. A bot row IS a session row —
@@ -14102,7 +14240,7 @@ function RailStage({
         // The same row as the Chat list's New session.
         <button
           type="button"
-          onClick={onNewBot}
+          onClick={() => { onHostNavigate?.(); onNewBot?.(); }}
           className="mb-1 flex h-10 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
         >
           <span className="flex size-7 shrink-0 items-center justify-center rounded-full border border-dashed border-border">
@@ -14126,6 +14264,7 @@ function RailStage({
         // either — the row would read `[subagent complete] …`.
         const preview = plainPreviewText(botRosterPreview(rawPreview, busy));
         const open = () => {
+          onHostNavigate?.();
           onOpenBot?.(bot.id, row.conversationId);
           if (sid) activate(sid, false);
         };
@@ -14302,7 +14441,10 @@ function RailStage({
           sessions workspace is up; the other surfaces always show it. */}
       {!workspaceUp && <div className="flex h-full min-h-0 min-w-0 flex-1">
       <aside
-        className="flex h-full min-h-0 shrink-0 flex-col overflow-hidden border-r border-border transition-[width] duration-200 ease-ios"
+        // No border-r: the rail sits on the page and the stage beside it is a
+        // raised, rounded panel (STAGE_PANEL), so the edge of that panel is
+        // the separation. A rule here drew a second line next to it.
+        className="flex h-full min-h-0 shrink-0 flex-col overflow-hidden transition-[width] duration-200 ease-ios"
         // 320, not 280. The rows carry the roster's 16px title now, and at 280
         // that truncated to about two words — "operation fix om…" — which is
         // not a title, it is a prefix. The type size is the shared thing; the
@@ -14393,7 +14535,7 @@ function RailStage({
               {onOpenAsk ? (
                 <>
                   {hosted ? null : <UpdateNavButton />}
-                  <AskNavButton active={false} onOpen={onOpenAsk} />
+                  <AskNavButton active={false} onOpen={() => { onHostNavigate?.(); onOpenAsk(); }} />
                 </>
               ) : null}
               {onUserChange ? (
@@ -14492,8 +14634,10 @@ function RailStage({
             onProjectChange={onProjectChange}
             renderItem={renderRailItem}
             // The folder menu above names the scope, so a header under it
-            // repeating "lfg · 9" said the same thing twice.
-            headerless={showFolderMenu}
+            // repeating "lfg · 9" said the same thing twice. Under All
+            // projects the menu names no folder, so the headers come back to
+            // say which folder each run belongs to (and scope to it).
+            headerless={showFolderMenu && projectFilter !== "__all"}
             dense
           />
           </>}
@@ -14520,6 +14664,7 @@ function RailStage({
             onBack={() => setRailNavOpen(false)}
             rows={sideNav.rows}
             onNavigate={sideNav.onNavigate}
+            onSelect={onHostNavigate}
             unread={railNavUnread}
             // The machine lives in the menu, first, as in the phone drawer.
             // It is set once and rarely changed, so it does not need a
@@ -14574,12 +14719,17 @@ function RailStage({
       {/* THE RAIL'S EDGE. Collapse and expand live here, on the divider they
           act on, instead of as one more icon in the rail's header. Hovering
           the edge lights it; the grip in its middle is the button. */}
-      <div className="group/rail-edge relative z-40 w-0 shrink-0">
-        <div className="absolute inset-y-0 -left-1.5 flex w-3 items-center justify-center">
-          <span
-            aria-hidden="true"
-            className="pointer-events-none absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors group-hover/rail-edge:bg-primary/40"
-          />
+      {/* The collapse edge sits ON the panel's left edge (ml-3 is the gap
+          the panel keeps from the rail), so the handle touches the card. The
+          hover line is the panel's own left border, drawn with the panel's
+          radius so it curves round the corners instead of running straight
+          down the gap. */}
+      <div className="group/rail-edge relative z-40 ml-3 w-0 shrink-0">
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-y-0 left-0 w-5 rounded-l-2xl border-l-2 border-transparent transition-colors group-hover/rail-edge:border-foreground/25"
+        />
+        <div className="absolute inset-y-0 -left-2 flex w-4 items-center justify-center">
           <button
             type="button"
             onClick={() => {
@@ -14602,7 +14752,12 @@ function RailStage({
       </div>
 
       <div
+        // Hosts dock their own pages over this pane, preserving the rail.
+        data-lfg-host-stage={hosted ? "" : undefined}
         className={cn(
+          // The rail's rows sit 18px in from the window (main's 12px gutter +
+          // the list's 6px). The rail edge before this grid carries ml-3, so
+          // they sit 18px from the panel too: the rail is centred.
           "grid h-full min-h-0 min-w-0 flex-1 gap-3",
           // 1 pane → full; 2 → side by side; 3-4 → 2×2 (panes 1&2 top, 3&4 bottom).
           stagePaneCount <= 1
@@ -14612,17 +14767,23 @@ function RailStage({
               : "grid-cols-2 grid-rows-2",
         )}
       >
-        {railSurface === "auto" ? (
-          <div className="h-full min-h-0 overflow-y-auto px-2 pt-2">{stageOverride}</div>
+        {stageSheet ? (
+          <div className={cn("h-full min-h-0 min-w-0", STAGE_PANEL)}>
+            <AutoAgentPageInStage.Provider value>{stageSheet}</AutoAgentPageInStage.Provider>
+          </div>
+        ) : railSurface === "auto" || railSurface === "page" ? (
+          <div className={cn("h-full min-h-0", STAGE_PANEL)}>
+            <div className="h-full min-h-0 overflow-y-auto px-2 pt-2">{stageOverride}</div>
+          </div>
         ) : railSurface === "board" ? (
           <>
-            <div className="h-full min-h-0 min-w-0 overflow-hidden pt-2">
+            <div className={cn("h-full min-h-0 min-w-0 pt-2", STAGE_PANEL)}>
               <StageOpenSessionContext.Provider value={openSession}>
                 {stageOverride}
               </StageOpenSessionContext.Provider>
             </div>
             {activeStageColumns.map(({ sid, session }) => (
-              <div key={sid} data-stage-sid={sid} className="h-full min-h-0 min-w-0">
+              <div key={sid} data-stage-sid={sid} className={cn("h-full min-h-0 min-w-0", STAGE_PANEL)}>
                 {/* Closing goes back to the board alone. */}
                 {renderStageCard(session, () => closeColumn(sid))}
               </div>
@@ -14634,7 +14795,7 @@ function RailStage({
               <div
                 key={sid}
                 data-stage-sid={sid}
-                className="h-full min-h-0 min-w-0"
+                className={cn("h-full min-h-0 min-w-0", STAGE_PANEL)}
               >
                 {/* A lone pane has nothing to "close back to" — hide the X
                     until a second column exists. */}
@@ -14648,19 +14809,21 @@ function RailStage({
             );
           })
         ) : railSurface === "chat" ? (
-          <BotStagePlaceholder
-            bot={selectedBot}
-            onNewBot={onNewBot}
-            onStarted={async () => {
-              await Promise.all([onRefreshBots?.(), onRefresh()]);
-            }}
-          />
+          <div className={cn("h-full min-h-0 min-w-0", STAGE_PANEL)}>
+            <BotStagePlaceholder
+              bot={selectedBot}
+              onNewBot={onNewBot}
+              onStarted={async () => {
+                await Promise.all([onRefreshBots?.(), onRefresh()]);
+              }}
+            />
+          </div>
         ) : (
           // An empty stage IS the composer. There is no "No session open"
           // card any more: with nothing to show, the useful thing to show is
           // the place to start one. The hosted coach, when present, sits
           // above it.
-          <div className="flex h-full min-h-0 flex-1 flex-col">
+          <div className={cn("flex h-full min-h-0 flex-1 flex-col", STAGE_PANEL)}>
             {coach ? (
               <div className="mx-auto w-full max-w-xl shrink-0 px-4 pt-4 text-left">{coach}</div>
             ) : null}
@@ -15017,7 +15180,7 @@ function RailGroup({
   return (
     <div className="mb-2">
       {!collapsed ? (
-        <div className="flex items-center px-2 pb-1 pt-1 text-[11px] font-semibold text-muted-foreground/70">
+        <div className="group/rail-head flex items-center px-2 pb-1 pt-1 text-[11px] font-semibold text-muted-foreground/70">
           {onFilter ? (
             <button
               type="button"
@@ -15127,6 +15290,7 @@ const RailRow = memo(function RailRow({
   titleBadge,
   preview,
   metadata,
+  singleLine = false,
   indicator,
   trailingStatic,
   trailingHover,
@@ -15154,6 +15318,8 @@ const RailRow = memo(function RailRow({
   titleBadge?: ReactNode;
   preview: ReactNode;
   metadata?: ReactNode;
+  /** Title only, with the compact height used by thread shortcuts. */
+  singleLine?: boolean;
   /** Extra state shown only in the expanded row, between the text column and the trailing slot (e.g. an unread dot). */
   indicator?: ReactNode;
   /** Draws the title at full weight, so unread does not rest on the dot alone. */
@@ -15278,15 +15444,23 @@ const RailRow = memo(function RailRow({
         className={cn(
           "group relative flex cursor-pointer touch-pan-y select-none items-center rounded-xl border outline-none transition-[background-color,box-shadow,border-color] duration-150",
           dense ? "gap-2.5 py-1" : "gap-3 py-1.5",
-          // Fixed height. The preview arrives late and is replaced as a row
-          // streams, so a row sized to its own text kept resizing under the
-          // cursor and shoved every row below it — the whole list twitching
-          // while anything was working. The row reserves its one preview
-          // line whether or not there is text to put in it yet.
+          // Fixed height. A normal row reserves its preview line because the
+          // preview arrives late and changes while work streams. A title-only
+          // thread shortcut uses the smaller fixed height instead.
           // 5rem and 16/14 padding, from SESSION_ROW in mobile/src/components.tsx.
           // The web row was 60px with 8px of padding, so the same fleet read
           // as a denser product on the web than in the app.
-          collapsed ? "h-11 justify-center px-0" : dense ? "h-[3.75rem] pl-2.5 pr-2" : "h-20 pl-4 pr-3.5",
+          collapsed
+            ? "h-11 justify-center px-0"
+            : singleLine
+              ? dense
+                ? "h-10 pl-2.5 pr-2"
+                : // Thread shortcuts are title-only; 40px rows of a big
+                  // title read as a padded list on a small phone.
+                  "h-8 pl-4 pr-3.5"
+              : dense
+                ? "h-[3.75rem] pl-2.5 pr-2"
+                : "h-20 pl-4 pr-3.5",
           swiping
             ? "border-transparent bg-card"
             : active
@@ -15314,7 +15488,11 @@ const RailRow = memo(function RailRow({
                 <span
                 className={cn(
                   "overview-row-title lfg-film-blur min-w-0 flex-1 truncate leading-tight",
-                  dense ? "text-[14.5px] tracking-[-0.1px]" : "text-[17px] tracking-[-0.2px]",
+                  dense
+                    ? "text-[14.5px] tracking-[-0.1px]"
+                    : singleLine
+                      ? "text-base tracking-[-0.2px]"
+                      : "text-[17px] tracking-[-0.2px]",
                   // Unread is not the dot's job alone: the title carries full
                   // weight until it is read, then settles back. Same rule as
                   // the iOS row.
@@ -15332,15 +15510,17 @@ const RailRow = memo(function RailRow({
                   A CSS transition cannot see a text swap — nothing about the
                   element's own style changes — so there is no property for it
                   to animate. */}
-              <span
-                key={typeof preview === "string" ? preview : undefined}
-                className={cn(
-                  "rail-preview truncate leading-tight text-muted-foreground",
-                  dense ? "h-[18px] text-[13px]" : "h-5 text-sm",
-                )}
-              >
-                {preview}
-              </span>
+              {singleLine ? null : (
+                <span
+                  key={typeof preview === "string" ? preview : undefined}
+                  className={cn(
+                    "rail-preview truncate leading-tight text-muted-foreground",
+                    dense ? "h-[18px] text-[13px]" : "h-5 text-sm",
+                  )}
+                >
+                  {preview}
+                </span>
+              )}
             </span>
             {metadata}
             {/* When it last moved, then what state it is in — the iOS row's
@@ -17043,6 +17223,15 @@ function SessionChatBody({
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const [dictationScrollNonce, setDictationScrollNonce] = useState(0);
   const [messageMultiline, setMessageMultiline] = useState(false);
+  // The bar morphs like the new-session composer (and iOS HomeComposer): one
+  // row at rest, then the field on its own line with the controls under it
+  // while focused or filled. Text then always sits above the controls instead
+  // of between them, which read as lopsided once it wrapped.
+  const [composerFocused, setComposerFocused] = useState(false);
+  const composerBlurTimerRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (composerBlurTimerRef.current != null) window.clearTimeout(composerBlurTimerRef.current);
+  }, []);
   // Shared composer file plumbing (same hook the new-session and fork composers
   // use): eager uploads, drag & drop, paste, annotate.
   const files = useComposerAttachments({
@@ -17668,6 +17857,24 @@ function SessionChatBody({
     [sid, onError],
   );
 
+  const composerExpanded = composerFocused || !!messageText.trim() || attachments.length > 0;
+  // One element, placed in whichever slot the bar's shape gives it: before
+  // the field at rest, at the head of the control row when expanded.
+  const attachButton = (
+    <Button
+      size="icon"
+      type="button"
+      variant={draggingFiles ? "brand-soft" : "tint"}
+      className="size-10 shrink-0 rounded-full md:size-8"
+      onClick={files.openFilePicker}
+      aria-label="Attach files"
+      title="Attach files"
+      disabled={sending}
+    >
+      <Plus className="size-4" />
+    </Button>
+  );
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <StaleCapabilitiesBanner session={session} />
@@ -17685,6 +17892,7 @@ function SessionChatBody({
         onRetryQueued={retryQueued}
         bot={bot}
         conversation={session.conversation}
+        loginUser={session.assignedUser}
       />
 
       <SessionQuestionPanel sessionIds={[session.sessionId, session.nativeSessionId]} />
@@ -17727,8 +17935,11 @@ function SessionChatBody({
             // field sitting in the page. Wider screens keep the tighter inset:
             // the transcript column is already centred there, so the bar is
             // not near an edge to begin with.
-            "relative overflow-x-clip bg-background px-4 pb-[calc(0.5rem+var(--lfg-safe-bottom))] pt-1.5 transition-colors md:px-2",
-            "before:pointer-events-none before:absolute before:inset-x-0 before:-top-6 before:h-8 before:bg-gradient-to-t before:from-background before:to-transparent before:content-['']",
+            // md: the side pad centres a 48rem field, the transcript's reading
+            // column (max-w-3xl), and never drops under 0.5rem in a narrow
+            // pane. Padding percentages resolve against the form's width.
+            "relative overflow-x-clip bg-[var(--lfg-pane-bg,var(--background))] px-4 pb-[calc(0.5rem+var(--lfg-safe-bottom))] pt-1.5 transition-colors md:px-[max(0.5rem,calc((100%-48rem)/2))]",
+            "before:pointer-events-none before:absolute before:inset-x-0 before:-top-6 before:h-8 before:bg-gradient-to-t before:from-[var(--lfg-pane-bg,var(--background))] before:to-transparent before:content-['']",
             draggingFiles && "bg-primary/8",
             launching && "lfg-composer-launching",
           )}
@@ -17738,16 +17949,8 @@ function SessionChatBody({
               never be mistaken for each other. */}
           <HumanTypingIndicator participants={typingParticipants} />
           <ProjectPreviewCard sessionId={sid} user={session.assignedUser} agentBusy={chatBusy} />
-          <BrowserLoginCard sessionId={sid} user={session.assignedUser} />
           {files.fileInput}
-          <ComposerAttachmentChips
-            className="mb-2"
-            items={attachments.map((att) => ({ att }))}
-            disabled={sending}
-            onAnnotate={files.setAnnotatingId}
-            onRemove={removeAttachment}
-            onToggleHd={files.setAttachmentHd}
-          />
+
           {/* Held sends rise out of the bar as a narrow island docked to its
               top edge: the next one to go is always visible, the rest fold
               behind a count until tapped. */}
@@ -17777,9 +17980,25 @@ function SessionChatBody({
               // outward instead of looking round.
               // z-[1]: the held-queue card above docks under this bar's
               // top edge, so the bar has to paint over it.
-              "lfg-gfield relative z-[1] flex gap-1 rounded-3xl px-2 py-1.5 transition-[background-color,border-color,box-shadow] duration-300 ease-ios md:gap-0.5 md:px-1.5 md:py-1",
-              messageMultiline ? "items-end" : "items-center",
+              "lfg-gfield relative z-[1] rounded-3xl transition-[background-color,border-color,box-shadow,padding] duration-200 ease-ios motion-reduce:transition-none",
+              composerExpanded ? "px-2.5 pb-2 pt-2 md:px-2 md:pb-1.5 md:pt-1.5" : "px-2 py-1.5 md:px-1.5 md:py-1",
             )}
+            onFocus={(event) => {
+              if (!(event.target instanceof HTMLTextAreaElement)) return;
+              if (composerBlurTimerRef.current != null) window.clearTimeout(composerBlurTimerRef.current);
+              composerBlurTimerRef.current = null;
+              setComposerFocused(true);
+            }}
+            onBlur={(event) => {
+              if (!(event.target instanceof HTMLTextAreaElement)) return;
+              // Collapse a moment later, so a press on a control that is
+              // about to move still lands on it.
+              if (composerBlurTimerRef.current != null) window.clearTimeout(composerBlurTimerRef.current);
+              composerBlurTimerRef.current = window.setTimeout(() => {
+                composerBlurTimerRef.current = null;
+                setComposerFocused(false);
+              }, 200);
+            }}
           >
             {/* Visible circle stays well under the bar's own height — the taller
                 bar is breathing room around the text, not a mandate to blow the
@@ -17787,19 +18006,28 @@ function SessionChatBody({
                 target on its own on mobile, so no padding trick is needed to
                 keep the tap area honest; md:size-8 is mouse-precision, not
                 touch, so it can go smaller. */}
-            <Button
-              size="icon"
-              type="button"
-              variant={draggingFiles ? "brand-soft" : "tint"}
-              className="size-10 shrink-0 rounded-full md:size-8"
-              onClick={files.openFilePicker}
-              aria-label="Attach files"
-              title="Attach files"
+            <ComposerAttachmentChips
+              className="mb-2 px-1 pt-1"
+              items={attachments.map((att) => ({ att }))}
               disabled={sending}
+              onAnnotate={files.setAnnotatingId}
+              onRemove={removeAttachment}
+              onToggleHd={files.setAttachmentHd}
+            />
+            {/* The morphing row: one line at rest, the field over its
+                controls while focused or filled. */}
+            <div
+              className={cn(
+                "flex",
+                composerExpanded
+                  ? "flex-col items-stretch gap-1"
+                  : cn("gap-1 md:gap-0.5", messageMultiline ? "items-end" : "items-center"),
+              )}
             >
-              <Plus className="size-4" />
-            </Button>
-            {sid ? (
+            {/* The field keeps its child index in both shapes, so React
+                updates it in place and focus survives the morph. */}
+            {composerExpanded ? null : attachButton}
+            {composerExpanded || !sid ? null : (
               <SessionComputerInspectionAction
                 sessionId={sid}
                 sessionTitle={session.title || session.project || "Current session"}
@@ -17807,7 +18035,7 @@ function SessionChatBody({
                 disabled={sending || historyLoading || inspectionOpening}
                 onOpen={openComputerInspection}
               />
-            ) : null}
+            )}
             <ComposerTextarea
               textareaRef={messageInputRef}
               data-composer-sid={sid}
@@ -17871,6 +18099,27 @@ function SessionChatBody({
                 "min-h-10 resize-none border-0 bg-transparent px-1 py-2 text-base leading-5 shadow-none placeholder:text-muted-foreground focus-visible:border-0 focus-visible:ring-0 md:min-h-8 md:py-1.5 md:text-sm",
               )}
             />
+            {/* The control row exists in both shapes, so the mic never
+                remounts when the first dictated words expand the bar. */}
+            <div
+              className={cn("flex shrink-0 items-center", composerExpanded ? "gap-1.5" : "gap-1 md:gap-0.5", messageMultiline && !composerExpanded && "self-end")}
+              // Keep the field focused while a control is pressed, so the bar
+              // does not collapse under the pointer.
+              onMouseDown={(event) => {
+                if (composerExpanded) event.preventDefault();
+              }}
+            >
+            {composerExpanded ? attachButton : null}
+            {composerExpanded && sid ? (
+              <SessionComputerInspectionAction
+                sessionId={sid}
+                sessionTitle={session.title || session.project || "Current session"}
+                pageUrl={inspectionPageUrl}
+                disabled={sending || historyLoading || inspectionOpening}
+                onOpen={openComputerInspection}
+              />
+            ) : null}
+            {composerExpanded ? <span className="flex-1" /> : null}
             <MicButton
               className="size-10 shrink-0 rounded-full bg-foreground/[0.06] text-foreground/70 hover:bg-foreground/[0.12] hover:text-foreground md:size-8"
               baseText={messageText}
@@ -17905,6 +18154,8 @@ function SessionChatBody({
                 onQueue={() => void sendMessage(undefined, undefined, alternateSendMode)}
               />
             ) : null}
+            </div>
+            </div>
           </div>
           {reviewingShipped ? (
             <p className="mt-1.5 px-12 text-[11px] text-muted-foreground">
@@ -19414,6 +19665,7 @@ function ForkSessionDialog({
           {files.fileInput}
 
           <div className="lfg-gfield relative rounded-2xl px-2 py-1">
+            {files.attachments.length ? <div className="px-1 pb-2 pt-2">{files.chips}</div> : null}
             <SkillTextarea
               value={prompt}
               onValueChange={setPrompt}
@@ -19446,8 +19698,6 @@ function ForkSessionDialog({
               onCancel={(base) => setPrompt(base)}
             />
           </div>
-
-          {files.attachments.length ? <div className="mt-2">{files.chips}</div> : null}
 
           <div className="mt-3 flex flex-wrap items-center gap-1.5">
             <AgentIconStrip
@@ -19885,12 +20135,12 @@ const onTouchStart = (e: ReactTouchEvent) => {
         className={cn(
           "live-pane relative z-[1] flex h-[22rem] touch-pan-y flex-col overflow-hidden border text-card-foreground transition-[height,transform,border-color,box-shadow] duration-300 ease-ios md:static md:transition-[border-color,box-shadow]",
           entering && "lfg-card-in",
-          // The stage pane is the desktop workspace surface, not a card sitting
-          // on it: no radius, no card fill, no shadow. It keeps the 1px border
-          // box so the dictating/needsYou edges below still have something to
-          // colour. `variant === "grid"` is narrow-only and keeps the card.
+          // The stage pane fills its STAGE_PANEL: no card fill and no shadow of
+          // its own, but the panel's radius, so the dictating/needsYou edges
+          // below follow the panel's corners instead of being clipped by them.
+          // `variant === "grid"` is narrow-only and keeps the card.
           variant === "stage"
-            ? "md:h-full"
+            ? "md:h-full md:rounded-2xl"
             : "rounded-xl bg-card md:h-[clamp(30rem,72vh,46rem)]",
           // Listening: soften the border to primary and throw a faint glow ring.
           // Waiting on an answer gets the same primary edge, one step quieter,
@@ -19908,7 +20158,10 @@ const onTouchStart = (e: ReactTouchEvent) => {
         <div
           ref={headRef}
           className={cn(
-            "flex min-w-0 items-center gap-2 border-b border-border px-3",
+            "flex min-w-0 items-center gap-2 px-3",
+            // The stage header has no rule under it: the transcript fades out
+            // beneath it (chat-stream-fade) instead.
+            variant !== "stage" && "border-b border-border",
             // The stage header holds one line of title, so 60px was mostly air.
             // The grid card keeps 60px: a participant row can sit under the
             // title there, and the mobile feed measures this element for the
@@ -20223,6 +20476,7 @@ const ChatStream = memo(function ChatStream({
   onRetryQueued,
   bot,
   conversation,
+  loginUser,
 }: {
   sid: string | null;
   messages: Message[];
@@ -20235,6 +20489,8 @@ const ChatStream = memo(function ChatStream({
   // other-human split. A plain session never has more than one human
   // participant, so there is nothing here to resolve.
   conversation?: ProductConversation | null;
+  /** The session owner, for the inline website login card. */
+  loginUser?: string | null;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const transcriptView = useContext(TranscriptViewContext);
@@ -20338,6 +20594,11 @@ const ChatStream = memo(function ChatStream({
   // live and says what the agent is doing (see rowsWhileLive).
   const items = useMemo(() => rowsWhileLive(busy, foldedItems), [busy, foldedItems]);
   const speakers = useMemo(() => items.map(chatRenderItemSpeaker), [items]);
+  // The run holding the latest website login call carries the login card.
+  const loginRowIndex = useMemo(
+    () => items.findLastIndex((item) => item.type === "tools" && item.items.some((step) => step.kind === "tool_use" && isBrowserLoginCall(step.text))),
+    [items],
+  );
   // Only the active tail can stand in for the typing dots (see typing-dots):
   // old reasoning or an old tool run must not make a newly-busy session look
   // idle. The tail here is the live turn's, not the pinned queue's.
@@ -21266,14 +21527,19 @@ const ChatStream = memo(function ChatStream({
         if (intent !== "none") void maybeLoadOlder(intent);
       }}
       className={cn(
-        "chat-stream lfg-transcript-session min-h-0 flex-1 overflow-y-auto bg-background px-3 pt-3",
+        // --lfg-pane-bg: the surface this transcript sits on. A stage panel
+        // sets it; everywhere else it falls back to the page.
+        "chat-stream lfg-transcript-session chat-stream-fade min-h-0 flex-1 overflow-y-auto bg-[var(--lfg-pane-bg,var(--background))] px-3 pt-3",
         // Only reserve room for the floating "files changed / Review" bar
         // while it's actually shown, so it never overlaps the last message.
         diffBarVisible ? "pb-16" : "pb-3",
       )}
     >
       {visibleMessages.length || busy ? (
-        <ConversationContent>
+        // A reading column, not the pane's width: on a wide screen a line that
+        // runs the whole pane is too long to read. The composer below is held
+        // to the same width (COMPOSER_COLUMN_PAD).
+        <ConversationContent className="mx-auto w-full max-w-3xl">
           {loadingOlder ? (
             <div className="flex justify-center py-1 text-xs text-muted-foreground">
               <Loader2 className="mr-1.5 size-3.5 animate-spin" />
@@ -21322,12 +21588,16 @@ const ChatStream = memo(function ChatStream({
                   }}
                 >
                   {item.type === "tools" ? (
-                    <ToolGroup
-                      items={item.items}
-                      live={busy && index === items.length - 1}
-                      endTs={renderItemStartTs(items[index + 1])}
-                      sid={sid}
-                    />
+                    <>
+                      <ToolGroup
+                        items={item.items}
+                        live={busy && index === items.length - 1}
+                        endTs={renderItemStartTs(items[index + 1])}
+                        sid={sid}
+                      />
+                      {/* The login card sits under the run that asked for it. */}
+                      {index === loginRowIndex ? <div className="mt-2"><BrowserLoginCard sessionId={sid} user={loginUser} /></div> : null}
+                    </>
                   ) : (
                     <MessageBubble
                       message={item.message}
@@ -21345,6 +21615,9 @@ const ChatStream = memo(function ChatStream({
             })}
           </div>
           <TypingIndicator visible={showTypingIndicator} bot={bot} />
+          {/* No visible login call (an older page, or a view that hides tool
+              runs): the card closes the stream instead. */}
+          {loginRowIndex < 0 ? <BrowserLoginCard sessionId={sid} user={loginUser} /> : null}
           {/* Pinned below the working indicator: what the agent is doing now,
               then what it will read next. */}
           {queuedItems.map((item) =>
@@ -23665,6 +23938,7 @@ export function NewSessionDialog({
   defaultUser,
   scopedProject,
   projectOptions,
+  projectCounts,
   onProjectChange,
   onClose,
   onCreated,
@@ -23694,12 +23968,14 @@ export function NewSessionDialog({
   defaultUser: string;
   // The active project filter from the live view. When it's a specific project
   // (not "__all"), creating a session is locked to that project's repo and the
-  // repo picker is hidden.
+  // repo picker is hidden outside the desktop home composer.
   scopedProject: string;
   // Inline only: render the live project selector as a centered tab overlapping
   // the composer edge. The drawer version keeps project selection in its normal
   // repo controls instead.
   projectOptions?: string[];
+  /** Desktop home: session counts in the shared folder menu. */
+  projectCounts?: ReadonlyMap<string, number>;
   onProjectChange?: (value: string) => void;
   onClose: () => void;
   onCreated: (result?: { launchId?: string; sessionId?: string; session?: Session | null }) => Promise<void>;
@@ -23804,6 +24080,10 @@ export function NewSessionDialog({
   // user it is tagged with (src/policy/roles.ts members); a member cannot
   // pick another role, and the owner's sessions are owner sessions.
   const [repo, setRepo] = useState(() => localStorage.getItem("lfg_v2_repo") || "");
+  // Under "All projects" the composer starts with no folder; a folder picked
+  // here is what moves it into one. Cleared when the scope changes.
+  const [folderPicked, setFolderPicked] = useState(false);
+  useEffect(() => setFolderPicked(false), [scopedProject]);
   const [model, setModel] = useState(
     () =>
       (view.showComposerModels ? "" : preferredModelFor(agent)) ||
@@ -23911,9 +24191,14 @@ export function NewSessionDialog({
   const cycleAgentRef = useRef<(dir: 1 | -1) => void>(() => {});
   const [agentIconDir, setAgentIconDir] = useState<1 | -1>(1);
   const [agentIconNonce, setAgentIconNonce] = useState(0);
+  // The desktop stage wears the mobile composer too: one card, the agent mark
+  // that opens the agent sheet, and the actions inside the field. The stage
+  // has room, so it is always in the expanded shape.
+  const sheetShape = variant === "inline" || variant === "stage";
   const inlineExpanded =
-    variant === "inline" &&
-    (composerFocused || !!prompt.trim() || attachments.length > 0 || pendingUploads.length > 0);
+    variant === "stage" ||
+    (variant === "inline" &&
+      (composerFocused || !!prompt.trim() || attachments.length > 0 || pendingUploads.length > 0));
 
   // Own the agent-icon gesture end-to-end with pointer events (one code path
   // for mouse-drag, touch and pen) plus wheel/trackpad. Base UI's trigger opens
@@ -24331,9 +24616,9 @@ export function NewSessionDialog({
   // This is the whole hazard of the feature: the normal fallback chain would
   // quietly hand the chat the last folder you used, and the person would have
   // started a session in a real repository while the UI said "No project".
-  const unassigned = scopedProject === NO_PROJECT_FILTER;
+  const unassigned = composerStartsUnassigned({ scopedProject, pickedFolder: folderPicked });
   const scopedRepo =
-    scopedProject !== "__all" && !unassigned
+    scopedProject !== "__all" && scopedProject !== NO_PROJECT_FILTER
       ? repos.find((r) => repoProject(r) === scopedProject)
       : undefined;
   const projectScoped = !!scopedRepo;
@@ -24390,6 +24675,7 @@ export function NewSessionDialog({
   }
 
   function chooseComposerRepo(next: Repo) {
+    setFolderPicked(true);
     setRepo(next.cwd);
     localStorage.setItem("lfg_v2_repo", next.cwd);
     if (onProjectChange) onProjectChange(repoProject(next));
@@ -24813,6 +25099,39 @@ export function NewSessionDialog({
     setModel(preferredModelFor(key));
   };
 
+  const stageFolderPicker = (
+    <ProjectFolderMenu
+      trigger="chip"
+      value={unassigned ? (allProjects ? "__all" : NO_PROJECT_FILTER) : composerProject}
+      projects={[NO_PROJECT_FILTER, ...new Set(repos.map(repoProject))]}
+      labelFor={(value) => projectFilterLabel(value, shortProject)}
+      counts={projectCounts}
+      onChange={(next) => {
+        if (next === "__all" || next === NO_PROJECT_FILTER) {
+          setFolderPicked(false);
+          onProjectChange?.(next);
+          return;
+        }
+        const target = repos.find((candidate) => repoProject(candidate) === next);
+        if (target) chooseComposerRepo(target);
+      }}
+      canRemove={(project) => repos.some((candidate) => repoProject(candidate) === project)}
+      onRemove={async (project) => {
+        const target = repos.find((candidate) => repoProject(candidate) === project);
+        if (target) {
+          await unlinkRepoFromList(target, onReposChanged);
+          if (target.cwd === selectedRepo) {
+            setRepo("");
+            setFolderPicked(false);
+            onProjectChange?.(NO_PROJECT_FILTER);
+          }
+        }
+      }}
+      onAddFolder={() => openFolderBrowser(false)}
+      onNewFolder={() => openFolderBrowser(true)}
+    />
+  );
+
   const modelControls = (
     <>
       {
@@ -24841,13 +25160,29 @@ export function NewSessionDialog({
             onChange: setExecutionHost,
             refresh: executionHosts.refresh,
           }}
+          footer={
+            variant === "stage" && !tiboModeActive && agentSupportsThinking(agent) && thinkingLevels.length > 0 ? (
+              <div className="space-y-2">
+                <span className="text-xs font-medium text-muted-foreground">Thinking</span>
+                <ThinkingBar
+                  compact
+                  options={thinkingLevels.map((level) => ({
+                    id: level,
+                    label: thinkingLevelLabel(level),
+                    selected: level === thinkingLevel,
+                  }))}
+                  onPick={(level) => changeComposerThinkingLevel(level as ThinkingLevel)}
+                />
+              </div>
+            ) : null
+          }
         />
       }
 
       {/* Tibo mode pins Fast plus High, so its own pill is the single control
           for both. Showing the thinking and Fast pills next to it would offer
           two more controls that only restate what Tibo already decided. */}
-      {tiboModeActive ? null : (
+      {variant === "stage" || tiboModeActive ? null : (
         <ThinkingLevelPill
           agent={agent}
           value={thinkingLevel}
@@ -24892,7 +25227,7 @@ export function NewSessionDialog({
       ) : null}
 
 
-      {!projectScoped && (
+      {variant !== "stage" && !projectScoped && (
         <FieldPill flat={variant === "inline"} icon={<Folder className="size-3.5 text-muted-foreground" />}>
           <button
             type="button"
@@ -25167,7 +25502,7 @@ export function NewSessionDialog({
   const micButton = (
     <MicButton
       minimal
-      className={cn("size-9 shrink-0", variant !== "inline" && variant !== "workspace" && "absolute bottom-1 right-1")}
+      className={cn("size-9 shrink-0", !sheetShape && variant !== "workspace" && "absolute bottom-1 right-1")}
       silenceMs={2500}
       baseText={prompt}
       onText={(text, base) => {
@@ -25189,8 +25524,8 @@ export function NewSessionDialog({
     <Button
       size="icon-sm"
       type="button"
-      variant={draggingFiles ? "brand-soft" : variant === "inline" ? "ghost" : "outline"}
-      className={cn("size-8 rounded-full", variant !== "inline" && "shadow-sm")}
+      variant={draggingFiles ? "brand-soft" : sheetShape ? "ghost" : "outline"}
+      className={cn("size-8 rounded-full", !sheetShape && "shadow-sm")}
       onClick={files.openFilePicker}
       aria-label="Attach files"
       title="Attach files"
@@ -25201,7 +25536,7 @@ export function NewSessionDialog({
   // Mobile sends with the iOS button: a round arrow, filled when there is
   // something to send. Thinking is set in the agent sheet, so the desktop
   // Start button's hold-to-choose-thinking is not needed here.
-  const startButton = variant === "inline" ? (
+  const startButton = sheetShape ? (
     <button
       type="submit"
       disabled={!canSubmit}
@@ -25263,7 +25598,8 @@ export function NewSessionDialog({
           four suggestions are in the way. */}
       {unassigned && !prompt.trim() && attachments.length === 0 ? (
         <ChatStarterRow
-          className="mb-2"
+          // Inline: run the swipe row to the screen edge, not the composer's.
+          className={cn("mb-2", variant === "inline" && "-mx-4 scroll-px-4 px-4")}
           disabled={launching}
           onStart={(starterPrompt) => submit(undefined, starterPrompt)}
         />
@@ -25274,11 +25610,13 @@ export function NewSessionDialog({
           // Inline follows iOS HomeComposer. At rest it is one row: agent,
           // field, attach, mic. Focus or content gives the field its own line
           // and moves agent, attach, mic and Start under it.
-          variant === "inline"
+          sheetShape
             ? cn(
                 "flex overflow-visible transition-[border-radius,padding] duration-200 ease-out motion-reduce:transition-none",
                 inlineExpanded
-                  ? "flex-col items-stretch gap-1 rounded-[26px] px-3.5 pb-1 pt-2"
+                  ? variant === "stage"
+                    ? "flex-col items-stretch gap-3 rounded-[30px] px-3.5 pb-3 pt-3.5"
+                    : "flex-col items-stretch gap-1 rounded-[26px] px-3.5 pb-1 pt-2"
                   : cn("flex-row flex-wrap gap-x-2 rounded-[26px] px-2 pb-1 pt-[7px]", promptMultiline ? "items-end" : "items-center"),
               )
             : "relative rounded-2xl px-2 py-1",
@@ -25310,11 +25648,24 @@ export function NewSessionDialog({
             : undefined
         }
       >
+        <ComposerAttachmentChips
+          className="mb-1 w-full shrink-0 px-1 pt-1"
+          items={[
+            // Chips already handed off to an in-flight session creation can no
+            // longer be edited or removed; live composer attachments always can,
+            // even while their upload is still running.
+            ...pendingUploads.map((att) => ({ att, locked: true })),
+            ...attachments.map((att) => ({ att, locked: false })),
+          ]}
+          onAnnotate={setAnnotatingId}
+          onRemove={removeAttachment}
+          onToggleHd={files.setAttachmentHd}
+        />
         {launching ? (
           <div
             role="status"
             aria-live="polite"
-            className="absolute inset-0 z-30 flex items-center justify-center rounded-2xl bg-background/90 backdrop-blur-sm animate-in fade-in-0 duration-150"
+            className="absolute inset-0 z-30 flex items-center justify-center rounded-[inherit] bg-background/90 backdrop-blur-sm animate-in fade-in-0 duration-150"
           >
             <ShimmerText className="text-sm font-medium">Creating session…</ShimmerText>
           </div>
@@ -25338,8 +25689,15 @@ export function NewSessionDialog({
           placeholder={attachments.length ? "Add a note for the files…" : variant === "inline" || variant === "workspace" ? "Waar werken we aan?" : "What should we work on?"}
           className={cn(
             "border-0 bg-transparent text-base leading-relaxed shadow-none focus-visible:border-0 focus-visible:ring-0",
-            variant === "inline"
-              ? cn("min-h-9 min-w-0 px-1 py-1.5", !inlineExpanded && "flex-1")
+            variant === "stage"
+              ? "min-h-24 max-h-[42dvh] px-1 py-1"
+              : variant === "inline"
+              ? cn(
+                  "min-h-9 min-w-0 px-1 py-1.5",
+                  // At rest the field is empty by definition (any content
+                  // expands it). Keep the placeholder on one line (upstream 0.6.176).
+                  !inlineExpanded && "flex-1 overflow-hidden whitespace-nowrap placeholder:truncate",
+                )
               : variant === "workspace"
                 ? // Compact, not the stage's essay-sized field: the workspace
                   // composer shares the screen with the conversations list.
@@ -25347,9 +25705,10 @@ export function NewSessionDialog({
                 : "min-h-40 max-h-[42dvh] px-1 py-1 pr-10",
           )}
         />
-        {variant === "inline" ? (
+        {sheetShape ? (
           <div
-            className="flex shrink-0 items-center gap-2"
+            // Tighter at rest, so a narrow phone keeps width for the field.
+            className={cn("flex shrink-0 items-center", variant === "stage" && "flex-wrap", inlineExpanded ? "gap-2" : "gap-0.5")}
             // Keep the field focused while a control is tapped, so the
             // composer does not collapse under the finger.
             onMouseDown={(event) => {
@@ -25358,11 +25717,14 @@ export function NewSessionDialog({
           >
             {/* Fixed slots, so the mic never remounts mid-dictation when the
                 first words expand the composer. */}
+            {variant === "stage" ? modelControls : null}
             {inlineExpanded ? attachButton : null}
             {/* The project rail under the mobile header chooses the folder,
                 as on iOS, so the composer carries no folder button. */}
             {inlineExpanded ? resumeButton : null}
             {inlineExpanded ? ownMediaButton : null}
+            {/* Desktop home uses the same folder menu as the session rail. */}
+            {variant === "stage" ? stageFolderPicker : null}
             {inlineExpanded ? <span className="flex-1" /> : null}
             {micButton}
             {inlineExpanded ? startButton : null}
@@ -25394,23 +25756,9 @@ export function NewSessionDialog({
           </div>
         ) : null}
       </div>
-      {(variant === "inline" || variant === "workspace") && (error || hostBlockedNotice) ? (
+      {(sheetShape || variant === "workspace") && (error || hostBlockedNotice) ? (
         <p className="mt-1.5 break-words px-3 text-xs text-destructive">{error || hostBlockedNotice}</p>
       ) : null}
-
-      <ComposerAttachmentChips
-        className="mt-2"
-        items={[
-          // Chips already handed off to an in-flight session creation can no
-          // longer be edited or removed; live composer attachments always can,
-          // even while their upload is still running.
-          ...pendingUploads.map((att) => ({ att, locked: true })),
-          ...attachments.map((att) => ({ att, locked: false })),
-        ]}
-        onAnnotate={setAnnotatingId}
-        onRemove={removeAttachment}
-        onToggleHd={files.setAttachmentHd}
-      />
 
       {/* The drawer variant keeps its always-open controls row; the inline
           composer carries these inside the agent popover instead. This row is
@@ -25420,7 +25768,7 @@ export function NewSessionDialog({
       {/* The drawer and the stage keep an always-open controls row and an
           action row. The inline composer carries the controls in the agent
           sheet and its actions inside the field, as on iOS. */}
-      {variant !== "inline" && variant !== "workspace" ? (
+      {!sheetShape && variant !== "workspace" ? (
         <>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">{controlsInner}</div>
           <div className={cn("flex items-center gap-2", compact ? "mt-2" : "mt-3")}>
@@ -25503,7 +25851,7 @@ export function NewSessionDialog({
         // header no longer carries that menu, which would have made __all a
         // one-way door — the composer's own sheet offers it instead. Same row
         // the desktop rail's sheet already shows.
-        allSelected={allProjects}
+        allSelected={allProjects && !unassigned}
         onSelectAll={
           onProjectChange
             ? () => {
@@ -27005,6 +27353,8 @@ export function AgentModelPicker<K extends AgentKind>({
   favorites,
   onToggleFavorite,
   host,
+  side = "bottom",
+  footer,
 }: {
   options: readonly {
     key: K;
@@ -27046,11 +27396,15 @@ export function AgentModelPicker<K extends AgentKind>({
      * refresh button. Absent on surfaces without a live composer. */
     refresh?: () => void;
   } | null;
+  /** "top" for a pill in a footer, where there is no prompt above it to cover. */
+  side?: "top" | "bottom";
+  /** Optional controls fixed below the scrollable model list. */
+  footer?: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   // Nothing to choose: the pill would open an empty popover.
-  if (!showAgents && !showModels) return null;
+  if (!showAgents && !showModels && !footer) return null;
   // A hosted omg model makes the pill wear the lab's mark, with a small omg
   // mark in the corner so the agent is still readable at a glance.
   const hostedModel = showModels && agent === "omg" ? parseOmgModel(model) : null;
@@ -27094,7 +27448,7 @@ export function AgentModelPicker<K extends AgentKind>({
       <Popover.Trigger render={trigger} />
       <Popover.Portal>
         <Popover.Positioner
-          side="bottom"
+          side={side}
           align="start"
           sideOffset={6}
           // Never flip above the pill: the list then covers the prompt you
@@ -27151,6 +27505,11 @@ export function AgentModelPicker<K extends AgentKind>({
                 favorites={favorites}
                 onToggleFavorite={onToggleFavorite}
               />
+            ) : null}
+            {footer ? (
+              <div className="mt-2 shrink-0 border-t border-border px-1 pb-1 pt-3">
+                {footer}
+              </div>
             ) : null}
           </Popover.Popup>
         </Popover.Positioner>
@@ -27286,11 +27645,13 @@ function FindingDetail({
   codingAgents,
   onReply,
   onDismiss,
-  onRefineAgent,
+  showAgent = true,
   render,
 }: {
   finding: AutoFinding;
   agentName: string;
+  /** False inside an agent's report, whose header already names the agent. */
+  showAgent?: boolean;
   sourceAgent?: AutoAgent;
   codingAgents?: CodingAgentInfo[];
   render: (parts: FindingDetailParts) => ReactNode;
@@ -27305,7 +27666,6 @@ function FindingDetail({
     },
   ) => Promise<void>;
   onDismiss: (f: AutoFinding) => void;
-  onRefineAgent?: (f: AutoFinding, feedback: string) => void;
 }) {
   const defaultModel = useAgentDefaultModel(sourceAgent?.agent ?? "aisdk");
   const [text, setText] = useState("");
@@ -27313,15 +27673,11 @@ function FindingDetail({
   // Everything that isn't the finding itself starts folded away. The sheet's
   // job is to be read in one glance: which agent, what it found, what it
   // suggests. Launch settings and the long tail of reasoning are one tap deep.
-  const [showSettings, setShowSettings] = useState(false);
   const [showAllReasoning, setShowAllReasoning] = useState(false);
-  const [tuning, setTuning] = useState(false);
-  const [feedbackText, setFeedbackText] = useState("");
   // The composer is behind a button now. Opening the sheet with a focused field
   // meant the keyboard covered the finding you came to read, on a surface whose
   // most common answer is the one-tap "Make the change" — no typing at all.
   const [instructing, setInstructing] = useState(false);
-  const feedbackRef = useRef<HTMLTextAreaElement>(null);
   const footerRef = useRef<HTMLDivElement>(null);
   // Graduating a finding starts an ordinary session, so the picker below offers
   // the whole roster — not just the backends a cron'd auto agent can run. It
@@ -27337,11 +27693,32 @@ function FindingDetail({
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const backendModels = useAgentModels(backend);
   const backendDefaultModel = useAgentDefaultModel(backend);
-  const supportsThinking = useAgentThinkingLevels(backend, model).length > 0;
+  const thinkingLevels = useAgentThinkingLevels(backend, model);
+  const supportsThinking = thinkingLevels.length > 0;
+  // The home composer's agent list, so the pill below offers what a new
+  // session would.
+  const accessMode = useContext(AgentAccessModeContext);
+  const catalog = useAgentModelCatalog();
+  const launchOptions = useMemo(
+    () => configuredLaunchOptions(codingAgents, accessMode, { scheduledOnly: false }),
+    [accessMode, codingAgents],
+  );
 
   useEffect(() => {
     if (!backendModels.includes(model)) setModel(backendDefaultModel);
   }, [backendDefaultModel, backendModels, model]);
+  // The source agent may run on a backend this box can no longer launch.
+  useEffect(() => {
+    if (!launchOptions.length || launchOptions.some((option) => option.key === backend)) return;
+    const next = launchOptions[0].key;
+    setBackend(next);
+    setModel(catalog.defaults[next] ?? AGENT_DEFAULT_MODEL[next]);
+  }, [backend, catalog.defaults, launchOptions]);
+  useEffect(() => {
+    if (thinkingLevels.length && !thinkingLevels.includes(thinkingLevel)) {
+      setThinkingLevel(thinkingLevels.includes("high") ? "high" : thinkingLevels[0]);
+    }
+  }, [thinkingLevel, thinkingLevels]);
 
   // The pin is seeded from the source agent, which may name an account that has
   // since been removed or signed out. Launching with a dead id is a hard 400
@@ -27392,21 +27769,19 @@ function FindingDetail({
       exitTimer.current = null;
       const root = footerRef.current?.closest("[data-auto-agent-page]");
       if (root && root.contains(deepActiveElement())) return;
-      if (text.trim() || feedbackText.trim()) return;
+      if (text.trim()) return;
       setInstructing(false);
-      setTuning(false);
     }, 260);
   }
 
   // Reveal the footer field before focusing it, so the browser can scroll
   // the mounted input into view.
-  function reveal(which: "instruct" | "tune") {
+  function reveal() {
     cancelExit();
-    if (which === "instruct") setInstructing(true);
-    else setTuning(true);
+    setInstructing(true);
     requestAnimationFrame(() => {
       window.setTimeout(() => {
-        (which === "instruct" ? inputRef : feedbackRef).current?.focus();
+        inputRef.current?.focus();
       }, 60);
     });
   }
@@ -27454,15 +27829,6 @@ function FindingDetail({
     }
   }
 
-  // Feedback is about the agent, not this row: hand it to the parent, which
-  // rewrites the agent's standing instruction and closes the sheet.
-  function submitFeedback() {
-    const t = feedbackText.trim();
-    if (!t || busy || !onRefineAgent) return;
-    logFindingAction(finding.id, "feedback", !!text.trim());
-    onRefineAgent(finding, t);
-  }
-
   const REASONING_PREVIEW = 3;
   const reasoning = finding.reasoning;
   const shownReasoning =
@@ -27470,40 +27836,38 @@ function FindingDetail({
       ? reasoning
       : reasoning.slice(0, REASONING_PREVIEW);
   const hiddenReasoning = reasoning.length - shownReasoning.length;
-  const settingsSummary = [model, supportsThinking ? `${thinkingLevel} thinking` : null]
-    .filter(Boolean)
-    .join(" · ");
-
-  // Launch settings, folded to one line of text. Lives just above whatever the
-  // footer's primary control is, in both modes, because it describes what that
-  // control is about to run.
-  const settingsRow = (
-    <div className="px-1 pb-2">
-      <button
-        type="button"
-        onClick={() => setShowSettings((v) => !v)}
-        aria-expanded={showSettings}
-        className="flex max-w-full items-center gap-1 text-[11.5px] text-muted-foreground/80 hover:text-muted-foreground"
-      >
-        <span className="truncate">{settingsSummary}</span>
-        <ChevronDown
-          className={cn("size-3 shrink-0 transition-transform", showSettings && "rotate-180")}
-        />
-      </button>
-      {showSettings ? (
-        <AgentModelRow
-          backend={backend}
-          setBackend={setBackend}
-          model={model}
-          setModel={setModel}
-          thinkingLevel={thinkingLevel}
-          setThinkingLevel={setThinkingLevel}
-          codingAgents={codingAgents}
-          claudeAccountId={livePin}
-          setClaudeAccountId={setClaudeAccountId}
-          scheduledOnly={false}
-        />
-      ) : null}
+  const selectedLaunchId = backend === "aisdk" && livePin ? `aisdk:${livePin}` : backend;
+  const selectedOption = launchOptions.find(
+    (option) => (option.selectorId ?? option.key) === selectedLaunchId,
+  ) ?? launchOptions.find((option) => option.key === backend);
+  // The home composer's pills: one for agent and model, one for thinking.
+  // They sit on the row they configure, always visible, instead of behind a
+  // folded "model · thinking" line that opened a second, different picker.
+  const launchPills = (
+    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+      <AgentModelPicker
+        options={launchOptions}
+        agent={backend}
+        agentLabel={selectedOption?.label ?? backend}
+        agentBadge={selectedOption?.badge}
+        selectedId={selectedLaunchId}
+        onSelectAgent={(key, option) => {
+          setBackend(key);
+          setClaudeAccountId(key === "aisdk" ? option?.accountId ?? "" : "");
+          setModel(catalog.defaults[key] ?? AGENT_DEFAULT_MODEL[key]);
+        }}
+        model={model}
+        models={backendModels}
+        onModelChange={setModel}
+        side="top"
+      />
+      <ThinkingLevelPill
+        agent={backend}
+        value={thinkingLevel}
+        levels={thinkingLevels}
+        onChange={setThinkingLevel}
+        immersive
+      />
     </div>
   );
 
@@ -27522,60 +27886,9 @@ function FindingDetail({
       }}
       onBlurCapture={scheduleExit}
     >
-      {tuning ? (
-        /* Feedback goes to the AGENT, not this finding: what the user types
-           here is folded into the agent's standing instruction, so the next
-           scheduled run behaves differently. */
-        <div className="rounded-2xl border border-border/70 bg-muted/30 p-3">
-          <div className="flex items-center gap-2 text-[13px] font-semibold">
-            <SlidersHorizontal className="size-4 text-primary" />
-            <span className="truncate">Tune {agentName}</span>
-          </div>
-          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-            Say what it should do differently. This rewrites the agent's instruction for every
-            future run — it doesn't touch this finding.
-          </p>
-          <Textarea
-            ref={feedbackRef}
-            value={feedbackText}
-            onChange={(e) => setFeedbackText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                e.preventDefault();
-                submitFeedback();
-              }
-            }}
-            rows={3}
-            placeholder="e.g. stop flagging cosmetic nits — only surface things that break the build"
-            className="mt-2.5 min-h-[4.5rem] bg-background/60 text-base"
-          />
-          <div className="mt-2.5 flex items-center gap-2">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-muted-foreground"
-              onClick={() => {
-                setFeedbackText("");
-                setTuning(false);
-              }}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="brand"
-              size="sm"
-              className="flex-1"
-              disabled={busy || !feedbackText.trim()}
-              onClick={submitFeedback}
-            >
-              <Check className="size-4" />
-              Update agent
-            </Button>
-          </div>
-        </div>
-      ) : instructing ? (
+      {instructing ? (
         <>
-          {settingsRow}
+          <div className="pb-2">{launchPills}</div>
           {/* Same field treatment as the new-session composer: gradient-edge
               gfield, mic dictation, ⌘↵ to send. In page mode this row is what
               sits on top of the keyboard. */}
@@ -27624,10 +27937,37 @@ function FindingDetail({
         </>
       ) : (
         <>
-          {settingsRow}
+          {/* Settings on the left, the quiet exits on the right, then the
+              one action the page is for. */}
+          <div className="flex items-center gap-2 pb-2">
+            <div className="min-w-0 flex-1">{launchPills}</div>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              disabled={busy}
+              onClick={() => void copyReference()}
+              title="Copy reference"
+              aria-label="Copy reference"
+              className="text-muted-foreground"
+            >
+              <Copy className="size-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={busy}
+              onClick={() => {
+                logFindingAction(finding.id, "dismiss", !!text.trim());
+                onDismiss(finding);
+              }}
+              className="text-[12.5px] font-medium text-muted-foreground"
+            >
+              <X className="size-3.5" />
+              Dismiss
+            </Button>
+          </div>
           {/* One row, two intents: run the agent's own suggestion as-is, or say
-              something first. The composer used to be open at all times for the
-              second case, which is the rarer one. */}
+              something first. */}
           <div className="flex items-center gap-2">
             <Button
               variant="brand"
@@ -27642,52 +27982,11 @@ function FindingDetail({
               variant="tint"
               size="icon"
               disabled={busy}
-              onClick={() => reveal("instruct")}
+              onClick={() => reveal()}
               title="Say something first"
               aria-label="Say something first"
             >
               <MessageSquare className="size-4" />
-            </Button>
-          </div>
-
-          {/* Everything secondary on one quiet row. Three stacked full-width
-              buttons read as three competing CTAs; these are exits, not the
-              point of the sheet. */}
-          <div className="mt-2 flex items-center gap-1">
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={busy}
-              onClick={() => void copyReference()}
-              className="flex-1 text-[12.5px] font-medium text-muted-foreground"
-            >
-              <Copy className="size-3.5" />
-              Copy
-            </Button>
-            {onRefineAgent ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={busy}
-                onClick={() => reveal("tune")}
-                className="flex-1 text-[12.5px] font-medium text-muted-foreground"
-              >
-                <SlidersHorizontal className="size-3.5" />
-                Feedback
-              </Button>
-            ) : null}
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={busy}
-              onClick={() => {
-                logFindingAction(finding.id, "dismiss", !!text.trim());
-                onDismiss(finding);
-              }}
-              className="flex-1 text-[12.5px] font-medium text-muted-foreground"
-            >
-              <X className="size-3.5" />
-              Dismiss
             </Button>
           </div>
         </>
@@ -27702,27 +28001,34 @@ function FindingDetail({
         {/* One quiet identity line. The old header set the agent name at the
             same weight as the title, so two lines competed to be read first —
             the finding is the headline, the agent is metadata. */}
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span className="truncate font-medium text-foreground/75">{agentName}</span>
-          <span aria-hidden>·</span>
-          <span className="shrink-0">{relTime(finding.createdAt)}</span>
+        {/* Severity says its name. A lone coloured dot in the far corner
+            read as decoration, not as "how bad is this". */}
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
           <span
             role="status"
             aria-label={`${SEV_LABEL[finding.severity]} severity`}
-            className={cn("ml-auto inline-block size-2 shrink-0 rounded-full", SEV_DOT[finding.severity])}
-          />
+            className="flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 font-medium text-foreground/80"
+          >
+            <span className={cn("inline-block size-1.5 rounded-full", SEV_DOT[finding.severity])} />
+            {SEV_LABEL[finding.severity]}
+          </span>
+          {showAgent ? <span className="truncate font-medium text-foreground/75">{agentName}</span> : null}
+          <span className="shrink-0">{relTime(finding.createdAt)} ago</span>
+          {(finding.occurrences ?? 1) > 1 ? (
+            <span className="shrink-0">· seen {finding.occurrences}×</span>
+          ) : null}
         </div>
 
-        <p className="mt-2 text-[17px] font-semibold leading-snug tracking-[-0.01em]">
+        <h3 className="mt-2.5 text-[18px] font-semibold leading-snug tracking-[-0.01em]">
           {finding.title}
-        </p>
+        </h3>
 
         {shownReasoning.length ? (
           <ul className="mt-2.5 flex flex-col gap-1.5">
             {shownReasoning.map((r) => (
               <li
                 key={r}
-                className="flex gap-2 text-[13.5px] leading-relaxed text-muted-foreground"
+                className="flex gap-2 text-[13.5px] leading-relaxed text-foreground/85"
               >
                 <span className="mt-[0.6em] size-1 shrink-0 rounded-full bg-muted-foreground/45" />
                 <span className="min-w-0">{r}</span>
@@ -27783,7 +28089,7 @@ function FindingSheet({ onClose, ...props }: FindingDetailProps & { onClose: () 
     <FindingDetail
       {...props}
       render={({ footer, body }) => (
-        <AutoAgentPage onClose={onClose} title={`${props.agentName} finding`} footer={footer}>
+        <AutoAgentPage onClose={onClose} title={props.agentName} footer={footer}>
           {body}
         </AutoAgentPage>
       )}
@@ -27791,18 +28097,22 @@ function FindingSheet({ onClose, ...props }: FindingDetailProps & { onClose: () 
   );
 }
 
-// Everything one agent currently has open, on one full-height sheet.
+// Everything one agent currently has open.
 //
-// The list is the report: each row is a finding, worst first, with when it
-// was last seen and how many runs have repeated it. Tapping a row swaps the
-// list for FindingDetail (the same body and actions as FindingSheet) with a
-// back link at the top, so reading and acting on four findings is one sheet,
-// not four trips from the feed. The footer offers the two things that apply
-// to the agent as a whole: tune its schedule, or clear the lot.
+// Desktop stage: two panes, like Schedules beside the rail. The findings sit
+// in a narrow list on the left, worst first, and the selected one reads on
+// the right with its actions under it. Nothing to go "back" to, so there is
+// no back link and the agent is named once, in the header.
+//
+// Phone and full-screen page: the list, then a pushed detail with a back
+// link, because there is no room for two columns.
+//
+// The header carries what applies to the agent as a whole: its schedule,
+// Edit schedule, and Dismiss all.
 //
 // `findings` is read live from the app's list, so a dismissal here shortens
 // the list in place. The sheet closes itself once nothing is left.
-function AgentReportSheet({
+export function AgentReportSheet({
   agent,
   agentName,
   findings: unsorted,
@@ -27813,7 +28123,6 @@ function AgentReportSheet({
   onDismiss,
   onDismissAll,
   dismissAllBusy,
-  onRefineAgent,
   onEditAgent,
 }: {
   agent?: AutoAgent;
@@ -27827,27 +28136,104 @@ function AgentReportSheet({
   onDismiss: (f: AutoFinding) => void;
   onDismissAll: (targets: AutoFinding[]) => void;
   dismissAllBusy?: boolean;
-  onRefineAgent?: (f: AutoFinding, feedback: string) => void;
   onEditAgent: (agent: AutoAgent) => void;
 }) {
+  const inStage = useContext(AutoAgentPageInStage);
   const findings = useMemo(() => sortFindings(unsorted), [unsorted]);
   // A single finding needs no list to pick from: open straight on it.
   const [selectedId, setSelectedId] = useState<string | null>(
     findings.length === 1 ? findings[0].id : null,
   );
-  const selected = findings.find((f) => f.id === selectedId) ?? null;
+  const picked = findings.find((f) => f.id === selectedId) ?? null;
+  // Two panes always show a finding: the picked one, else the worst.
+  const selected = inStage ? (picked ?? findings[0] ?? null) : picked;
 
   useEffect(() => {
     if (findings.length === 0) onClose();
   }, [findings.length, onClose]);
   // The selected finding left the list (dismissed, graduated): fall back to
-  // the list rather than to a blank sheet.
+  // the list (or, in two panes, the next worst) rather than a blank page.
   useEffect(() => {
-    if (selectedId && !selected) setSelectedId(null);
-  }, [selectedId, selected]);
+    if (selectedId && !picked) setSelectedId(null);
+  }, [selectedId, picked]);
 
-  if (selected) {
-    return (
+  const meta = (
+    <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
+      {agent ? <ScheduleSummary expr={agent.schedule} tz={tz} compact /> : null}
+      {agent?.lastRunAt ? <span className="shrink-0">· ran {relTime(agent.lastRunAt)} ago</span> : null}
+      {agent?.running ? (
+        <span className="flex shrink-0 items-center gap-1 text-primary">
+          · <Loader2 className="size-3 animate-spin" aria-hidden /> running
+        </span>
+      ) : agent?.refine?.state === "running" ? (
+        <span className="flex shrink-0 items-center gap-1">
+          · <Loader2 className="size-3 animate-spin" aria-hidden /> updating from feedback
+        </span>
+      ) : null}
+    </div>
+  );
+
+  const agentActions = (
+    <>
+      {agent ? (
+        <Button variant="ghost" size="sm" className="text-foreground/75" onClick={() => onEditAgent(agent)}>
+          <SlidersHorizontal className="size-3.5" />
+          Edit schedule
+        </Button>
+      ) : null}
+      <Button
+        variant="ghost"
+        size="sm"
+        className="text-foreground/75"
+        disabled={dismissAllBusy || findings.length === 0}
+        onClick={() => onDismissAll(findings)}
+      >
+        {dismissAllBusy ? <Loader2 className="size-3.5 animate-spin" /> : <X className="size-3.5" />}
+        Dismiss all
+      </Button>
+    </>
+  );
+
+  const list = (
+    <ul className="flex flex-col gap-0.5" aria-label={`${agentName} findings`}>
+      {findings.map((f) => {
+        const active = inStage && selected?.id === f.id;
+        return (
+          <li key={f.id}>
+            <button
+              type="button"
+              onClick={() => setSelectedId(f.id)}
+              aria-current={active ? "true" : undefined}
+              className={cn(
+                "flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/60",
+                active ? "bg-muted" : "hover:bg-muted/60",
+              )}
+            >
+              <span
+                role="status"
+                aria-label={`${SEV_LABEL[f.severity]} severity`}
+                className={cn("mt-[0.45em] inline-block size-2 shrink-0 rounded-full", SEV_DOT[f.severity])}
+              />
+              <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span className="line-clamp-2 text-[13.5px] font-medium leading-snug">{f.title}</span>
+                {!inStage && f.suggest ? (
+                  <span className="line-clamp-2 text-xs leading-relaxed text-muted-foreground">{f.suggest}</span>
+                ) : null}
+                <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <span>{relTime(findingSeenAt(f))} ago</span>
+                  {(f.occurrences ?? 1) > 1 ? <span>· seen {f.occurrences}×</span> : null}
+                </span>
+              </span>
+              {inStage ? null : <ChevronRight className="mt-0.5 size-4 shrink-0 text-muted-foreground/50" />}
+            </button>
+          </li>
+        );
+      })}
+    </ul>
+  );
+
+  const detail = (render: (parts: FindingDetailParts) => ReactNode) =>
+    selected ? (
       <FindingDetail
         key={selected.id}
         finding={selected}
@@ -27856,123 +28242,101 @@ function AgentReportSheet({
         codingAgents={codingAgents}
         onReply={onReply}
         onDismiss={onDismiss}
-        onRefineAgent={onRefineAgent}
-        render={({ footer, body }) => (
-          <AutoAgentPage onClose={onClose} title={`${agentName} finding`} footer={footer}>
-            {findings.length > 1 ? (
-              <div className="shrink-0 px-1 pb-1 pt-0.5">
-                <button
-                  type="button"
-                  onClick={() => setSelectedId(null)}
-                  className="flex items-center gap-1 rounded-md py-1 pr-2 text-[12.5px] font-medium text-muted-foreground hover:text-foreground"
-                >
-                  <ChevronLeft className="size-4" />
-                  All {findings.length} from {agentName}
-                </button>
-              </div>
-            ) : null}
-            {body}
-          </AutoAgentPage>
-        )}
+        showAgent={false}
+        render={render}
       />
+    ) : null;
+
+  if (inStage) {
+    const split = findings.length > 1;
+    return (
+      <section
+        data-auto-agent-page="stage"
+        aria-label={`${agentName} report`}
+        className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden text-sm text-foreground"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.stopPropagation();
+            onClose();
+          }
+        }}
+      >
+        <header className="flex shrink-0 items-start gap-3 border-b border-border px-4 pb-3 pt-2.5">
+          <div className="min-w-0 flex-1">
+            <h2 className="truncate text-[17px] font-semibold leading-snug tracking-[-0.01em]">{agentName}</h2>
+            <div className="mt-0.5">{meta}</div>
+          </div>
+          <div className="flex shrink-0 items-center gap-0.5">
+            {agentActions}
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close"
+              title="Close (Esc)"
+              className="ml-1 flex size-8 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground"
+            >
+              <X className="size-4" />
+            </button>
+          </div>
+        </header>
+        <div className="flex min-h-0 flex-1">
+          {split ? (
+            <nav className="flex w-72 shrink-0 flex-col border-r border-border">
+              <div className="px-4 pb-1 pt-3 text-[11px] font-semibold text-muted-foreground">
+                {findings.length} open
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-3">{list}</div>
+            </nav>
+          ) : null}
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            {detail(({ body, footer }) => (
+              <>
+                <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+                  <div className="mx-auto w-full max-w-2xl px-4 py-4 sm:px-6">{body}</div>
+                </div>
+                <footer className="shrink-0 border-t border-border">
+                  <div className="mx-auto w-full max-w-2xl px-4 py-2 sm:px-6">{footer}</div>
+                </footer>
+              </>
+            ))}
+          </div>
+        </div>
+      </section>
     );
   }
 
-  const worst = findings[0];
-  const footer = (
-    <div className="flex items-center gap-2 px-2 pb-1 pt-2">
-      {agent ? (
-        <Button variant="tint" className="flex-1" onClick={() => onEditAgent(agent)}>
-          <SlidersHorizontal className="size-4" />
-          Edit schedule
-        </Button>
-      ) : null}
-      <Button
-        variant="ghost"
-        className="flex-1 text-muted-foreground"
-        disabled={dismissAllBusy || findings.length === 0}
-        onClick={() => onDismissAll(findings)}
-      >
-        {dismissAllBusy ? <Loader2 className="size-4 animate-spin" /> : <X className="size-4" />}
-        Dismiss all
-      </Button>
-    </div>
-  );
+  if (selected) {
+    return detail(({ footer, body }) => (
+      <AutoAgentPage onClose={onClose} title={agentName} footer={footer}>
+        {findings.length > 1 ? (
+          <div className="shrink-0 px-1 pb-1 pt-0.5">
+            <button
+              type="button"
+              onClick={() => setSelectedId(null)}
+              className="flex items-center gap-1 rounded-md py-1 pr-2 text-[12.5px] font-medium text-muted-foreground hover:text-foreground"
+            >
+              <ChevronLeft className="size-4" />
+              All {findings.length} findings
+            </button>
+          </div>
+        ) : null}
+        {body}
+      </AutoAgentPage>
+    ));
+  }
 
   return (
     <AutoAgentPage
       onClose={onClose}
-      title={`${agentName} report`}
-      footer={footer}
+      title={agentName}
+      footer={<div className="flex items-center justify-end gap-1 py-1">{agentActions}</div>}
     >
-      <div className="px-2 pb-2 pt-1">
-        <div className="flex items-start gap-2.5">
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <span className="truncate text-[17px] font-semibold leading-snug tracking-[-0.01em]">
-                {agentName}
-              </span>
-              {agent?.running ? (
-                <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" aria-label="Running" />
-              ) : agent?.refine?.state === "running" ? (
-                <Loader2
-                  className="size-3.5 shrink-0 animate-spin text-muted-foreground"
-                  aria-label="Updating from feedback"
-                />
-              ) : null}
-              {worst ? (
-                <span
-                  role="status"
-                  aria-label={`${SEV_LABEL[worst.severity]} severity`}
-                  className={cn("ml-auto inline-block size-2 shrink-0 rounded-full", SEV_DOT[worst.severity])}
-                />
-              ) : null}
-            </div>
-            {agent ? (
-              <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
-                <ScheduleSummary expr={agent.schedule} tz={tz} compact />
-                {agent.lastRunAt ? (
-                  <span className="shrink-0">· ran {relTime(agent.lastRunAt)} ago</span>
-                ) : null}
-              </div>
-            ) : null}
-          </div>
-        </div>
-
-        <div className="mt-4 text-[11px] font-semibold text-muted-foreground">
+      <div className="px-1 pb-2">
+        {meta}
+        <div className="mt-4 px-1.5 text-[11px] font-semibold text-muted-foreground">
           {findings.length} open {findings.length === 1 ? "finding" : "findings"}
         </div>
-        <div className="mt-1.5 flex flex-col gap-1.5">
-          {findings.map((f) => (
-            <button
-              key={f.id}
-              type="button"
-              onClick={() => setSelectedId(f.id)}
-              className="lfg-gborder flex w-full flex-col gap-1 rounded-xl border border-transparent bg-card px-3 py-2.5 text-left transition-transform active:scale-[0.99]"
-            >
-              <span className="flex w-full items-center gap-2 text-[11px] text-muted-foreground">
-                <span className="shrink-0">{relTime(findingSeenAt(f))} ago</span>
-                {(f.occurrences ?? 1) > 1 ? (
-                  <span className="shrink-0 rounded-full bg-warning/15 px-1.5 py-px font-semibold text-warning">
-                    seen {f.occurrences}×
-                  </span>
-                ) : null}
-                <span
-                  role="status"
-                  aria-label={`${SEV_LABEL[f.severity]} severity`}
-                  className={cn("ml-auto inline-block size-2 shrink-0 rounded-full", SEV_DOT[f.severity])}
-                />
-                <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/60" />
-              </span>
-              <span className="text-[13.5px] font-medium leading-snug">{f.title}</span>
-              {f.suggest ? (
-                <span className="line-clamp-2 text-xs leading-relaxed text-muted-foreground">
-                  {f.suggest}
-                </span>
-              ) : null}
-            </button>
-          ))}
-        </div>
+        <div className="mt-1">{list}</div>
       </div>
     </AutoAgentPage>
   );
@@ -29053,19 +29417,14 @@ function AgentConcurrencySettingsSection({
               <Bot className="size-4" />
             </span>
             <div className="min-w-0">
-              <div className="text-sm font-medium tabular-nums">
-                {working} working
-                <span className="text-muted-foreground"> · {live} live</span>
-              </div>
+              <div className="text-sm font-medium">Agent limit</div>
               <div className={cn(
-                "text-xs",
+                "text-xs tabular-nums",
                 atCap ? "font-medium text-warning" : "text-muted-foreground",
               )}>
-                {cap === 0
-                  ? "No limit"
-                  : atCap
-                    ? `Limit reached · ${live}/${cap} live`
-                    : `${live}/${cap} live · limit`}
+                {atCap
+                  ? `Limit reached · ${live} running`
+                  : `${live} running · ${working} working`}
               </div>
             </div>
           </div>
@@ -29166,9 +29525,7 @@ function AgentConcurrencySettingsSection({
           limit above: it is a live-agent ceiling, not a full drain, and it is
           soft on purpose (see GlobalSettings.maxLiveAgents). */}
       <p className="px-4 text-xs text-muted-foreground">
-        The limit counts every live agent, idle ones included — an idle agent has stopped
-        using CPU but still holds its memory. New agents past the limit are rejected;
-        in-flight agents keep running. The systemd slice is the hard memory bound.
+        Idle agents count toward the limit. New agents over the limit do not start.
       </p>
     </section>
   );
@@ -29178,16 +29535,94 @@ function AgentConcurrencySettingsSection({
    one-pager calm: a headline capacity read here rather than four live gauges
    on the settings root. Disk totals come from the same /api/server/stats
    poll that backs the capacity section. */
+type DiskRow = {
+  label: string;
+  mount: string;
+  totalBytes: number;
+  freeBytes: number;
+  badge?: string | null;
+};
+
+function diskRowsOf(stats: ServerStats | null): DiskRow[] {
+  if (stats?.disks && stats.disks.length > 0) return stats.disks;
+  if (stats?.disk.totalBytes != null && stats.disk.freeBytes != null) {
+    return [{
+      label: "/",
+      mount: "/",
+      totalBytes: stats.disk.totalBytes,
+      freeBytes: stats.disk.freeBytes,
+      badge: null,
+    }];
+  }
+  return [];
+}
+
+function diskFreeLine(stats: ServerStats | null): string | null {
+  const rows = diskRowsOf(stats);
+  if (rows.length === 0) return null;
+  const free = rows.reduce((sum, row) => sum + row.freeBytes, 0);
+  return `${formatBytes(free)} available`;
+}
+
+function DiskMeter({ row }: { row: DiskRow }) {
+  const used = Math.max(0, row.totalBytes - row.freeBytes);
+  const pct = row.totalBytes > 0
+    ? Math.min(100, Math.round((used / row.totalBytes) * 100))
+    : 0;
+  return (
+    <div className="px-4 py-4">
+      <div className="flex items-baseline justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold tabular-nums">{formatBytes(row.freeBytes)} available</div>
+          <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
+            <span className="tabular-nums">{formatBytes(used)} of {formatBytes(row.totalBytes)}</span>
+            {row.mount ? <span className="truncate">{row.mount}</span> : null}
+          </div>
+        </div>
+        {row.badge ? (
+          <span className="shrink-0 rounded-full bg-foreground/[0.06] px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+            {row.badge}
+          </span>
+        ) : null}
+      </div>
+      <div
+        className="mt-3 h-2 overflow-hidden rounded-md bg-foreground/[0.08]"
+        role="progressbar"
+        aria-label={`${row.label} disk usage`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={pct}
+      >
+        <div
+          className={cn(
+            "h-full rounded-md transition-all duration-300 ease-ios",
+            pct >= 90 ? "bg-destructive" : pct >= 75 ? "bg-amber-500" : "bg-primary",
+          )}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function DiskMeters({ stats }: { stats: ServerStats | null }) {
+  const rows = diskRowsOf(stats);
+  if (rows.length === 0) {
+    return (
+      <div className="px-4 py-4 text-sm text-muted-foreground">
+        Capacity unavailable on this filesystem
+      </div>
+    );
+  }
+  return (
+    <div className="divide-y divide-border">
+      {rows.map((row) => <DiskMeter key={row.mount || row.label} row={row} />)}
+    </div>
+  );
+}
+
 function StoragePage() {
   const stats = useServerStats(true);
-  const diskTotal = stats?.disk?.totalBytes ?? null;
-  const diskFree = stats?.disk?.freeBytes ?? null;
-  const diskUsed =
-    diskTotal != null && diskFree != null ? Math.max(0, diskTotal - diskFree) : null;
-  const diskPct =
-    diskUsed != null && diskTotal != null && diskTotal > 0
-      ? Math.min(100, Math.round((diskUsed / diskTotal) * 100))
-      : null;
 
   return (
     <div className="mx-auto max-w-xl space-y-8 pb-10" data-lfg-page-column>
@@ -29201,44 +29636,10 @@ function StoragePage() {
           Storage
         </h2>
         <div className="overflow-hidden rounded-2xl border border-border bg-card/40">
-          <div className="px-4 pt-4">
-            <div className="text-2xl font-semibold tabular-nums tracking-tight">
-              {diskUsed != null ? formatBytes(diskUsed) : "—"}
-              {diskTotal != null ? (
-                <span className="text-sm font-medium text-muted-foreground">
-                  {" "}of {formatBytes(diskTotal)} used
-                </span>
-              ) : null}
-            </div>
-            <div className="mt-1 text-xs text-muted-foreground">
-              {diskFree != null
-                ? `${formatBytes(diskFree)} available`
-                : "Capacity unavailable on this filesystem"}
-            </div>
-          </div>
-          <div
-            className="mx-4 mb-4 mt-3 h-4 overflow-hidden rounded-md bg-foreground/[0.08]"
-            role="progressbar"
-            aria-label="Disk usage"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={diskPct ?? 0}
-          >
-            <div
-              className={cn(
-                "h-full rounded-md transition-all duration-300 ease-ios",
-                diskPct != null && diskPct >= 90
-                  ? "bg-destructive"
-                  : diskPct != null && diskPct >= 75
-                    ? "bg-amber-500"
-                    : "bg-primary",
-              )}
-              style={{ width: `${diskPct ?? 0}%` }}
-            />
-          </div>
+          <DiskMeters stats={stats} />
         </div>
         <p className="px-4 text-xs text-muted-foreground">
-          Whole-filesystem usage for the volume holding omg.dev&apos;s data directory.
+          Free space on each disk this computer writes to.
         </p>
       </section>
 
@@ -30657,6 +31058,45 @@ function VersionUpdatesRow({
   );
 }
 
+function AdvancedSettingsGroup({
+  collapsible,
+  children,
+}: {
+  collapsible: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  if (!collapsible) return <>{children}</>;
+  return (
+    <div className="space-y-8">
+      <section className="space-y-2">
+        <div className="overflow-hidden rounded-2xl border border-border bg-card/40">
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+            className="flex w-full items-center justify-between gap-4 px-4 py-2.5 text-left transition-colors duration-150 ease-ios hover:bg-foreground/[0.03] active:bg-foreground/[0.06]"
+          >
+            <div className="flex items-center gap-3">
+              <span className="flex size-7 items-center justify-center rounded-[7px] bg-foreground/70 text-white">
+                <SlidersHorizontal className="size-4" />
+              </span>
+              <span className="text-sm font-medium">Advanced</span>
+            </div>
+            <ChevronDown
+              className={cn(
+                "size-4 text-muted-foreground/60 transition-transform duration-200 ease-ios",
+                open && "rotate-180",
+              )}
+            />
+          </button>
+        </div>
+      </section>
+      {open ? children : null}
+    </div>
+  );
+}
+
 function SettingsView({
   user,
   settings,
@@ -30686,6 +31126,8 @@ function SettingsView({
   // account is the real one, where ours is only a per-device session tag. Two
   // identity blocks on one page is worse than none.
   const bare = useBareSurface();
+  const diskStats = useServerStats(true);
+  const diskLine = diskFreeLine(diskStats);
 
   // The two halves of "what am I actually looking at", resolved from two
   // independent sources: FRONTEND_VERSION is stamped into this bundle at build
@@ -30717,6 +31159,10 @@ function SettingsView({
           Computer
         </h2>
         <div className="overflow-hidden rounded-2xl border border-border bg-card/40 divide-y divide-border">
+          {/* A host lists these three pages in its own settings, so on a
+              host-mounted surface this group is the version row alone. */}
+          {bare ? null : (
+          <>
           <button
             type="button"
             onClick={onOpenCodingAgents}
@@ -30748,19 +31194,27 @@ function SettingsView({
             onClick={onOpenStorage}
             className="flex w-full items-center justify-between gap-4 px-4 py-2.5 text-left transition-colors duration-150 ease-ios hover:bg-foreground/[0.03] active:bg-foreground/[0.06]"
           >
-            <div className="flex items-center gap-3">
-              <span className="flex size-7 items-center justify-center rounded-[7px] bg-foreground text-background">
+            <div className="flex min-w-0 items-center gap-3">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-[7px] bg-foreground text-background">
                 <HardDrive className="size-4" />
               </span>
-              <span className="text-sm font-medium">Storage &amp; performance</span>
+              <span className="min-w-0">
+                <span className="block text-sm font-medium">Storage &amp; performance</span>
+                {diskLine ? (
+                  <span className="block truncate text-xs text-muted-foreground tabular-nums">{diskLine}</span>
+                ) : null}
+              </span>
             </div>
             <ChevronRight className="size-4 text-muted-foreground/60" />
           </button>
+          </>
+          )}
           {/* One row for what used to be three (Frontend, Computer, Updates):
               which UI build is rendering, what the selected Computer is
               really executing, and whether either has an update. A skew
               between the first two is still legible collapsed — see
               VersionUpdatesRow's own comment. */}
+          {bare ? <DiskMeters stats={diskStats} /> : null}
           <VersionUpdatesRow
             frontendVersion={FRONTEND_VERSION}
             computerVersion={computerVersion}
@@ -30770,20 +31224,25 @@ function SettingsView({
         </div>
       </section>
 
-      <section className="space-y-2">
-        <div className="overflow-hidden rounded-2xl border border-border bg-card/40">
-          <ConnectorsRow onOpen={onOpenConnectors} roleCount={null} />
-        </div>
-      </section>
-
       <CloudAccountSettingsSection />
 
       <RemoteAccessSettingsSection />
 
-      <AgentConcurrencySettingsSection
-        settings={settings}
-        onChange={onSettingsChange}
-      />
+      {/* Tool access and agent limits are for people tuning the box. A host
+          mounts this page as its own "Advanced" page, so it shows them open;
+          standalone keeps them one tap away so the page stays short. */}
+      <AdvancedSettingsGroup collapsible={!bare}>
+        <section className="space-y-2">
+          <div className="overflow-hidden rounded-2xl border border-border bg-card/40">
+            <ConnectorsRow onOpen={onOpenConnectors} roleCount={null} />
+          </div>
+        </section>
+
+        <AgentConcurrencySettingsSection
+          settings={settings}
+          onChange={onSettingsChange}
+        />
+      </AdvancedSettingsGroup>
 
       <CustomInstructionsRow
         value={settings.customInstructions}

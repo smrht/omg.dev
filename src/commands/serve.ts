@@ -3,7 +3,7 @@ import { inspectIdleChild } from "../omg-idle-child.ts";
 import { createNoProjectWorkspace, NO_PROJECT } from "../no-project-chat.ts";
 import { readinessBootstrap } from "../bootstrap-readiness.ts";
 import { mkdir, open, readdir, realpath, stat } from "node:fs/promises";
-import { appendFileSync, existsSync, statfsSync, statSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, statSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir, homedir, loadavg, cpus, totalmem, freemem } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -12,6 +12,7 @@ import {
   AgentAdmissionController,
   NO_AGENT_LIMIT,
   admissionResidentPool,
+  admissionPool,
   agentLaunchMemoryBudget,
   computerAgentAdmissionContext,
   isScheduleSpawned,
@@ -23,6 +24,7 @@ import {
   AgentboxResourceRefusal,
 } from "../agentbox-resource-admission.ts";
 import { PATHS, appVersion, installInfo, localServeBaseUrl } from "../config.ts";
+import { hostDisks } from "../host-disks.ts";
 import { desktopRuntimeReadyPayload } from "../desktop-parent.ts";
 import { handleServerAccessRequest } from "../server-access.ts";
 import { CloudAccountError, createCloudAccount } from "../cloud-account.ts";
@@ -604,6 +606,7 @@ import {
   MAX_LIVE_AGENTS_LIMIT,
   setGlobalSettings,
   validAutoSessionTitles,
+  sanitizeFolderKeys,
   validTimeZone,
   validTranscriptView,
   type GlobalSettings,
@@ -1193,18 +1196,25 @@ function sliceMemoryBytes(): { current: number | null; max: number | null } {
 // Capacity of the filesystem that holds LFG's durable data. Keep this
 // best-effort: Settings should still load in runtimes where statfs is not
 // available or the data directory has not been mounted yet.
-function hostDiskBytes(): { total: number | null; free: number | null } {
+function hostDiskReport(): {
+  disk: { total: number | null; free: number | null };
+  disks: { label: string; mount: string; totalBytes: number; freeBytes: number; badge: string | null }[];
+} {
+  let disks: { label: string; mount: string; totalBytes: number; freeBytes: number; badge: string | null }[] = [];
   try {
-    const disk = statfsSync(PATHS.data);
-    const total = Number(disk.blocks) * Number(disk.bsize);
-    const free = Number(disk.bfree) * Number(disk.bsize);
-    if (!Number.isFinite(total) || total <= 0 || !Number.isFinite(free)) {
-      return { total: null, free: null };
-    }
-    return { total, free: Math.max(0, Math.min(total, free)) };
+    disks = hostDisks(readFileSync("/proc/mounts", "utf8"));
   } catch {
-    return { total: null, free: null };
+    disks = [];
   }
+  // `disk` stays the system volume so older clients keep one bar. Prefer `/`,
+  // then whatever volume is tightest.
+  const system = disks.find((row) => row.mount === "/") ?? disks[0];
+  return {
+    disk: system
+      ? { total: system.totalBytes, free: system.freeBytes }
+      : { total: null, free: null },
+    disks,
+  };
 }
 
 // Live server snapshot for the settings performance panel + the "working now"
@@ -1218,7 +1228,7 @@ async function serverStats() {
   const settings = getGlobalSettingsSync();
   const computer = computerAgentAdmissionContext();
   const slice = sliceMemoryBytes();
-  const disk = hostDiskBytes();
+  const diskReport = hostDiskReport();
   const [load1, load5, load15] = loadavg();
   // Pressure is the leading indicator the panel warns on: it rises while
   // "percent used" still looks healthy. History powers the sparklines.
@@ -1239,9 +1249,10 @@ async function serverStats() {
       hostFreeBytes: freemem(),
     },
     disk: {
-      totalBytes: disk.total,
-      freeBytes: disk.free,
+      totalBytes: diskReport.disk.total,
+      freeBytes: diskReport.disk.free,
     },
+    disks: diskReport.disks,
     cpu: { cores: cpus().length, load1, load5, load15 },
     network: { rxBps: latest?.rxBps ?? 0, txBps: latest?.txBps ?? 0 },
     pressure,
@@ -4269,7 +4280,7 @@ export async function cmdServe() {
   const projectPreview = createProjectPreviewService({
     session: async (id) => {
       const row = (await listSessions()).find(s => s.sessionId === id || s.nativeSessionId === id);
-      return row?.sessionId ? { id: row.sessionId, owner: row.assignedUser ?? null } : null;
+      return row?.sessionId ? { id: row.sessionId, owner: row.assignedUser ?? null, cwd: row.cwd ?? null } : null;
     },
     viewer: req => botViewerFromRequest(req, new URL(req.url).searchParams.get("user")).identity,
     resolve: async (port, options) => {
@@ -5718,6 +5729,14 @@ a{color:#60a5fa}
         });
         if (handled) return handled;
       }
+      // Android APK builds through omg Cloud (src/cloud-builds.ts).
+      if (path === "/api/cloud/builds/android" || path === "/api/cloud/builds/status") {
+        const { handleCloudBuildsRequest } = await import("../cloud-builds.ts");
+        const handled = await handleCloudBuildsRequest(req, url, {
+          getAccessToken: () => cloudAccount.getAccessToken(),
+        });
+        if (handled) return handled;
+      }
       // Agent media generation billed to omg credits (src/media-generation.ts).
       if (
         path === "/api/media/models" ||
@@ -5986,6 +6005,21 @@ a{color:#60a5fa}
               return err(400, 'autoSessionTitles must be "on", "manual" or "off"');
             patch.autoSessionTitles = b.autoSessionTitles;
           }
+          if (b?.folderOrder !== undefined) {
+            const keys = sanitizeFolderKeys(b.folderOrder);
+            if (!keys) return err(400, "folderOrder must be an array of folder keys");
+            patch.folderOrder = keys;
+          }
+          if (b?.hiddenFolders !== undefined) {
+            const keys = sanitizeFolderKeys(b.hiddenFolders);
+            if (!keys) return err(400, "hiddenFolders must be an array of folder keys");
+            patch.hiddenFolders = keys;
+          }
+          if (b?.showProjectPaths !== undefined) {
+            if (typeof b.showProjectPaths !== "boolean")
+              return err(400, "showProjectPaths must be a boolean");
+            patch.showProjectPaths = b.showProjectPaths;
+          }
           if (b?.customInstructions !== undefined) {
             if (
               typeof b.customInstructions !== "string" ||
@@ -6006,6 +6040,20 @@ a{color:#60a5fa}
           return json({ settings });
         }
         return err(405, "method not allowed");
+      }
+      // How many agents the next launch is counted against, and the cap. The
+      // hosted plan card reads this to show "3 of 5 agents in use"; it uses
+      // the same pool as activationGate, so it cannot disagree with a refusal.
+      if (path === "/api/agents/usage" && req.method === "GET") {
+        const computer = computerAgentAdmissionContext();
+        const limit = computer?.limit ?? getGlobalSettingsSync().maxLiveAgents;
+        const sessions = await listSessions().catch(() => []);
+        return json({
+          inUse: admissionPool(sessions, computer !== null, "interactive").length,
+          // 0 is "unlimited" as a local setting.
+          limit: limit > 0 ? limit : null,
+          plan: computer?.plan ?? null,
+        });
       }
       if (path === "/api/bootstrap" && req.method === "GET") {
         noteListSessionsClientActivity();

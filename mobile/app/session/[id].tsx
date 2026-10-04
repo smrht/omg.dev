@@ -142,7 +142,8 @@ import { AttachMenuButton, AttachMenuLayer } from "../../src/omg/attach-menu";
 import { agentLabel as agentDisplayName } from "../../src/omg/agent-icons";
 import { usePromptDraft, stashScope } from "../../src/omg/prompt-stash";
 import { useOmg } from "../../src/omg/provider";
-import { BrowserLoginCard } from "../../src/omg/browser-login-card";
+import { BrowserLoginCard, useBrowserLogin } from "../../src/omg/browser-login-card";
+import { isBrowserLoginCall } from "../../../packages/protocol/src/browser-login";
 import { ProjectPreviewCard } from "../../src/omg/project-preview-card";
 import { SessionActivityTitle, useSessionActivity } from "../../src/omg/session-activity";
 import { useTheme } from "../../src/omg/theme";
@@ -891,6 +892,17 @@ function SessionScreenContent({
   const { items: data, hasEarlier: hasLocalHistory } = useMemo(
     () => transcriptWindow.view(allItems, historyExpanded), [transcriptWindow, allItems, historyExpanded],
   );
+  // The login card sits under the run that holds the latest login call. The
+  // screen owns its state, so a row leaving the list window does not drop
+  // this device's presence or close the native sign-in sheet.
+  const browserLogin = useBrowserLogin(id ?? null);
+  const loginRowIndex = useMemo(() => {
+    for (let i = data.length - 1; i >= 0; i--) {
+      const item = data[i]!;
+      if (item.type === "tools" && item.entries.some((entry) => entry.kind === "tool_use" && isBrowserLoginCall(entry.text))) return i;
+    }
+    return -1;
+  }, [data]);
 
   const replySpace = useMemo(() => {
     if (!sendTurn) return 0;
@@ -1838,7 +1850,10 @@ function SessionScreenContent({
   /** The field has the keyboard: a little more room around the text while typing. */
   const [composerFocused, setComposerFocused] = useState(false);
   const composerExpanded =
-    composerFocused || draft.trim().length > 0 || dictation.state !== "idle";
+    composerFocused ||
+    draft.trim().length > 0 ||
+    attachments.items.length > 0 ||
+    dictation.state !== "idle";
 
   /**
    * THE LIFT ALONE IS NOT ENOUGH — the list has to follow it.
@@ -1917,6 +1932,8 @@ function SessionScreenContent({
         }}
         removeClippedSubviews={false}
         data={data}
+        // Re-render rows only when what the login card draws changes.
+        extraData={`${browserLogin.request?.id}:${browserLogin.request?.status}:${browserLogin.busy}:${browserLogin.error}`}
         keyExtractor={(item) => item.key}
         onLayout={(e) => {
           viewportHeight.current = e.nativeEvent.layout.height;
@@ -2034,6 +2051,7 @@ function SessionScreenContent({
                   fresh={contentReady && liveKeysRef.current.has(item.key) && sendTurn?.key !== item.key}
                   bot={bot}
                 />
+                {index === loginRowIndex ? <View style={{ marginTop: space.sm }}><BrowserLoginCard state={browserLogin} /></View> : null}
                 </ChatIdentityContext.Provider>
               </OverlapRow>
               </ImageGalleryRow.Provider>
@@ -2054,7 +2072,8 @@ function SessionScreenContent({
                   transcript reserves this footer's measured height, so a card
                   appearing does not hide the message above it. */}
               <View style={{ gap: space.sm }}>
-                <BrowserLoginCard sessionId={id ?? null} />
+                {/* No visible login call (older history not loaded): the card closes the stream. */}
+                {loginRowIndex < 0 ? <BrowserLoginCard state={browserLogin} /> : null}
                 {asks.map((q) => (
                   <QuestionCard
                     key={q.id}
@@ -2282,7 +2301,6 @@ function SessionScreenContent({
         ]}
       >
         <ProjectPreviewCard sessionId={id ?? null} agentBusy={busy} />
-        <AttachmentStrip items={attachments.items} onRemove={attachments.remove} />
         {/* "/" lists the box's skills above the field, as on the web. */}
         <SkillSuggest value={draft} onChangeText={setDraft} />
         {/* "#" lists relevant sessions, this folder first, as on the web. */}
@@ -2321,6 +2339,7 @@ function SessionScreenContent({
         <AttachMenuLayer style={{ flex: 1 }}>
         <ChatBarShell
           expanded={composerExpanded}
+          attachments={<AttachmentStrip items={attachments.items} onRemove={attachments.remove} />}
           collapsedStart={
             <AttachMenuButton options={attachments.options} size={32}>
               <Icon ios="plus" android="add" size={20} color={colors.textSecondary} />

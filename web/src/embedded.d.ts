@@ -94,6 +94,22 @@ export interface HostPushConfig {
   workerUrl?: string;
 }
 
+/**
+ * The host's toast function. Pass Sonner's `toast` export from the host's own
+ * bundle; it satisfies this shape as is.
+ */
+export type OmgHostToast = ((message: any, data?: any) => string | number) & {
+  success: (message: any, data?: any) => string | number;
+  error: (message: any, data?: any) => string | number;
+  info: (message: any, data?: any) => string | number;
+  warning: (message: any, data?: any) => string | number;
+  message: (message: any, data?: any) => string | number;
+  loading: (message: any, data?: any) => string | number;
+  custom: (render: (id: string | number) => any, data?: any) => string | number;
+  promise: (...args: any[]) => any;
+  dismiss: (id?: string | number) => string | number;
+};
+
 /** Presentation-only identity supplied by an embedding host. */
 export interface EmbeddedViewer {
   id: string;
@@ -133,12 +149,21 @@ export interface OmgAppSurfaceProps {
    * on a provider key the connected machine may or may not hold.
    */
   hostedTranscription?: HostedTranscription;
+  hostedPreviewAuth?: HostedPreviewAuth;
   /**
    * A service-worker scope the host dedicates to OMG push notifications.
    * Without it the notification toggle stays unavailable in an embedded
    * surface, rather than enrolling the device into silence.
    */
   hostedPush?: HostPushConfig;
+  /**
+   * The host's toast function (Sonner's `toast`). Every toast this surface
+   * raises is drawn by the host's Toaster, in the host's top layer, and the
+   * surface mounts no toast stack of its own. Omit it and the surface draws
+   * its own stack inside its container, below anything the host layers above
+   * that container.
+   */
+  hostToast?: OmgHostToast;
   /**
    * Open one of the machine's settings pages (the ones OmgSettingsSurface
    * mounts) in the HOST's own navigation.
@@ -166,6 +191,8 @@ export interface OmgAppSurfaceProps {
    * lands on a per-computer page behind a machine selector.
    */
   onOpenHostSettings?: () => void;
+  /** A user selects a page, session, thread, or new task in the desktop rail. */
+  onNavigate?: () => void;
   /**
    * The machine refused an action because of the plan YOU sold — e.g. starting
    * one more agent than the tier allows.
@@ -237,6 +264,10 @@ export interface HostedTranscription {
   getToken: () => Promise<string | null>;
 }
 
+export interface HostedPreviewAuth {
+  getToken(identity: { appId: string; projectId: string; previewUrl: string }): Promise<{ token: string; previewUrl: string } | null>;
+}
+
 export declare function OmgAppSurface(
   props: OmgAppSurfaceProps,
 ): JSX.Element;
@@ -292,6 +323,14 @@ export interface OmgSettingsSurfaceProps {
    * explains it is unavailable instead of enrolling into the host's own worker.
    */
   hostedPush?: HostPushConfig;
+  /**
+   * The host's toast function (Sonner's `toast`). Every toast this surface
+   * raises is drawn by the host's Toaster, in the host's top layer, and the
+   * surface mounts no toast stack of its own. Omit it and the surface draws
+   * its own stack inside its container, below anything the host layers above
+   * that container.
+   */
+  hostToast?: OmgHostToast;
 }
 
 export declare function OmgSettingsSurface(

@@ -33,7 +33,7 @@ import {
 import { Button } from "./ui/button";
 import { cn } from "@/lib/utils";
 
-export type DesktopWorkspaceSurface = "sessions" | "chat" | "auto" | "board";
+export type DesktopWorkspaceSurface = "sessions" | "chat" | "auto" | "board" | "page";
 
 export type WorkspaceSummary = {
   title: string;

@@ -2,6 +2,142 @@
 
 Recent product updates and deployment notes.
 
+## October 4, 2026 - Android builds from a Computer work end to end (v0.6.176)
+
+- An agent's Android build now uploads the exact commit in a form the builder can check out. Before this fix, the first build of a new project failed while preparing its source.
+- A build started by an agent now shows in the session that started it.
+
+## October 4, 2026 - Agents can build installable Android apps (v0.6.175)
+
+- Agents can build a signed Android APK of an Expo app in omg Cloud with the new `omg_build_android` tool, and follow it with `omg_build_status`.
+- When the build is done, the APK appears in the session, and the agent sends a link that installs the app on an Android phone.
+- Later builds of the same app install over the earlier version and keep its data.
+- APK files shared in a session download as Android apps, so an Android phone offers to install them.
+
+## October 4, 2026 - Host Settings can keep the desktop sidebar (v0.6.174)
+
+- Embedded hosts can place their Settings in the desktop content pane. Sidebar selections can return to the same workspace.
+- The new-chat starters are one-line pills, each with its own icon colour. The row fades at an end that has more pills.
+- On a desktop screen, the content panel is a neutral grey, and the page behind the sidebar is darker. The sidebar has equal space on both sides.
+
+## October 4, 2026 - A calmer desktop layout (v0.6.173)
+
+- On a desktop screen, sessions, threads, and pages sit in a rounded panel beside the session list. Divider lines are gone.
+- Long messages are easier to read. The text and the composer stay in a centred column instead of the full window width.
+- Session and thread headers have no divider line. Messages fade out under the header.
+- When you type in a session, the text sits above the attach, mic, and send buttons, on desktop and mobile web.
+- Text fields no longer show a blue glow when focused.
+- To start a thread on desktop, hover over the Threads header in the session list and click +.
+- AI session titles and thread replies no longer fail when the omg.dev sign-in token has expired.
+
+## October 4, 2026 - Composer controls and attachments fit together (v0.6.172)
+
+- The desktop home composer uses the shared folder menu and desktop model picker. Thinking is a compact control at the bottom of the model menu.
+- Attachment previews sit inside the composer, above the draft, on web and native mobile. Removing an attachment keeps the draft.
+- Web attachment rows have a thin, rounded scrollbar with no arrow buttons.
+
+## October 4, 2026 - Settings opens beside the session list (v0.6.171)
+
+- On a desktop screen, Settings now opens beside the session list, the same way Schedules, Notifications, and Artifacts do.
+
+## October 4, 2026 - Computer browser comes back after a crash (v0.6.170)
+
+- When the Computer's browser crashes, it now restarts on its own the next time you or an agent use it. The desktop and screen stay open.
+- Computer status now shows whether the browser is running.
+
+## October 4, 2026 - Agents in use (v0.6.169)
+
+- A Computer now reports how many agents are in use and its plan limit. The plan card in Settings on app.omg.dev can show "3 of 5 agents in use".
+
+## October 4, 2026 - Computer page loads less code (v0.6.168)
+
+- The Roles and tool access page now loads when you open it. The Computer page on app.omg.dev loads about 34 KB less code at start.
+
+## October 4, 2026 - Desktop pages open beside the session list (v0.6.167)
+
+- On a desktop screen, Notifications and Artifacts now open beside the session list, the same way Schedules does.
+- An auto agent report on a desktop screen shows the list of findings beside the finding you picked. The phone keeps one page at a time.
+- The footer of a finding uses the same agent, model and thinking buttons as the home composer. The Feedback button is gone from the web finding page.
+- The desktop home composer has the same shape as the phone composer.
+- The composer no longer offers Fast for Claude. You can still type /fast in a session.
+- The folder menu in the session list has an All projects choice.
+- The storage page shows one row for each disk that omg uses. Warnings for low disk space now come for each disk.
+
+## October 3, 2026 - Shorter side navigation (v0.6.166)
+
+- The side navigation no longer lists Bots and Board. Open Bots from the Chat/Bots switch. On a wide screen, open Board from the Pages menu.
+- The website login card now shows in the chat, directly under the step that asked for the login. It is one row with the site, a Log in button, and a close button.
+- In the folder picker, "New project" is now "No project" and has no icon. It is a choice in the list, so it no longer looks like a button.
+
+## October 3, 2026 - Computer updates land on the newest version (v0.6.165)
+
+- When a Computer updates itself, it now installs the newest version. Before, it could install an older version and stay on it.
+
+## October 3, 2026 - Session folders follow your folder order (v0.6.164)
+
+- The folder groups in the session list now use your saved folder order on the web and the iPhone app. Before, they were always in alphabetical order. Folders with no saved place follow in alphabetical order.
+
+## October 3, 2026 - Phone home screen fits small phones (v0.6.163)
+
+- On a small phone or with a large text size, the "What should we work on?" box stays on one line. Before, the text wrapped and the agent icon moved to the bottom corner.
+- The Website, App, API and Image starter cards are now one row that you swipe sideways. Before, they used two rows.
+- Thread rows on the phone home screen are shorter, so more threads fit on the screen.
+
+## October 3, 2026 - Computer screen no longer locks with a password (v0.6.162)
+
+- The Computer desktop no longer locks the screen after a few idle minutes. Before, the screen asked for a Linux password that nobody has.
+
+## October 3, 2026 - Phone web folder pills follow your folder order (v0.6.161)
+
+- On a phone browser, the folder pills at the top now use your saved folder order and leave out hidden folders. They match the iPhone app and the folder menu. Before, they were in alphabetical order and showed hidden folders.
+
+## October 3, 2026 - One toast per message on app.omg.dev (v0.6.160)
+
+- A message now shows once on app.omg.dev, even before the app.omg.dev update that shows all messages in one place.
+
+## October 3, 2026 - Simpler Settings and toasts that stay on top (v0.6.159)
+
+- Settings is shorter. Tool access and agent limits now sit under an Advanced row that starts closed.
+- The agent limit row shows one status line, and its note is one short sentence.
+- On app.omg.dev, messages such as "Reconnecting…" now show above menus, sheets and the cookie banner. Before, they could appear behind them.
+
+## October 3, 2026 - Folder order syncs across web and iPhone (v0.6.158)
+
+- Folder order, hidden folders and the show-paths choice are now saved on the computer, not in each browser or phone. The web folder menu and the iPhone folder rail show the same list.
+- A folder order you already set on a device moves to the computer the first time that device connects.
+- The web app recovers after a deploy when a page part fails to load. Before, a second deploy in a row could show a load error instead of a reload.
+
+## October 2, 2026 - Computer browser starts on older machines (v0.6.157)
+
+- Chrome on the Computer now starts on machines that have no shared memory folder. Before, the screen opened, but the browser did not start.
+- When the Computer cannot start, it shows a short message. Before, it showed raw error code.
+
+## October 2, 2026 - Callstack Apex for React tasks (v0.6.156)
+
+- The omg agent model picker now offers Apex from Callstack. It uses the direct Callstack gateway through the omg router. GPT-6 Luna remains the default.
+
+## October 1, 2026 - Compact thread rows in the web sidebar (v0.6.155)
+
+- Web thread shortcuts now show only the title and time. The shorter rows match the recent iPhone Home update and leave more room for tasks.
+
+## October 1, 2026 - OpenCode model list follows the live catalog (v0.6.154)
+
+- The OpenCode model picker uses the live catalog again. A broken OpenCode install no longer keeps old model names on screen.
+
+## October 1, 2026 - Full page inside native app previews (v0.6.153)
+
+- The iPhone app shows the full web page inside the phone preview. Buttons at the bottom of the page remain visible and can be tapped.
+
+## October 1, 2026 - Stable simulator previews (v0.6.152)
+
+- Simulator previews keep the same page when a status token changes. Taps, typing, and video can continue in the web and iPhone preview cards. A new simulator stream still opens a new page.
+
+## October 1, 2026 - Owned app previews and reliable Expo connection (v0.6.151)
+
+- Generated Expo apps can use the owner's app sign-in in the web preview. The preview passes a short-lived token for that app and renews it while open. Shared data uses the app's deployed backend. Existing apps need the updated SDK.
+- The iPhone app keeps the owned web preview inside the app when you open it full screen.
+- Connect Expo opens its own browser connection. Another Chrome on the Computer no longer blocks sign-in. Cancel and retry work, and cleanup verifies each saved process before it sends a stop signal.
+
 ## September 30, 2026 - Simulator auto-start, iOS crash fixes and Threads on Home (v0.6.150)
 
 - Expo preview card: the Simulator level can start by itself when you open the card. This option is off for now. While all simulators are busy, the card shows your place in line and a rough wait, such as "About 3 min".
