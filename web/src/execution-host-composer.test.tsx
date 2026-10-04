@@ -204,7 +204,9 @@ function startButton(): HTMLButtonElement {
 
 function createBodies(entries: Recorded[]) {
   return entries
-    .filter((entry) => entry.path === "/api/sessions/new")
+    // 0.6.176: a chat under "All projects" starts unassigned through
+    // /api/sessions/new-unassigned, which serve.ts routes to the same handler.
+    .filter((entry) => entry.path === "/api/sessions/new" || entry.path === "/api/sessions/new-unassigned")
     .map((entry) => entry.body);
 }
 

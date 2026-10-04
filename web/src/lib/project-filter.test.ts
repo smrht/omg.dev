@@ -72,10 +72,10 @@ describe("resolveInitialProjectFilter", () => {
     );
   });
 
-  test("keeps All projects once it was picked", () => {
-    // The composer, not this resolver, keeps a new chat out of a folder
-    // nobody picked (composerStartsUnassigned).
-    expect(resolveInitialProjectFilter({ saved: "__all", options })).toBe("__all");
+  test("an unscoped list opens on no project, never on a folder nobody picked", () => {
+    // Agentbox keeps its 0.6.150 rule: "__all" survives only with allowAll
+    // (the desktop workspace); elsewhere a saved "__all" opens on no project.
+    expect(resolveInitialProjectFilter({ saved: "__all", options })).toBe(NO_PROJECT_FILTER);
   });
 
   test("a folder that is gone opens on no project, never on another folder", () => {

@@ -193,7 +193,7 @@ describe("AgentModelPicker pill", () => {
 
 test("the model dropdown retains thinking changes without closing", async () => {
   const { AgentModelPicker } = await import("./App");
-  const { ThinkingBar } = await import("./components/agent-setup-sheet");
+  const { ThinkingBar } = await import("./components/thinking-bar");
   const ui = mount();
   const changes: string[] = [];
   function Picker() {
