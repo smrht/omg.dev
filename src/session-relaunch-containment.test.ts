@@ -1,3 +1,4 @@
+import { resetSettingsDbConnectionForTests } from "./settings.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -38,6 +39,7 @@ describe("relaunch containment", () => {
     capture = join(root, "launch.json");
     PATHS.data = join(root, "data");
     process.env.LFG_TEST_HARNESS_CAPTURE = capture;
+    resetSettingsDbConnectionForTests();
     resetManagedRegistryForTests();
   });
 
@@ -45,6 +47,7 @@ describe("relaunch containment", () => {
     delete process.env.LFG_TEST_HARNESS_CAPTURE;
     setRecoveryEgressProxy(null);
     setJournalReaderForTests(null);
+    resetSettingsDbConnectionForTests();
     resetManagedRegistryForTests();
     PATHS.data = originalData;
     rmSync(root, { recursive: true, force: true });
@@ -87,11 +90,13 @@ describe("relaunch containment", () => {
     expect(cmd[0]).toMatch(/systemd-run$/);
     expect(cmd).toContain(`--unit=lfg-agent-${NAME}`);
     expect(cmd).toContain("--slice=lfg-agents.slice");
-    expect(cmd).toContain("--property=MemoryMax=4G");
+    expect(cmd).toContain("--property=MemoryMax=8G");
     expect(cmd).toContain("--property=KillMode=control-group");
   }
 
   function expectNoSlice(cmd: string[]) {
+    // Agentbox deliberately contains all Linux parents, including legacy opt-outs.
+    if (linux) return expectSlice(cmd);
     expect(cmd.some((part) => part.endsWith("systemd-run"))).toBe(false);
     expect(cmd.some((part) => part.startsWith("--slice="))).toBe(false);
   }
@@ -119,7 +124,7 @@ describe("relaunch containment", () => {
     expectNoSlice(launched().cmd);
   });
 
-  test("boot recovery: a subagent comes back in the slice", async () => {
+  test.skipIf(!linux)("boot recovery: a subagent comes back in the slice", async () => {
     row({ spawnedBy: "subagent", containment: { agentSlice: true, sandbox: "none", egressProxy: false } });
     deadEntry("prior-boot");
     const result = await reconcileCommandFileSessions(() => {});
@@ -127,7 +132,7 @@ describe("relaunch containment", () => {
     expectSlice(launched().cmd);
   });
 
-  test("boot recovery: a top-level session comes back without a slice", async () => {
+  test.skipIf(!linux)("boot recovery: a top-level session comes back without a slice", async () => {
     row({ containment: { agentSlice: false, sandbox: "none", egressProxy: false } });
     deadEntry("prior-boot");
     const result = await reconcileCommandFileSessions(() => {});
@@ -143,7 +148,7 @@ describe("relaunch containment", () => {
     expectSlice(launched().cmd);
   });
 
-  test("legacy subagent row: boot recovery also defaults to the slice", async () => {
+  test.skipIf(!linux)("legacy subagent row: boot recovery also defaults to the slice", async () => {
     row({ spawnedBy: "subagent" });
     deadEntry("prior-boot");
     expect((await reconcileCommandFileSessions(() => {})).recovered).toBe(1);
@@ -203,7 +208,7 @@ describe("relaunch containment", () => {
       expect(cmd[0]).toMatch(/systemd-run$/);
       expect(cmd).toContain(`--unit=lfg-agent-${NEW}`);
       expect(cmd).toContain("--slice=lfg-agents.slice");
-      expect(cmd).toContain("--property=MemoryMax=4G");
+      expect(cmd).toContain("--property=MemoryMax=8G");
     }
 
     test("a recorded subagent starts in the slice, and the record carries over", () => {
@@ -242,12 +247,14 @@ describe("relaunch containment", () => {
     test("a top-level session starts without a slice", () => {
       row({ containment: { agentSlice: false, sandbox: "none", egressProxy: false } });
       coldStart();
-      expectNoSlice(launched().cmd);
+      if (linux) expectColdSlice(launched().cmd);
+      else expectNoSlice(launched().cmd);
     });
 
     test("no owner row at all starts without a slice", () => {
       coldStart();
-      expectNoSlice(launched().cmd);
+      if (linux) expectColdSlice(launched().cmd);
+      else expectNoSlice(launched().cmd);
     });
 
     test("a restricted session fails closed without the egress proxy, and uses it when up", () => {

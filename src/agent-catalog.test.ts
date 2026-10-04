@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   accessibleModelsForAgent,
+  AISDK_MODELS,
+  CLAUDE_MODELS,
   CODEX_AISDK_MODELS,
   CODEX_MODELS,
+  curateCodexModels,
+  withCodexMuseModels,
   curateCursorModels,
   curateOpenCodeModels,
   defaultModelForAgent,
@@ -27,14 +31,13 @@ test("offers the current Codex models", () => {
 // version on purpose: the full id is the only entry that stays on 5.5 when the
 // alias moves to the next Opus, and the only one that shows the version in the
 // picker. Both Claude backends take the same model strings.
-test("Claude and the Agent SDK can name Opus 5.5 by full id", async () => {
-  const { CLAUDE_MODELS, AISDK_MODELS } = await import("./agent-catalog.ts");
-  for (const models of [CLAUDE_MODELS, AISDK_MODELS]) {
-    expect(models).toContain("claude-opus-5-5");
-    expect(models).toContain("opus");
+test("Claude and the Agent SDK retain the version-labelled family alias", async () => {
+  const { omgModelLabel } = await import("../packages/protocol/src/omg-model-display.ts");
+  for (const agent of ["claude", "aisdk"] as const) {
+    expect(modelsForAgent(agent)).toContain("opus");
+    expect(modelsForAgent(agent).filter((id) => id.includes("opus"))).toHaveLength(1);
   }
-  expect(modelsForAgent("claude")).toContain("claude-opus-5-5");
-  expect(modelsForAgent("aisdk")).toContain("claude-opus-5-5");
+  expect(omgModelLabel("opus")).toBe("Opus 5.5");
 });
 
 const DISCOVERED = [
@@ -325,6 +328,79 @@ describe("curateCursorModels", () => {
   });
 });
 
+describe("Codex model catalog", () => {
+  test("keeps entitlement-proven Astra ahead of a stale discovery result", () => {
+    expect(curateCodexModels(["gpt-5.6-sol"])).toEqual(["gpt-6-astra", "gpt-5.6-sol"]);
+  });
+
+  // The slug set `codex debug models` returned on the box that had Daybreak
+  // Blue, in discovery order. No version digits in the name, so no /^gpt-\d/
+  // family filter ever matched it — curation silently deleted a model the
+  // account was entitled to. The bug this pins.
+  const CODEX_DISCOVERED = [
+    "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-daybreak-blue-latest",
+    "gpt-5.5",
+  ];
+
+  test("keeps a discovered model whose name carries no version digits", () => {
+    const out = curateCodexModels(CODEX_DISCOVERED);
+    expect(out).toContain("gpt-daybreak-blue-latest");
+    // The curated block and its order are unchanged; the new model follows it.
+    expect(out.slice(0, 7)).toEqual([
+      "gpt-6-astra",
+      "gpt-6-sol",
+      "gpt-6-luna",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.5",
+    ]);
+    // A newly offered model never becomes the default.
+    expect(defaultModelForCatalogItem("codex", out, true)).toBe("gpt-5.6-sol");
+  });
+
+  test("keeps version-tied siblings of a new release, not just the latest one", () => {
+    // addLatest collapses a version tie to one localeCompare winner, which
+    // dropped gpt-6.1-luna while gpt-6.1-sol survived. Both are separate
+    // families of one release and both stay selectable.
+    const out = curateCodexModels([...CODEX_DISCOVERED, "gpt-6.1-sol", "gpt-6.1-luna"]);
+    expect(out).toContain("gpt-6.1-sol");
+    expect(out).toContain("gpt-6.1-luna");
+  });
+
+  test("keeps Daybreak account-driven while offering the upstream Sol 6.1 fallback", () => {
+    // v0.6.145 adds Sol 6.1 to the bundled runtime's static catalog.
+    // Daybreak access still comes from account discovery, never a static alias.
+    expect(CODEX_MODELS).not.toContain("gpt-daybreak-blue-latest");
+    expect(CODEX_MODELS).toContain("gpt-6.1-sol");
+    expect(MODEL_OPTIONS.codex.defaultModel).toBe("gpt-5.6-sol");
+    expect(curateCodexModels(["gpt-5.6-sol"])).not.toContain("gpt-daybreak-blue-latest");
+  });
+
+  test("muse-spark joins the codex-aisdk list only while a Muse subscription credential exists", () => {
+    expect(withCodexMuseModels(["gpt-6-astra", "gpt-5.6-sol"], true)).toEqual(["gpt-6-astra", "gpt-5.6-sol", "muse-spark-1.3", "muse-spark-1.2"]);
+    expect(withCodexMuseModels(["gpt-6-astra", "gpt-5.6-sol"], false)).toEqual(["gpt-6-astra", "gpt-5.6-sol"]);
+    expect(withCodexMuseModels(["muse-spark-1.3"], true)).toEqual(["muse-spark-1.3", "muse-spark-1.2"]);
+  });
+
+  test.each(["codex", "codex-aisdk"] as const)(
+    "%s offers Sol 6.1 first while preserving the existing default",
+    (key) => {
+      const item = listModelCatalog([codingAgent(key, true)]).find((entry) => entry.key === key);
+
+      expect(item?.models[0]).toBe("gpt-6.1-sol");
+      expect(item?.models).toContain("gpt-6-astra");
+      expect(item?.defaultModel).toBe("gpt-5.6-sol");
+    },
+  );
+});
+
 test("grok catalog defaults to Grok 4.7 and keeps the fast variant", async () => {
   const { GROK_MODELS, defaultModelForAgent, listModelCatalog } = await import("./agent-catalog.ts");
   expect(GROK_MODELS[0]).toBe("grok-4.7");
@@ -378,4 +454,12 @@ test("omg thinking levels follow the model: effort where OpenRouter honours it, 
   expect(item.thinkingLevels).toEqual(["low", "medium", "high"]);
   expect(Object.keys(item.thinkingLevelsByModel ?? {})).toHaveLength(12);
   expect(item.thinkingLevelsByModel?.["omg/qwen/qwen3-coder-next"]).toBeUndefined();
+});
+
+test("claude pickers carry one row per family alias plus the Sonnet 5.5 pin", () => {
+  for (const list of [CLAUDE_MODELS, AISDK_MODELS]) {
+    // Newest release first; the `sonnet` alias sorts on Sonnet 5, where it lands.
+    expect(list).toEqual(["claude-sonnet-5-5", "opus", "fable", "sonnet", "haiku"]);
+    expect(list.filter((m) => m.includes("fable"))).toHaveLength(1);
+  }
 });

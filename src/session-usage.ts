@@ -58,6 +58,7 @@ export type UsageProc = {
 };
 
 export type SessionUsageRow = {
+  historySessionId?: string;
   /** Stable identity for the UI list: sessionId when known, else the managed name. */
   key: string;
   sessionId: string | null;
@@ -129,7 +130,8 @@ export type UsageSessionInput = {
   managed?: boolean;
 };
 
-type ProcInfo = {
+export type ProcInfo = {
+  startTicks: number;
   pid: number;
   ppid: number;
   argv: string[];
@@ -229,6 +231,7 @@ function baseName(path: string): string {
  */
 async function readProc(pid: number, uptimeSec: number | null): Promise<ProcInfo | null> {
   let argv: string[];
+  let startTicks = 0;
   let ppid = 0;
   let rssBytes = 0;
   let ageSec: number | null = null;
@@ -245,7 +248,7 @@ async function readProc(pid: number, uptimeSec: number | null): Promise<ProcInfo
     ppid = Number(afterComm[1]);
     const rssPages = Number(afterComm[21]);
     if (Number.isFinite(rssPages)) rssBytes = rssPages * 4096;
-    const startTicks = Number(afterComm[19]);
+    startTicks = Number(afterComm[19]);
     if (uptimeSec != null && Number.isFinite(startTicks)) {
       ageSec = Math.max(0, Math.round(uptimeSec - startTicks / 100));
     }
@@ -291,7 +294,7 @@ async function readProc(pid: number, uptimeSec: number | null): Promise<ProcInfo
     // Requires ptrace access to the target; optional signal.
   }
 
-  return { pid, ppid, argv, rssBytes, pssBytes, ageSec, cgroup, env, cwd };
+  return { startTicks, pid, ppid, argv, rssBytes, pssBytes, ageSec, cgroup, env, cwd };
 }
 
 async function readUptime(): Promise<number | null> {
@@ -304,7 +307,7 @@ async function readUptime(): Promise<number | null> {
   }
 }
 
-async function scanProcs(): Promise<ProcInfo[]> {
+export async function scanProcs(): Promise<ProcInfo[]> {
   const uptimeSec = await readUptime();
   const entries = await readdir("/proc");
   const pids: number[] = [];

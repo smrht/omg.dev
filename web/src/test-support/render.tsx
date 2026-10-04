@@ -36,6 +36,9 @@ Object.assign(globalThis, {
   Event: window.Event,
   CustomEvent: window.CustomEvent,
   KeyboardEvent: window.KeyboardEvent,
+  // App components read saved picks straight off the global. happy-dom keeps
+  // storage on the Window; surface it where the code looks for it.
+  localStorage: window.localStorage,
   // Vaul drawers mount a Radix focus scope, which watches its subtree.
   MutationObserver: window.MutationObserver,
   getComputedStyle: window.getComputedStyle.bind(window),

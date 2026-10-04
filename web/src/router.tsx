@@ -33,10 +33,16 @@ const indexRoute = createRoute({
     if (search.tab) {
       // Preserve session deep-links and embed mode across the legacy ?tab=
       // redirect so framed hosts (omg) don't lose their chrome contract.
-      const nextSearch: { session?: string; embed?: boolean; embedOrigin?: string } = {};
+      const nextSearch: {
+        session?: string;
+        embed?: boolean;
+        embedOrigin?: string;
+        inspectSession?: string;
+      } = {};
       if (search.session) nextSearch.session = search.session;
       if (search.embed) nextSearch.embed = true;
       if (search.embedOrigin) nextSearch.embedOrigin = search.embedOrigin;
+      if (search.inspectSession) nextSearch.inspectSession = search.inspectSession;
       throw redirect({
         to: tabToPath(search.tab),
         search: nextSearch,
@@ -103,15 +109,6 @@ const sessionRoute = createRoute({
   component: () => null,
 });
 
-// One open thread (people-first chat, src/threads.ts). Component-less for the
-// same reason as the session route: App owns the render.
-const threadRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "threads/$threadId",
-  validateSearch: validateAppSearch,
-  component: () => null,
-});
-
 const routeTree = rootRoute.addChildren([
   indexRoute,
   tabRoute,
@@ -119,7 +116,6 @@ const routeTree = rootRoute.addChildren([
   botNewRoute,
   botEditRoute,
   sessionRoute,
-  threadRoute,
 ]);
 
 export function createOmgRouter(history?: RouterHistory) {

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   cacheProjectFilter,
   NO_PROJECT_FILTER,
-  PROJECT_FILTER_TTL_MS,
+  PROJECT_FILTER_STORAGE_KEY,
   readCachedProjectFilter,
   projectFilterAfterPress,
   resolveInitialProjectFilter,
@@ -91,6 +91,12 @@ describe("resolveInitialProjectFilter", () => {
   });
 });
 
+test("overview retains explicit all-projects scope across refreshes", () => {
+  expect(
+    resolveInitialProjectFilter({ saved: "__all", options: ["one", "two"], preferred: "one", allowAll: true }),
+  ).toBe("__all");
+});
+
 describe("the remembered folder pick", () => {
   function memoryStorage() {
     const data = new Map<string, string>();
@@ -101,26 +107,39 @@ describe("the remembered folder pick", () => {
     };
   }
 
-  test("a visit with nothing picked opens on no project", () => {
-    expect(readCachedProjectFilter(memoryStorage())).toBe(NO_PROJECT_FILTER);
-    expect(readCachedProjectFilter(null)).toBe(NO_PROJECT_FILTER);
+  test("an existing raw localStorage string is read back unchanged, on every read", () => {
+    // The pick is a sticky preference: no expiry, no re-parse, no drift
+    // between reads. It must survive the app update that changed the shape.
+    const storage = memoryStorage();
+    storage.setItem(PROJECT_FILTER_STORAGE_KEY, "duet");
+    expect(readCachedProjectFilter(storage)).toBe("duet");
+    expect(readCachedProjectFilter(storage)).toBe("duet");
+    expect(readCachedProjectFilter(storage)).toBe("duet");
   });
 
-  test("a pick made in this visit is read back", () => {
+  test("the all-projects sentinel persists the same way as a folder", () => {
     const storage = memoryStorage();
-    cacheProjectFilter("expo-go-probe", storage, 1_000);
-    expect(readCachedProjectFilter(storage, 1_000 + 60_000)).toBe("expo-go-probe");
+    storage.setItem(PROJECT_FILTER_STORAGE_KEY, "__all");
+    expect(readCachedProjectFilter(storage)).toBe("__all");
+    expect(readCachedProjectFilter(storage)).toBe("__all");
   });
 
-  test("a pick older than the limit is dropped", () => {
+  test("the no-project scope is a value like any other, not a fallback", () => {
     const storage = memoryStorage();
-    cacheProjectFilter("expo-go-probe", storage, 1_000);
-    expect(readCachedProjectFilter(storage, 1_000 + PROJECT_FILTER_TTL_MS)).toBe(NO_PROJECT_FILTER);
-  });
-
-  test("an old bare value from localStorage days is not trusted", () => {
-    const storage = memoryStorage();
-    storage.setItem("lfg_v2_project_filter", "expo-go-probe");
+    storage.setItem(PROJECT_FILTER_STORAGE_KEY, NO_PROJECT_FILTER);
     expect(readCachedProjectFilter(storage)).toBe(NO_PROJECT_FILTER);
+  });
+
+  test("nothing stored, or no storage at all, reads as all projects", () => {
+    expect(readCachedProjectFilter(memoryStorage())).toBe("__all");
+    expect(readCachedProjectFilter(null)).toBe("__all");
+  });
+
+  test("a pick is written as a raw string and survives repeated reads", () => {
+    const storage = memoryStorage();
+    cacheProjectFilter("expo-go-probe", storage);
+    expect(storage.getItem(PROJECT_FILTER_STORAGE_KEY)).toBe("expo-go-probe");
+    expect(readCachedProjectFilter(storage)).toBe("expo-go-probe");
+    expect(readCachedProjectFilter(storage)).toBe("expo-go-probe");
   });
 });

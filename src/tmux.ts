@@ -1,3 +1,4 @@
+// Agentbox isolation v1 (issue 1003)
 import { ensureOmgProvider } from "./omg-provider.ts";
 // Map a live process to its tmux pane and inject input. Claude Code sessions
 // run inside tmux panes; we discover the `claude` pid via pgrep/proc, walk up
@@ -146,8 +147,8 @@ function addSessionEnv(
   // chain isn't resolvable at create time (headless/cron callers).
   if (user) env.push("-e", `LFG_USER=${user}`);
   // Parent and subagent managed sessions both need a named browser session +
-  // idle timeout. systemd containment (containInAgentSlice) is still subagent-
-  // only for cgroup/OOM reasons; these env vars are universal.
+  // idle timeout. Since issue 521 systemd containment covers parents too;
+  // these env vars stay universal.
   if (managedName) {
     const browser = agentBrowserEnv(managedName);
     env.push("-e", `AGENT_BROWSER_SESSION=${browser.AGENT_BROWSER_SESSION}`);
@@ -166,10 +167,19 @@ type AgentContainment = {
   cwd: string;
   omgSessionId?: string | null;
   omgUser?: string | null;
+  /**
+   * Final child env assembled by the SPAWNER (spawnManagedHarness), not by
+   * process.env: mac-hosted harnesses carry LFG_MAC_* (bridge lease token,
+   * ssh target, namespace names, first request id) here. Only NAME-ONLY
+   * forwarding is added from this map — the values themselves live in the
+   * Bun.spawn env, so they can never appear on the systemd-run argv (item 31).
+   */
+  extraEnv?: Record<string, string>;
 };
 
 /**
- * Run a subagent as a transient user service in the aggregate agent slice.
+ * Run a managed agent (parent or subagent, issue 521) as a transient user
+ * service in the aggregate agent slice.
  * A service (rather than a scope) gives systemd a main process: when it exits,
  * KillMode=control-group reaps helper daemons such as agent-browser. Blocking
  * the service's session bus also prevents Chromium from moving itself into an
@@ -181,6 +191,19 @@ export function containedAgentCommand(
   launch: { pty?: boolean } = {},
 ): string[] {
   if (process.platform !== "linux") return command;
+  return containedAgentArgv(command, opts, launch);
+}
+
+/**
+ * The Linux systemd-run argv builder, separated from the platform gate so
+ * the argv-hygiene regression (no credential VALUES on the command line)
+ * can run on any dev platform (item 19).
+ */
+export function containedAgentArgv(
+  command: string[],
+  opts: AgentContainment,
+  launch: { pty?: boolean } = {},
+): string[] {
   const systemdRun = Bun.which("systemd-run") ?? "/usr/bin/systemd-run";
   const uid = typeof process.getuid === "function" ? process.getuid() : 1000;
   const argv = [
@@ -196,21 +219,54 @@ export function containedAgentCommand(
     "--property=Type=exec",
     "--property=KillMode=control-group",
     "--property=OOMScoreAdjust=200",
-    // One agent must not fill the 5G slice: 4G leaves the others 1G. A checkout
-    // on /tmp is tmpfs, so it counts here. MemoryMax kills this unit. MemoryHigh is omitted on purpose:
-    // high throttles every process in the cgroup and never kills. MemorySwapMax=0
-    // keeps the cap from spilling into swap.
-    "--property=MemoryMax=4G",
-    "--property=MemorySwapMax=0",
+    "--property=MemoryHigh=6G",
+    "--property=MemoryMax=8G",
+    "--property=MemorySwapMax=1G",
+    "--property=TasksMax=1024",
+    ...Object.keys(process.env).filter(k => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k)).map(k => `--setenv=${k}`),
+
     `--setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/lfg-agent-no-session-bus`,
-    ...Object.entries(agentBrowserEnv(opts.name)).flatMap(([k, v]) => [`--setenv=${k}=${v}`]),
+    // Browser profile paths are not secrets, but agentBrowserEnv derives from
+    // config; forward by NAME ONLY (value imported from caller env) so no
+    // future value can leak through the argv either.
+    ...Object.keys(agentBrowserEnv(opts.name)).map((k) => `--setenv=${k}`),
   ];
+  // Simple, non-secret launcher facts may stay inline (short, no tokens),
+  // but ANY env var whose VALUE could carry a credential must use the
+  // name-only form. The rule enforced by the sentinel regression test:
+  // values of agentBrowserEnv/agentTmpEnv and every LFG_*/OMG_* secret-capable
+  // var are forwarded by NAME ONLY below.
   if (process.env.PATH) argv.push(`--setenv=PATH=${process.env.PATH}`);
   if (opts.omgSessionId) argv.push(`--setenv=LFG_SESSION_ID=${opts.omgSessionId}`);
   argv.push(`--setenv=OMG_CAPABILITY_VERSION=${OMG_CAPABILITY_VERSION}`);
+  // The muse harness reaches muse-spark-1.3 only through the Meta egress proxy
+  // (Meta gates the catalog by request origin). systemd-run scrubs the
+  // environment to this allowlist, so OMG_MUSE_PROXY has to be passed through
+  // explicitly or `muse serve` calls Meta directly and gets "lack access".
+  // NAME-ONLY --setenv: systemd-run imports the value from the caller env
+  // (assembled by spawnManagedHarness), so the credential never lands in the
+  // world-readable systemd-run argv (WIRE-RECONCILIATION item 19 — the old
+  // inline-value form is the exact pattern that leaked once).
+  if (process.env.OMG_MUSE_PROXY) argv.push(`--setenv=OMG_MUSE_PROXY`);
+  // Executor MCP (Sams connectie-hub op netcup-vps8000): every harness config
+  // references `Bearer ${EXECUTOR_MCP_TOKEN}`, so without this pass-through the
+  // header expands to an empty bearer and the server answers 401
+  // (AUTH_HEADER_REJECTED, measured 2026-09-05 on a Claude session).
+  // NAME-ONLY for the same reason (item 19 / 19a live-verified on the box).
+  if (process.env.EXECUTOR_MCP_TOKEN) argv.push(`--setenv=EXECUTOR_MCP_TOKEN`);
   if (opts.omgUser) argv.push(`--setenv=LFG_USER=${opts.omgUser}`);
-  for (const [key, value] of Object.entries(agentTmpEnv())) {
-    argv.push(`--setenv=${key}=${value}`);
+  for (const key of Object.keys(agentTmpEnv())) {
+    argv.push(`--setenv=${key}`);
+  }
+  // Item 31: LFG_MAC_* keys (bridge lease token, ssh target, namespaces,
+  // first request id) exist ONLY in the merged child env — they are absent
+  // from process.env, so the name-only loop above never forwards them and
+  // systemd-run would scrub them. Forward each key NAME-ONLY: systemd-run
+  // imports the value from its caller env, which spawnManagedHarness
+  // assembles with the real values. The token itself can never ride argv.
+  for (const key of Object.keys(opts.extraEnv ?? {})) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue; // never mangles argv shape
+    argv.push(`--setenv=${key}`);
   }
   return [...argv, "--", ...command];
 }
@@ -221,7 +277,7 @@ function containTmuxCommand(
   enabled: boolean | undefined,
   opts: AgentContainment,
 ): void {
-  if (!enabled) return;
+  if (process.platform !== "linux" && !enabled) return;
   const commandIndex = argv.indexOf(executable);
   if (commandIndex < 0) throw new Error(`agent executable not found in tmux argv: ${executable}`);
   argv.splice(commandIndex, argv.length - commandIndex, ...containedAgentCommand(argv.slice(commandIndex), opts));
@@ -230,13 +286,20 @@ function containTmuxCommand(
 export type ManagedHarnessSpawnResult = { ok: boolean; error?: string; pid?: number };
 
 // Headless SDK harnesses have their own durable command-file control plane, so
-// tmux adds no transport value. Launch them as ordinary detached children. The
-// lfg systemd unit uses KillMode=process, which lets these children survive a
-// serve restart exactly as the old tmux wrapper did; a host reboot is handled
+// tmux adds no transport value. Launch them as transient user services in the
+// agent slice (issue 521): KillMode=control-group reaps helper daemons when
+// the harness exits, and the units survive a serve restart as siblings of
+// omg.service rather than piling up as its children; a host reboot is handled
 // separately by the boot reconciliation journal in session-recovery.ts.
 function spawnManagedHarness(
   command: string[],
-  opts: AgentContainment & { containInAgentSlice?: boolean; sandbox?: SandboxMode; egressProxyUrl?: string },
+  opts: AgentContainment & {
+    containInAgentSlice?: boolean;
+    sandbox?: SandboxMode;
+    egressProxyUrl?: string;
+    /** Extra environment for mac-hosted harnesses (lease token etc; never argv). */
+    extraEnv?: Record<string, string>;
+  },
 ): ManagedHarnessSpawnResult {
   const sessionId = opts.omgSessionId?.trim() || undefined;
   const env: Record<string, string> = { ...process.env } as Record<string, string>;
@@ -244,8 +307,15 @@ function spawnManagedHarness(
   env.OMG_CAPABILITY_VERSION = OMG_CAPABILITY_VERSION;
   if (opts.omgUser) env.LFG_USER = opts.omgUser;
   else delete env.LFG_USER;
-  // Always name + idle-timeout the browser, including parent (non-slice) harness
-  // spawns. containInAgentSlice still only wraps subagents in systemd-run.
+  // Mac-hosted harnesses receive their bridge lease + ssh pins here. Env is
+  // process-private; the no-secret rule is about ARGV (world-readable).
+  if (opts.extraEnv) Object.assign(env, opts.extraEnv);
+  // Always name + idle-timeout the browser, including contained harness
+  // spawns. Since issue 521 parents run contained too: their own transient
+  // lfg-agent-*.service reaps the whole group (agent-browser included) when
+  // the harness exits, and survives an omg.service restart as a sibling
+  // unit. Browser profile/login state lives on disk under the
+  // session-named profile, so containment does not cost it.
   Object.assign(env, agentBrowserEnv(opts.name));
   Object.assign(env, agentTmpEnv());
   // Outbound network allowlist for a restricted role: point the harness at the
@@ -274,12 +344,14 @@ function spawnManagedHarness(
     console.error(`[sandbox] session ${opts.name} requested bwrap but ${sandboxed.reason}; running unsandboxed`);
   }
   const base = sandboxed.command;
-  const cmd = opts.containInAgentSlice
+  const cmd = process.platform === "linux" || opts.containInAgentSlice
     ? containedAgentCommand(base, opts, { pty: false })
     : base;
 
   // Process-isolated integration tests capture the launch contract without
-  // starting a real provider harness.
+  // starting a real provider harness. The LFG_MAC_* lease env is included so
+  // the item-31 sentinel can prove: value present in the CHILD env, name-only
+  // on the systemd-run argv, absent from this process's own env.
   const capture = process.env.LFG_TEST_HARNESS_CAPTURE;
   if (capture) {
     writeFileSync(capture, JSON.stringify({ cmd, cwd: opts.cwd, env: {
@@ -291,6 +363,7 @@ function spawnManagedHarness(
       HTTP_PROXY: env.HTTP_PROXY,
       HTTPS_PROXY: env.HTTPS_PROXY,
       NO_PROXY: env.NO_PROXY,
+      ...Object.fromEntries(Object.entries(env).filter(([k]) => k.startsWith("LFG_MAC_"))),
     } }));
     return { ok: true, pid: 424242 };
   }
@@ -1190,6 +1263,14 @@ export type ManagedAisdkSessionOptions = {
   egressProxyUrl?: string;
   claudeAccountId?: string;
   recoveredAt?: number;
+  /**
+   * Mac execution host (integration revision 2): the harness still runs
+   * locally, but its native provider subprocess streams to the Mac over
+   * ssh (src/mac-chat/**). The flag only travels on the HARNESS argv.
+   */
+  executionHost?: "agentbox" | "mac";
+  /** Extra harness environment (bridge lease token etc; never argv). */
+  extraEnv?: Record<string, string>;
 };
 
 export function managedAisdkSessionArgv(opts: ManagedAisdkSessionOptions): string[] {
@@ -1201,6 +1282,7 @@ export function managedAisdkSessionArgv(opts: ManagedAisdkSessionOptions): strin
     "--cwd", opts.cwd,
     "--managed-name", opts.name,
   ];
+  if (opts.executionHost === "mac") argv.push("--execution-host", "mac");
   if (opts.thinkingLevel) argv.push("--thinking-level", opts.thinkingLevel);
   if (opts.fastMode) argv.push("--fast-mode");
   if (opts.claudeAccountId) argv.push("--claude-account", opts.claudeAccountId);
@@ -1214,9 +1296,19 @@ export function spawnManagedAisdkSession(opts: ManagedAisdkSessionOptions): Mana
   // The provider drives the bundled claude binary, which still honors the trust
   // dialog — pre-accept it so the first turn doesn't hang.
   ensureFolderTrusted(opts.cwd);
-  // Spawn the harness module directly (not via the lfg CLI) so it has no
-  // dependency on the rest of the command surface.
-  const claudeAccountId = opts.claudeAccountId ?? resolveClaudeAccount()?.id;
+  // Mac-hosted sessions (item 22): the DEFAULT account id is the box's own
+  // primary login marker and is accepted through — the Mac's own signed-in
+  // login is the verified equivalent (no argv account flag crosses the wire;
+  // remote claude never sees a local account). Any CUSTOM account id is an
+  // explicit refusal here (defense in depth under the launcher's validation).
+  let claudeAccountId = opts.claudeAccountId ?? resolveClaudeAccount()?.id;
+  if (opts.executionHost === "mac" && claudeAccountId !== undefined && claudeAccountId !== DEFAULT_CLAUDE_ACCOUNT_ID) {
+    return {
+      ok: false,
+      error: `claude-account "${claudeAccountId}" is lokaal gebonden; de Mac-route ondersteunt alleen de eigen Mac-login (default) — expliciet onbeschikbaar`,
+    };
+  }
+  if (opts.executionHost === "mac") claudeAccountId = undefined;
   const argv = managedAisdkSessionArgv({ ...opts, claudeAccountId });
   return spawnManagedHarness(argv, {
     name: opts.name,
@@ -1226,6 +1318,7 @@ export function spawnManagedAisdkSession(opts: ManagedAisdkSessionOptions): Mana
     containInAgentSlice: opts.containInAgentSlice,
     sandbox: opts.sandbox,
     egressProxyUrl: opts.egressProxyUrl,
+    ...(opts.extraEnv ? { extraEnv: opts.extraEnv } : {}),
   });
 }
 
@@ -1235,6 +1328,7 @@ export function spawnManagedAisdkSession(opts: ManagedAisdkSessionOptions): Mana
 // than a deterministic --session id — codex assigns its thread id only after the
 // first turn, so the key is all we know up front (see the harness header).
 export type ManagedCodexAisdkSessionOptions = {
+  cyberAccessProgram?: import("./model-discovery.ts").CyberAccessProgram;
   name: string;
   cwd: string;
   prompt?: string;
@@ -1253,6 +1347,10 @@ export type ManagedCodexAisdkSessionOptions = {
   // fresh persistent thread — the harness seeds its threadId with it.
   resume?: string;
   recoveredAt?: number;
+  /** Mac execution host: native codex subprocess streams to the Mac (mac-chat). */
+  executionHost?: "agentbox" | "mac";
+  /** Extra harness environment (bridge lease token etc; never argv). */
+  extraEnv?: Record<string, string>;
 };
 
 export function managedCodexAisdkSessionArgv(opts: ManagedCodexAisdkSessionOptions): string[] {
@@ -1264,8 +1362,10 @@ export function managedCodexAisdkSessionArgv(opts: ManagedCodexAisdkSessionOptio
     "--cwd", opts.cwd,
     "--managed-name", opts.name,
   ];
+  if (opts.executionHost === "mac") argv.push("--execution-host", "mac");
   if (opts.thinkingLevel) argv.push("--thinking-level", opts.thinkingLevel);
   if (opts.serviceTier) argv.push("--service-tier", opts.serviceTier);
+  if (opts.cyberAccessProgram) argv.push("--cyber-access-program", opts.cyberAccessProgram);
   if (opts.resume) argv.push("--resume", opts.resume);
   if (opts.recoveredAt) argv.push("--recovered-at", String(opts.recoveredAt));
   const prompt = launchEnvelope(opts.prompt);
@@ -1290,6 +1390,7 @@ export function spawnManagedCodexAisdkSession(opts: ManagedCodexAisdkSessionOpti
     containInAgentSlice: opts.containInAgentSlice,
     sandbox: opts.sandbox,
     egressProxyUrl: opts.egressProxyUrl,
+    ...(opts.extraEnv ? { extraEnv: opts.extraEnv } : {}),
   });
 }
 

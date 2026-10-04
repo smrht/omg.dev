@@ -1,3 +1,4 @@
+import { preflightIsolationArchive, verifyIsolationTree } from "./omg-isolation-update.ts";
 import {
   accessSync,
   constants,
@@ -200,11 +201,13 @@ export async function installReleaseBundle(
   root: string,
   bun = process.execPath,
 ): Promise<{ dependenciesInstalled: boolean }> {
+  if (process.platform === "linux") await preflightIsolationArchive(archive);
   const modules = join(root, "node_modules");
   rmSync(modules, { recursive: true, force: true });
 
   const extract = await extractReleaseArchive(archive, root);
   if (!extract.ok) throw new Error(extract.stderr || "Could not extract the release bundle.");
+  if (process.platform === "linux") await verifyIsolationTree(root);
 
   if (hasEntries(modules)) return { dependenciesInstalled: false };
 

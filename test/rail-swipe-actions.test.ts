@@ -78,7 +78,9 @@ describe("the session row's swipe actions (RailItem)", () => {
 
   // The mobile list is the surface that offers it; the gesture is touch-only.
   test("the mobile list wires archive into its rows", () => {
-    expect(APP).toContain("onArchive={() => void archiveSession(sid)}");
+    // omg-fork: mobile rows guard archive away from shipped reviews, bot
+    // conversations and schedule spawns; the wiring itself must stay.
+    expect(APP).toContain("? () => void archiveSession(sid)");
     expect(APP).toContain('closeSessionRequest(sid, "mobile_swipe_archive")');
   });
 
@@ -87,7 +89,7 @@ describe("the session row's swipe actions (RailItem)", () => {
   test("archiving drops the row first and reconciles after", () => {
     const start = APP.indexOf("const archiveSession = useCallback(");
     expect(start).toBeGreaterThan(-1);
-    const body = APP.slice(start, start + 900);
+    const body = APP.slice(start, start + 1400);
     expect(body.indexOf("onRemove(sid);")).toBeLessThan(
       body.indexOf("closeSessionRequest"),
     );

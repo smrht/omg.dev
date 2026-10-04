@@ -1,51 +1,37 @@
 export const PROJECT_FILTER_STORAGE_KEY = "lfg_v2_project_filter";
-/**
- * How long a folder pick outlives its last change. The pick lives in
- * sessionStorage, so it already ends with the tab; this also ends it in a tab
- * a phone restores days later.
- */
-export const PROJECT_FILTER_TTL_MS = 60 * 60 * 1000;
 
 type ProjectFilterStorage = Pick<Storage, "getItem" | "setItem">;
 
-// sessionStorage, not localStorage. The folder picked here decides where the
-// next chat from Home runs, so a pick must not survive into another visit.
-// The 2026-09-29 walkthrough opened Home on an old test repo from days
-// before, and the first request would have gone into it.
+// localStorage, and raw strings, and deliberately so: the picked folder is a
+// preference of this browser that must survive restarts and app updates.
+// The 2026-09 upstream merge briefly moved this to expiring sessionStorage,
+// which silently dropped every existing pick on update — Sam's included.
+// A raw string cannot carry an expiry, which is the point.
 function browserStorage(): ProjectFilterStorage | null {
   try {
-    return typeof window === "undefined" ? null : window.sessionStorage;
+    return typeof window === "undefined" ? null : window.localStorage;
   } catch {
     return null;
   }
 }
 
-/** The folder picked in this visit, or the no-project scope. */
+/** The folder this browser last picked, or the all-projects scope. */
 export function readCachedProjectFilter(
   storage: ProjectFilterStorage | null = browserStorage(),
-  now: number = Date.now(),
 ): string {
   try {
-    const raw = storage?.getItem(PROJECT_FILTER_STORAGE_KEY);
-    if (!raw) return NO_PROJECT_FILTER;
-    const saved = JSON.parse(raw) as { value?: unknown; at?: unknown };
-    if (typeof saved.value !== "string" || !saved.value || typeof saved.at !== "number") {
-      return NO_PROJECT_FILTER;
-    }
-    if (now - saved.at >= PROJECT_FILTER_TTL_MS) return NO_PROJECT_FILTER;
-    return saved.value;
+    return storage?.getItem(PROJECT_FILTER_STORAGE_KEY) || "__all";
   } catch {
-    return NO_PROJECT_FILTER;
+    return "__all";
   }
 }
 
 export function cacheProjectFilter(
   projectFilter: string,
   storage: ProjectFilterStorage | null = browserStorage(),
-  now: number = Date.now(),
 ): void {
   try {
-    storage?.setItem(PROJECT_FILTER_STORAGE_KEY, JSON.stringify({ value: projectFilter, at: now }));
+    storage?.setItem(PROJECT_FILTER_STORAGE_KEY, projectFilter);
   } catch {
     // Storage can be unavailable in hardened/private browser contexts. The
     // current page still keeps the selection in React state.
@@ -56,7 +42,7 @@ export function cacheProjectFilter(
  * The filter value for chats that were started without a project.
  *
  * It cannot be the empty string the server stores on the session, because
- * `readCachedProjectFilter` reads "" back as "no saved value" and falls to
+ * `readCachedProjectFilter` reads "" back as no saved value and falls to
  * "__all". It also cannot be a real project key, so it carries the same
  * "__"-prefix as "__all". It matches the group key `groupNodesByProject`
  * already uses for the folder-less group, so the rail group header and the
@@ -131,9 +117,21 @@ export function resolveInitialProjectFilter(input: {
   saved: string;
   /** Every selectable value, as the rail lists them. */
   options: readonly string[];
+  preferred?: string | null;
+  /** Overview has a visible all-projects control, so retain that explicit scope. */
+  allowAll?: boolean;
 }): string {
-  const { saved, options } = input;
+  const { saved, options, preferred } = input;
   if (!options.length) return saved;
-  if (saved !== "__all" && options.includes(saved)) return saved;
+  if (input.allowAll && saved === "__all") return saved;
+  const has = (value: string | null | undefined): value is string =>
+    !!value && value !== "__all" && options.includes(value);
+  if (has(saved)) return saved;
+  if (has(preferred)) return preferred;
+  // Never unscoped by default: the rail has no "All" pill, and a folder
+  // nobody picked is where a new chat from Home would land. An unscoped
+  // filter, or a folder that has gone away, resolves to the no-project
+  // scope — the same scope a new chat from Home goes to unless a folder
+  // was picked in this visit. See resolveInitialProjectFilter's callers.
   return options.includes(NO_PROJECT_FILTER) ? NO_PROJECT_FILTER : options[0]!;
 }

@@ -1,4 +1,4 @@
-import { defaultModelForAgent, OMG_MODELS } from "./agent-catalog.ts";
+import { composeDevinModel, defaultModelForAgent, OMG_MODELS } from "./agent-catalog.ts";
 import {
   CODING_AGENT_ADAPTERS,
   type ActiveSessionAgentKind,
@@ -7,13 +7,19 @@ import {
   type CodingAgentProduct,
 } from "./coding-agent-adapters.ts";
 import {
+  guardExecutionHostLaunch,
+  type ExecutionHostId,
+} from "./execution-host.ts";
+import { launchMacHostedSession } from "./mac-chat/launch.ts";
+import { macBridgeHost } from "./mac-chat/bridge-host.ts";
+import {
   spawnManagedAisdkSession,
   spawnManagedCodexAisdkSession,
   spawnManagedCopilotSdkSession,
   spawnManagedCursorAcpSession,
-  spawnManagedDevinAcpSession,
   spawnManagedFxAcpSession,
   spawnManagedDeepseekAcpSession,
+  spawnManagedDevinAcpSession,
   spawnManagedGrokAcpSession,
   spawnManagedJcodeSdkSession,
   spawnManagedMuseMspSession,
@@ -24,6 +30,7 @@ import type { CodexServiceTier } from "./service-tier.ts";
 import type { SandboxMode } from "./sandbox/bwrap.ts";
 
 export type CodingAgentLaunchRequest = {
+  cyberAccessProgram?: import("./model-discovery.ts").CyberAccessProgram;
   agent: ActiveSessionAgentKind;
   name: string;
   cwd: string;
@@ -50,6 +57,21 @@ export type CodingAgentLaunchRequest = {
    * as sandbox.
    */
   egressProxyUrl?: string;
+  /**
+   * Role the session runs under (restricted roles carry containment). Local
+   * providers derive it from the owner row; the mac launch forwards it so an
+   * unsupported restricted role is REFUSED remotely, never promoted to owner.
+   */
+  role?: string;
+  /**
+   * Host this launch runs on (src/execution-host.ts). Missing is the legacy
+   * case and runs locally on the agentbox, exactly as before. "mac" passes
+   * the central guard and, when a fresh per-provider verified runtime is
+   * registered, hands the launch to the supervised adapter — never to a
+   * local provider. Every setting below is forwarded in full or explicitly
+   * refused there; nothing is silently dropped.
+   */
+  executionHost?: ExecutionHostId;
 };
 
 export type CodingAgentLaunchResult = {
@@ -111,6 +133,7 @@ export const ACTIVE_CODING_AGENT_PROVIDERS = {
       prompt: request.prompt,
       model: request.model ?? "gpt-5.5",
       key: request.sessionId,
+      cyberAccessProgram: request.cyberAccessProgram,
       thinkingLevel: request.thinkingLevel,
       serviceTier: request.serviceTier,
       omgSessionId: request.sessionId,
@@ -216,17 +239,37 @@ export const ACTIVE_CODING_AGENT_PROVIDERS = {
       omgUser: request.omgUser,
       containInAgentSlice: request.containInAgentSlice,
     })),
-  devin: provider("devin", (request) =>
-    spawnManagedDevinAcpSession({
+  devin: provider("devin", (request) => {
+    if (!request.model && !request.thinkingLevel && !request.fastMode) {
+      return spawnManagedDevinAcpSession({
+        name: request.name,
+        cwd: request.cwd,
+        prompt: request.prompt,
+        model: "adaptive",
+        key: request.sessionId,
+        omgSessionId: request.sessionId,
+        omgUser: request.omgUser,
+        containInAgentSlice: request.containInAgentSlice,
+      });
+    }
+    // Fast en denkniveau zijn variant-suffixen op de familieslug; composeer
+    // hier de exacte uid (de harness krijgt dan geen apart thinkingLevel).
+    const composed = composeDevinModel(
+      request.model ?? "adaptive",
+      request.thinkingLevel,
+      request.fastMode,
+    );
+    return spawnManagedDevinAcpSession({
       name: request.name,
       cwd: request.cwd,
       prompt: request.prompt,
-      model: request.model ?? "adaptive",
+      model: composed,
       key: request.sessionId,
       omgSessionId: request.sessionId,
       omgUser: request.omgUser,
       containInAgentSlice: request.containInAgentSlice,
-    })),
+    });
+  }),
   pi: provider("pi", (request) =>
     spawnManagedPiSession({
       name: request.name,
@@ -259,5 +302,39 @@ export const ACTIVE_CODING_AGENT_PROVIDERS = {
 export function launchCodingAgentSession(
   request: CodingAgentLaunchRequest,
 ): CodingAgentLaunchResult {
+  // Central host guard: every launch through this function passes it. Legacy
+  // requests without a host run locally, unchanged. A mac launch goes through
+  // the INTEGRATED route (src/mac-chat/launch.ts): the ordinary local harness
+  // spawns with --execution-host mac, the provider subprocess streams to the
+  // Mac over ssh, remote-init state is visible in the registry. It never
+  // degrades to a local provider spawn; missing pins/probe fail closed.
+  const decision = guardExecutionHostLaunch(request);
+  if (!decision.ok) return { ok: false, error: decision.error };
+  if (decision.transport === "adapter") {
+    const launched = launchMacHostedSession(
+      {
+        agent: request.agent,
+        sessionId: request.sessionId,
+        name: request.name,
+        cwd: request.cwd,
+        ...(request.prompt !== undefined ? { prompt: request.prompt } : {}),
+        ...(request.model !== undefined ? { model: request.model } : {}),
+        ...(request.thinkingLevel !== undefined ? { thinkingLevel: request.thinkingLevel } : {}),
+        ...(request.fastMode !== undefined ? { fastMode: request.fastMode } : {}),
+        ...(request.serviceTier !== undefined ? { serviceTier: request.serviceTier } : {}),
+        ...(request.cyberAccessProgram !== undefined ? { cyberAccessProgram: request.cyberAccessProgram } : {}),
+        ...(request.claudeAccountId !== undefined ? { claudeAccountId: request.claudeAccountId } : {}),
+        ...(request.resume !== undefined ? { resume: request.resume } : {}),
+        ...(request.omgUser !== null && request.omgUser !== undefined ? { omgUser: request.omgUser } : {}),
+        ...(request.containInAgentSlice !== undefined ? { containInAgentSlice: request.containInAgentSlice } : {}),
+        ...(request.sandbox !== undefined ? { sandbox: request.sandbox } : {}),
+        ...(request.egressProxyUrl !== undefined ? { egressProxyUrl: request.egressProxyUrl } : {}),
+        ...(request.role !== undefined ? { role: request.role } : {}),
+      },
+      macBridgeHost(),
+    );
+    if (launched.ok) return { ok: true, ...(launched.pid !== undefined ? { pid: launched.pid } : {}) };
+    return { ok: false, error: launched.error };
+  }
   return ACTIVE_CODING_AGENT_PROVIDERS[request.agent].launch(request);
 }

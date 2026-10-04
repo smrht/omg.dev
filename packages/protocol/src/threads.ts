@@ -85,12 +85,63 @@ export function mediaLabel(media: readonly ThreadMedia[] | undefined): string {
 
 export type ThreadProject = { cwd: string; name: string };
 
+/**
+ * The connected agent a thread's @omg replies and tasks run with. Null means
+ * no choice was made: the box's own defaults apply, and an unavailable default
+ * is reported differently from an unavailable explicit choice (the server owns
+ * that distinction; this type only carries what was stored).
+ */
+export type ThreadSelection = {
+  /** A coding-agent key, e.g. "aisdk" or "codex-aisdk". */
+  agent: string;
+  model: string;
+  thinkingLevel?: string | null;
+  /**
+   * Explicit cyber access program for Codex-family REPLIES ONLY (validated
+   * against live capability metadata before anything runs). Absent means
+   * automatic: the account's own default. Never travels into a started task.
+   */
+  cyberAccessProgram?: string | null;
+};
+
+/**
+ * Agent keys a thread can reply with: the ones a bounded tool-less completion
+ * adapter exists for (src/thread-completion.ts). "claude" and "codex" are kept
+ * although the connected catalog usually offers "aisdk"/"codex-aisdk" instead,
+ * so a stored choice or a mention never names an unknown key.
+ */
+export const THREAD_CHAT_AGENT_KEYS: readonly string[] = [
+  "claude",
+  "aisdk",
+  "codex",
+  "codex-aisdk",
+  "opencode",
+  "omg",
+];
+
+/** One pickable agent for a thread's model selection, as the server lists it. */
+export type ThreadSelectionOption = {
+  key: string;
+  label: string;
+  models: string[];
+  defaultModel: string;
+  thinkingLevels: string[];
+  thinkingLevelsByModel?: Record<string, string[]>;
+  /**
+   * Cyber access programs live metadata offers per model (Codex family).
+   * Absent or empty: no program may be picked for that model.
+   */
+  cyberAccessProgramsByModel?: Record<string, string[]>;
+};
+
 export type ThreadSummary = {
   id: string;
   title: string;
   createdAt: number;
   updatedAt: number;
   project: ThreadProject | null;
+  /** The thread's explicit agent/model choice, or null when none was made. */
+  selection?: ThreadSelection | null;
   lastMessage: Pick<ThreadMessage, "author" | "text" | "ts" | "media"> | null;
 };
 

@@ -3,6 +3,7 @@ import {
   answersForIndex,
   answersForText,
   isTrustedUploadPermission,
+  managedOpencodeServerOptions,
   pendingToPrompt,
   opencodePromptBody,
   permissionToPrompt,
@@ -11,6 +12,15 @@ import {
   toolPartMessages,
   trustAllPermissionEnv,
 } from "./opencode-aisdk-session.ts";
+
+describe("managed OpenCode server permissions", () => {
+  test("starts every managed child with full access", () => {
+    expect(managedOpencodeServerOptions()).toEqual({
+      port: 0,
+      config: { permission: "allow" },
+    });
+  });
+});
 
 describe("OpenCode model variants", () => {
   test("forwards the selected thinking level as OpenCode's prompt variant", () => {

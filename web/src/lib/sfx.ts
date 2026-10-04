@@ -34,8 +34,17 @@ function getCtx(): AudioContext | null {
     master.gain.value = 0.5; // overall ceiling; individual voices stay well under
     master.connect(ctx.destination);
   }
-  // Browsers suspend the context until a gesture; resume on demand.
-  if (ctx.state === "suspended") void ctx.resume();
+  // Browsers suspend the context until a gesture; resume on demand. resume()
+  // hands back a promise that can REJECT — iOS Safari rejects it with "Failed to
+  // start the audio device" whenever the OS audio session won't open (another app
+  // holds it, silent-switch edge cases, or the resume landed just outside the
+  // gesture window). A UI blip failing to play is fine; the bare `void` that used
+  // to be here turned it into an app-level unhandled rejection, so swallow it.
+  if (ctx.state === "suspended") {
+    // Normalized through Promise.resolve: legacy webkitAudioContext.resume()
+    // returns undefined rather than a promise.
+    void Promise.resolve(ctx.resume()).catch(() => {});
+  }
   return ctx;
 }
 

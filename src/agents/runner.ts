@@ -1,3 +1,5 @@
+// Agentbox isolation v1 (issue 1003)
+import { isolatedAutoBackend } from "../omg-isolation-runtime.ts";
 import { mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -167,7 +169,7 @@ function fmtChars(n: number): string {
 // installed binary + subscription auth); "cli" spawns `claude -p` directly.
 // Default flip (Task B): the fallback is now "ai-sdk" instead of "cli" — set
 // LFG_CLAUDE_BACKEND=cli to opt back into the direct-CLI path.
-async function pipeToClaude(
+export async function pipeToClaudeUncontained(
   prompt: string,
   log: (s: string) => void,
   backendOverride?: string,
@@ -391,7 +393,7 @@ export async function runAgent(
     };
   }
 
-  const report = await pipeToClaude(prompt, log, opts.backend, opts.model);
+  const report = await isolatedAutoBackend({ backend: opts.backend, model: opts.model }, prompt, process.cwd(), log, "report");
   const rPath = reportPathFor(name, date);
   await Bun.write(rPath, report);
   log(`[runner] wrote ${rPath} (${report.length} bytes)`);

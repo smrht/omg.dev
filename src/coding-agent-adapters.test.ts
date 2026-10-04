@@ -154,7 +154,10 @@ describe("coding agent adapter contract", () => {
       expect(option.defaultModel, agent).toBeTruthy();
       expect(item!.models.length, agent).toBeGreaterThan(0);
       expect(item!.defaultModel, agent).toBeTruthy();
-      expect(item!.thinkingLevels).toEqual([...(thinkingLevelsForAgent(agent) ?? [])]);
+      // Devin exposes fallback effort choices before its per-model discovery arrives.
+      expect(item!.thinkingLevels).toEqual(agent === "devin"
+        ? ["none", "low", "medium", "high", "xhigh", "max"]
+        : [...(thinkingLevelsForAgent(agent) ?? [])]);
     }
   });
 
@@ -310,11 +313,15 @@ describe("coding agent adapter contract", () => {
     expect(argv).toContain("--property=MemorySwapMax=0");
     expect(argv.some((part) => part.startsWith("--property=MemoryHigh="))).toBe(false);
     expect(argv).toContain("--setenv=LFG_SESSION_ID=session-id");
-    expect(argv).toContain("--setenv=AGENT_BROWSER_SESSION=lfg-test");
-    expect(argv).toContain(`--setenv=AGENT_BROWSER_IDLE_TIMEOUT_MS=${AGENT_BROWSER_IDLE_TIMEOUT_MS}`);
+    // systemd-run forwards browser/tmp derived env NAME-ONLY (item 19/31):
+    // values reach the child through the caller env (tmux session env or the
+    // harness spawn env), never through the world-readable argv.
+    expect(argv).toContain("--setenv=AGENT_BROWSER_SESSION");
+    expect(argv).toContain("--setenv=AGENT_BROWSER_IDLE_TIMEOUT_MS");
     expect(argv.some((part) => part.startsWith("--setenv=DBUS_SESSION_BUS_ADDRESS="))).toBe(true);
-    for (const [key, value] of Object.entries(agentTmpEnv())) {
-      expect(argv).toContain(`--setenv=${key}=${value}`);
+    for (const key of Object.keys(agentTmpEnv())) {
+      expect(argv).toContain(`--setenv=${key}`);
+      expect(argv).not.toContain(`--setenv=${key}=`);
     }
     expect(argv.slice(-3)).toEqual(["/usr/bin/example-agent", "--task", "hello"]);
   });

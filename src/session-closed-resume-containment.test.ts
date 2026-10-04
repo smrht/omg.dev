@@ -1,3 +1,4 @@
+import { resetSettingsDbConnectionForTests } from "./settings.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -39,6 +40,7 @@ describe("closed session resume containment", () => {
     capture = join(root, "launch.json");
     PATHS.data = join(root, "data");
     process.env.LFG_TEST_HARNESS_CAPTURE = capture;
+    resetSettingsDbConnectionForTests();
     resetManagedRegistryForTests();
     resetSessionContainmentForTests();
   });
@@ -46,6 +48,7 @@ describe("closed session resume containment", () => {
   afterEach(() => {
     delete process.env.LFG_TEST_HARNESS_CAPTURE;
     setRecoveryEgressProxy(null);
+    resetSettingsDbConnectionForTests();
     resetManagedRegistryForTests();
     resetSessionContainmentForTests();
     PATHS.data = originalData;
@@ -82,10 +85,12 @@ describe("closed session resume containment", () => {
     expect(cmd[0]).toMatch(/systemd-run$/);
     expect(cmd).toContain(`--unit=lfg-agent-${NEW}`);
     expect(cmd).toContain("--slice=lfg-agents.slice");
-    expect(cmd).toContain("--property=MemoryMax=4G");
+    expect(cmd).toContain("--property=MemoryMax=8G");
   }
 
   function expectNoSlice(cmd: string[]) {
+    // Agentbox deliberately contains all Linux parents, including legacy opt-outs.
+    if (linux) return expectSlice(cmd);
     expect(cmd.some((part) => part.endsWith("systemd-run"))).toBe(false);
   }
 

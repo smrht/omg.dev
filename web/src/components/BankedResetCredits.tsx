@@ -68,8 +68,11 @@ export function BankedResetCredits({
   timeZone,
   onUse,
   usingCreditId,
+  providerLabel = "Codex",
 }: {
   value: RateLimitResetCredits;
+  /** Name used in the copy ("Codex", "Claude"). */
+  providerLabel?: string;
   /** Test and embedded-host override. The normal app uses the device locale. */
   locale?: string;
   /** Test and embedded-host override. The normal app uses the device timezone. */
@@ -83,7 +86,7 @@ export function BankedResetCredits({
     : Math.max(0, value.availableCount - rows.length);
 
   return (
-    <div className="space-y-3" aria-label="Banked Codex resets">
+    <div className="space-y-3" aria-label={`Banked ${providerLabel} resets`}>
       <div className="rounded-xl bg-primary/10 px-3 py-2">
         <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
           Banked resets
@@ -110,15 +113,15 @@ export function BankedResetCredits({
       {missingDetails > 0 ? (
         <p className="text-[11px] text-muted-foreground/70">
           {rows == null
-            ? "Codex returned the total, but no expiry details."
-            : `${missingDetails} more ${missingDetails === 1 ? "reset" : "resets"}; Codex did not return their expiry details.`}
+            ? `${providerLabel} returned the total, but no expiry details.`
+            : `${missingDetails} more ${missingDetails === 1 ? "reset" : "resets"}; ${providerLabel} did not return their expiry details.`}
         </p>
       ) : value.availableCount === 0 ? (
         <p className="text-[11px] text-muted-foreground/70">No banked resets available.</p>
       ) : null}
       {onUse ? (
         <p className="text-[11px] text-muted-foreground/70">
-          Using one immediately resets your current Codex rate-limit window.
+          Using one immediately resets your current {providerLabel} rate-limit window.
         </p>
       ) : null}
     </div>

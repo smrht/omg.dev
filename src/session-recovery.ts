@@ -36,6 +36,9 @@ import { userAssignments } from "./users.ts";
 import { getSessionContainment } from "./session-containment-record.ts";
 import { listConversations } from "./conversations.ts";
 import { CODING_AGENT_ADAPTERS } from "./coding-agent-adapters.ts";
+import { guardExecutionHostLaunch, type ExecutionHostId } from "./execution-host.ts";
+import { launchMacHostedSession } from "./mac-chat/launch.ts";
+import { macBridgeHost } from "./mac-chat/bridge-host.ts";
 
 export { managedContainment };
 
@@ -65,6 +68,19 @@ function recoverJcodeSessions(bootId: string, log: (line: string) => void): numb
     // every serve restart.
     if (row.recoveryClaimBootId === bootId) continue;
     if (tmuxHasSession(row.tmuxName)) continue;
+    // Central host guard, before the mutating claim patch: a mac-hosted row
+    // never comes back as a local jcode pane, and jcode is not a mac-capable
+    // provider, so a mac host here fails closed either way.
+    if (row.executionHost === "mac") {
+      const decision = guardExecutionHostLaunch({ agent: "jcode", executionHost: row.executionHost });
+      patchManaged(row.tmuxName, {
+        launchState: "failed",
+        launchError: decision.ok ? "mac-hosted jcode recovery is not supported" : decision.error,
+        interruptedAt: Date.now(),
+      });
+      log(`[session-recovery] jcode refused for mac-hosted row ${row.tmuxName}`);
+      continue;
+    }
     // The worktree sweeper reclaims directories of finished sessions. Resuming
     // into a missing cwd cannot work, so leave the row for manual triage.
     if (!existsSync(row.cwd)) continue;
@@ -212,14 +228,85 @@ export function coldResumeContainment(
   };
 }
 
+/**
+ * The host a cold resume must reuse: the newest owner row for any of the ids,
+ * else the durable containment record kept after close. Neither present is
+ * the legacy case — agentbox, the box itself. A running session never
+ * changes host; callers refuse a request that names a different one.
+ */
+export function coldResumeExecutionHost(
+  ids: Array<string | null | undefined>,
+  rows: ManagedSession[] = listManaged(),
+): ExecutionHostId {
+  const wanted = new Set(ids.filter((id): id is string => !!id));
+  const prior = rows
+    .filter(
+      (row) =>
+        row.executionHost &&
+        ((row.sessionId && wanted.has(row.sessionId)) || (row.nativeSessionId && wanted.has(row.nativeSessionId))),
+    )
+    .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))[0];
+  if (prior?.executionHost) return prior.executionHost;
+  const record = getSessionContainment([...wanted]);
+  return record?.executionHost ?? "agentbox";
+}
+
 export function launchRecovered(
   entry: AisdkEntry,
   managed: ManagedSession,
   recoveredAt: number,
   assignedUser: string | null,
 ): ManagedHarnessSpawnResult {
+  // Central host guard: recovery/respawn reuses the host the session first
+  // launched on. Legacy rows (no host) run locally exactly as before; a
+  // mac-hosted row either goes through the verified adapter or fails closed.
+  // It never falls back to a local provider spawn. The owner row's agent is
+  // the session identity the API validated at creation; the registry entry
+  // only says which harness wrote it.
+  const hostDecision = guardExecutionHostLaunch({
+    agent: managed.agent ?? entry.agent,
+    executionHost: managed.executionHost,
+    sessionId: managed.sessionId ?? entry.sessionId,
+  });
+  if (!hostDecision.ok) return { ok: false, error: hostDecision.error };
   const containment = managedContainment(managed);
   const omgSessionId = managed.sessionId || entry.sessionId;
+  if (hostDecision.transport === "adapter") {
+    // MAC ROUTE (integration revision 2): recovery respawns the SAME local
+    // harness with --execution-host mac; the provider subprocess streams to
+    // the Mac. Full recorded settings are validated against the provider
+    // record inside the launcher (claudeAccountId always refused remotely,
+    // never an account copy); the native thread/session id rides --resume.
+    const agentKind = managed.agent === "codex" ? "codex-aisdk" : managed.agent === "claude" ? "aisdk" : managed.agent;
+    if (agentKind !== "aisdk" && agentKind !== "codex-aisdk") {
+      return { ok: false, error: `mac-hosted recovery is niet ondersteund voor "${agentKind}"` };
+    }
+    const launched = launchMacHostedSession(
+      {
+        agent: agentKind,
+        sessionId: omgSessionId,
+        name: managed.tmuxName,
+        cwd: managed.cwd || entry.cwd,
+        model: managed.model || entry.model,
+        ...(entry.thinkingLevel ?? managed.thinkingLevel ?? undefined) !== undefined ? { thinkingLevel: entry.thinkingLevel ?? managed.thinkingLevel ?? undefined } : {},
+        ...(managed.fastMode ?? entry.fastMode ?? undefined) !== undefined ? { fastMode: managed.fastMode ?? entry.fastMode ?? undefined } : {},
+        ...(managed.serviceTier ?? entry.serviceTier ?? undefined) !== undefined ? { serviceTier: managed.serviceTier ?? entry.serviceTier ?? undefined } : {},
+        ...(managed.cyberAccessProgram ?? entry.cyberAccessProgram ?? undefined) !== undefined ? { cyberAccessProgram: managed.cyberAccessProgram ?? entry.cyberAccessProgram ?? undefined } : {},
+        ...(managed.claudeAccountId !== undefined ? { claudeAccountId: managed.claudeAccountId } : {}),
+        ...(entry.threadId ? { resume: entry.threadId } : {}),
+        omgUser: assignedUser,
+        ...(containment.agentSlice !== undefined ? { containInAgentSlice: containment.agentSlice } : {}),
+        ...(containment.sandbox !== undefined ? { sandbox: containment.sandbox } : {}),
+        ...(containment.egressProxy
+          ? { egressProxyUrl: egressProxyUrlFor?.(omgSessionId) ?? "egress-restricted" }
+          : {}),
+        ...(managed.role !== undefined ? { role: managed.role } : {}),
+      },
+      macBridgeHost(),
+    );
+    if (launched.ok) return { ok: true, ...(launched.pid !== undefined ? { pid: launched.pid } : {}) };
+    return { ok: false, error: launched.error };
+  }
   const common = {
     name: managed.tmuxName,
     cwd: managed.cwd || entry.cwd,
@@ -241,6 +328,7 @@ export function launchRecovered(
       resume: entry.threadId,
       thinkingLevel: entry.thinkingLevel ?? undefined,
       serviceTier: managed.serviceTier ?? entry.serviceTier ?? undefined,
+      cyberAccessProgram: entry.cyberAccessProgram ?? managed.cyberAccessProgram ?? undefined,
     });
   }
   if (entry.agent === "opencode" || entry.agent === "omg") {

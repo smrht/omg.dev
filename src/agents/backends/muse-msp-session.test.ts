@@ -3,14 +3,18 @@ import {
   MspClient,
   applyMuseViewEvent,
   museApprovalMode,
+  museAutoApprovalChoice,
   museReasoningEffort,
   museProviderId,
   museServeArgv,
   museSessionStartParams,
+  museSetApprovalModeParams,
   museTurnInput,
   museUserInputAnswers,
   newMuseTurnState,
   uuidv7,
+  MUSE_STREAM_STALL_MS,
+  isMuseStreamStalled,
 } from "./muse-msp-session.ts";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -64,6 +68,25 @@ describe("muse launch vocabulary", () => {
     expect(museApprovalMode({})).toBe("allowAll");
     expect(museApprovalMode({ LFG_MUSE_APPROVAL_MODE: "onRequest" })).toBe("onRequest");
     expect(museApprovalMode({ LFG_MUSE_APPROVAL_MODE: "yolo" })).toBe("allowAll");
+  });
+
+  test("allowAll answers the MCP tool approval muse raises anyway, session-wide first", () => {
+    const choices = [
+      { choiceId: "allow_once", label: "Allow once", decision: "approved" },
+      { choiceId: "allow_session", label: "Allow for this session", decision: "approvedForSession" },
+      { choiceId: "abort", label: "Reject", decision: "abort" },
+    ];
+    expect(museAutoApprovalChoice(choices, "allowAll")?.choiceId).toBe("allow_session");
+    expect(museAutoApprovalChoice(choices.filter((c) => c.choiceId !== "allow_session"), "allowAll")?.choiceId).toBe("allow_once");
+    expect(museAutoApprovalChoice(choices, "onRequest")).toBeUndefined();
+    expect(museAutoApprovalChoice([{ choiceId: "abort", label: "Reject", decision: "abort" }], "allowAll")).toBeUndefined();
+  });
+
+  test("resume re-selects the configured approval mode via setApprovalMode", () => {
+    const params = museSetApprovalModeParams("sess-1", {});
+    expect(params).toMatchObject({ sessionId: "sess-1", mode: "allowAll" });
+    expect(typeof params.commandId).toBe("string");
+    expect(museSetApprovalModeParams("sess-1", { LFG_MUSE_APPROVAL_MODE: "onRequest" })).toMatchObject({ mode: "onRequest" });
   });
 });
 
@@ -198,5 +221,24 @@ describe("museTurnInput", () => {
       { type: "text", text: `Kijk\n\nAttached files:\n- b.pdf: ${pdf}` },
       { type: "image", mediaType: "image/png", base64Data: "AQID" },
     ]);
+  });
+});
+
+describe("muse view-stream stall detection", () => {
+  const BASE = 1_000_000;
+
+  test("fires once an open turn reaches the silence bound", () => {
+    expect(isMuseStreamStalled({ turnOpen: true, pendingPrompts: 0, lastEventAt: BASE, now: BASE + MUSE_STREAM_STALL_MS })).toBe(true);
+    expect(isMuseStreamStalled({ turnOpen: true, pendingPrompts: 0, lastEventAt: BASE, now: BASE + MUSE_STREAM_STALL_MS - 1 })).toBe(false);
+  });
+
+  test("never fires while idle or while a dashboard prompt waits for the human", () => {
+    const late = { lastEventAt: BASE, now: BASE + MUSE_STREAM_STALL_MS * 3 };
+    expect(isMuseStreamStalled({ ...late, turnOpen: false, pendingPrompts: 0 })).toBe(false);
+    expect(isMuseStreamStalled({ ...late, turnOpen: true, pendingPrompts: 1 })).toBe(false);
+  });
+
+  test("honours a custom bound", () => {
+    expect(isMuseStreamStalled({ turnOpen: true, pendingPrompts: 0, lastEventAt: BASE, now: BASE + 5_000, stallMs: 5_000 })).toBe(true);
   });
 });

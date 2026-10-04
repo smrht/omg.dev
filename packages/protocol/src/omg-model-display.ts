@@ -95,6 +95,21 @@ export function parseOmgModel(id: string | null | undefined): OmgModelInfo | nul
 }
 
 /**
+ * Claude CLI family aliases and the release each one lands on today. The
+ * alias stays the wire value (the CLI, the Agent SDK and `/model` all speak
+ * it); the picker shows the release so a reader can tell WHICH opus they get.
+ * Measured on claude 2.1.284 (2026-09-28): `sonnet` still lands on Sonnet 5;
+ * Sonnet 5.5 is the pinned `claude-sonnet-5-5` row. Bump when Anthropic moves
+ * an alias. Full ids fall through to claudeModelLabel.
+ */
+export const CLAUDE_ALIAS_LABELS: Record<string, string> = {
+  opus: "Opus 5.5",
+  fable: "Fable 5.1",
+  sonnet: "Sonnet 5",
+  haiku: "Haiku 4.5",
+};
+
+/**
  * Claude CLI ids and aliases: "claude-opus-5-5" -> "Opus 5.5", "opus" ->
  * "Opus". These only appear under a Claude agent, so the name drops "Claude".
  * Hosted omg ids keep it, because the omg agent mixes providers. Null for
@@ -124,13 +139,13 @@ export function codexModelLabel(id: string | null | undefined): string | null {
  * rule (codex, cursor, and other agents) pass through unchanged.
  */
 export function omgModelLabel(id: string | null | undefined): string {
-  return parseOmgModel(id)?.label ?? claudeModelLabel(id) ?? codexModelLabel(id) ?? (id ?? "");
+  return parseOmgModel(id)?.label ?? (id ? CLAUDE_ALIAS_LABELS[id] : undefined) ?? claudeModelLabel(id) ?? codexModelLabel(id) ?? (id ?? "");
 }
 
 /** Lower-case text a filter box should match: the id and the short name. */
 export function omgModelSearchText(id: string): string {
   const info = parseOmgModel(id);
   if (info) return `${id} ${info.providerLabel} ${info.label}`.toLowerCase();
-  const label = claudeModelLabel(id) ?? codexModelLabel(id);
+  const label = CLAUDE_ALIAS_LABELS[id] ?? claudeModelLabel(id) ?? codexModelLabel(id);
   return (label ? `${id} ${label}` : id).toLowerCase();
 }

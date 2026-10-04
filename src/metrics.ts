@@ -12,7 +12,7 @@
 // rather than breaking the panel.
 
 import { readFile } from "node:fs/promises";
-import { cpus, freemem, loadavg, totalmem } from "node:os";
+import { cpus, freemem, totalmem } from "node:os";
 
 export type PressureKind = "cpu" | "memory" | "io";
 
@@ -22,7 +22,7 @@ export type PressureReading = { some10: number; full10: number } | null;
 
 export type MetricSample = {
   t: number;
-  cpuPct: number; // load1 normalised by core count, clamped to 100
+  cpuPct: number; // busy share of cpus().times deltas, clamped 0-100; 0 = no valid delta yet
   memPct: number; // host RAM in use
   rxBps: number; // network bytes/sec in
   txBps: number; // network bytes/sec out
@@ -37,6 +37,44 @@ const SAMPLE_MS = 5_000;
 const history: MetricSample[] = [];
 let timer: ReturnType<typeof setInterval> | null = null;
 let lastNet: { t: number; rx: number; tx: number } | null = null;
+
+// Real CPU busy share from successive cpus().times deltas. The old proxy
+// (load1 / cores) read "100%" the moment load matched the core count, even
+// with every core idle. Cumulative counters need two samples: the first
+// read, a core-count change or a counter reset (VM migration, /proc restart)
+// has no valid delta, so we report 0 instead of a fake spike. cpuPct keeps
+// its `number` type in MetricSample, so "no valid delta yet" is 0 by
+// design — not null.
+let lastCpu: { cores: number; total: number; idle: number } | null = null;
+
+function cpuBusyPct(): number {
+  const times = cpus().map((c) => c.times);
+  const cores = times.length;
+  if (cores < 1) {
+    // A gap in cpus() (tight sandbox) must not average across the missing
+    // interval: drop the baseline so the next real sample re-arms cleanly.
+    lastCpu = null;
+    return 0;
+  }
+  let total = 0;
+  let idle = 0;
+  for (const t of times) {
+    idle += t.idle;
+    total += t.user + t.nice + t.sys + t.idle + t.irq;
+  }
+  let pct = 0;
+  if (lastCpu && lastCpu.cores === cores) {
+    const dTotal = total - lastCpu.total;
+    const dIdle = idle - lastCpu.idle;
+    // dIdle < 0 or dIdle > dTotal means the counters moved implausibly
+    // (reset/migration): report 0 and re-baseline instead of spiking.
+    if (dTotal > 0 && dIdle >= 0 && dIdle <= dTotal) {
+      pct = Math.min(100, Math.max(0, Math.round(((dTotal - dIdle) / dTotal) * 100)));
+    }
+  }
+  lastCpu = { cores, total, idle };
+  return pct;
+}
 
 // Parse one /proc/pressure/<kind> file. Format:
 //   some avg10=0.00 avg60=0.00 avg300=0.00 total=0
@@ -96,8 +134,6 @@ async function sample(): Promise<void> {
   const now = Date.now();
   const total = totalmem();
   const free = freemem();
-  const cores = Math.max(1, cpus().length);
-  const [load1] = loadavg();
 
   let rxBps = 0;
   let txBps = 0;
@@ -118,7 +154,7 @@ async function sample(): Promise<void> {
 
   history.push({
     t: now,
-    cpuPct: Math.min(100, Math.round((load1 / cores) * 100)),
+    cpuPct: cpuBusyPct(),
     memPct: total > 0 ? Math.round(((total - free) / total) * 100) : 0,
     rxBps: Math.round(rxBps),
     txBps: Math.round(txBps),

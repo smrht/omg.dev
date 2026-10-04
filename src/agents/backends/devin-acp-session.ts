@@ -4,8 +4,12 @@
 // prompts share context and cancellation stays immediate. Credentials come from
 // `devin auth login` (~/.local/share/devin/credentials.toml) or WINDSURF_API_KEY.
 import { spawn } from "node:child_process";
+import { appendFileSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import { composeDevinFusionModel, isDevinFusionCombo } from "../../agent-catalog.ts";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { PATHS } from "../../config.ts";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import {
@@ -35,7 +39,16 @@ export function devinHarnessArgv(model: string): string[] {
 export async function cmdDevinAcpSession(argv: string[]): Promise<void> {
   const key = arg(argv, "--key");
   const cwd = arg(argv, "--cwd") ?? process.cwd();
-  const model = arg(argv, "--model") ?? "adaptive";
+  const requestedModel = arg(argv, "--model") ?? "adaptive";
+  const thinkingLevel = arg(argv, "--thinking-level");
+  // Devin expresses thinking level as a variant suffix on the family slug
+  // (claude-opus-5 + high -> claude-opus-5-high). The adaptive router picks
+  // its own level, so it never takes a suffix.
+  const model = isDevinFusionCombo(requestedModel)
+    ? composeDevinFusionModel(requestedModel, thinkingLevel ?? undefined)
+    : thinkingLevel && requestedModel !== "adaptive"
+      ? `${requestedModel}-${thinkingLevel}`
+      : requestedModel;
   const managedName = arg(argv, "--managed-name") ?? "";
   const recoveredAt = Number(arg(argv, "--recovered-at")) || null;
   const separator = argv.indexOf("--");
@@ -56,6 +69,8 @@ export async function cmdDevinAcpSession(argv: string[]): Promise<void> {
         env: {
           ...process.env,
           DEVIN_MODEL: model,
+          // Autopilot: Devin draait volledig autonomous, geen per-actie goedkeuring.
+          DEVIN_PERMISSION_MODE: process.env.DEVIN_PERMISSION_MODE || "bypass",
         },
         stdio: ["pipe", "pipe", "inherit"],
       });
@@ -64,20 +79,20 @@ export async function cmdDevinAcpSession(argv: string[]): Promise<void> {
         Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
         Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
       );
-      const state: AcpUpdateState = { draft: "", thought: "", replaying: false };
+      const state: AcpUpdateState & { lastUsageFingerprint?: string } = { draft: "", thought: "", replaying: false };
       const app = acp.client({ name: "omg.dev" })
         .onRequest(acp.methods.client.session.requestPermission, async ({ params }) => {
-          const choices = params.options.map((option) => ({
-            label: option.name ?? option.optionId,
-            description: option.kind,
-          }));
-          const selected = await sink.ask(
-            params.toolCall.title ?? "Devin tool permission",
-            choices,
-            "Devin permission",
-          );
-          if (selected == null) return { outcome: { outcome: "cancelled" } };
-          return { outcome: { outcome: "selected", optionId: params.options[selected]!.optionId } };
+          // Autopilot: keur tool-permissions zonder vragen goed. Liever een
+          // "always"-achtige optie (blijft binnen de sessie geldig) dan een
+          // eenmalige; anders de eerste optie.
+          const options = params.options ?? [];
+          const preferred =
+            options.find((option) => /always|bypass|yolo/i.test(option.optionId)) ??
+            options.find((option) => /always|bypass|yolo/i.test(option.name ?? "")) ??
+            options.find((option) => /proceed|allow|accept|yes/i.test(option.optionId)) ??
+            options[0];
+          if (!preferred) return { outcome: { outcome: "cancelled" } };
+          return { outcome: { outcome: "selected", optionId: preferred.optionId } };
         })
         .onRequest(acp.methods.client.fs.readTextFile, async ({ params }) => ({
           content: await Bun.file(params.path).text(),
@@ -87,6 +102,50 @@ export async function cmdDevinAcpSession(argv: string[]): Promise<void> {
           return {};
         })
         .onNotification(acp.methods.client.session.update, async ({ params }) => {
+          // Devin reports live token usage as a usage_update notification; keep
+          // the latest snapshot on disk for the session-token-usage endpoint.
+          const update = params.update as {
+            sessionUpdate?: string;
+            used?: number;
+            size?: number;
+            _meta?: Record<string, number>;
+          };
+          if (update?.sessionUpdate === "usage_update") {
+            try {
+              const usageDir = join(PATHS.data, "devin-usage");
+              await mkdir(usageDir, { recursive: true });
+              const turn = {
+                inputTokens: update._meta?.["cognition.ai/inputTokens"] ?? null,
+                outputTokens: update._meta?.["cognition.ai/outputTokens"] ?? null,
+                cachedReadTokens: update._meta?.["cognition.ai/cachedReadTokens"] ?? null,
+                cachedWriteTokens: update._meta?.["cognition.ai/cachedWriteTokens"] ?? null,
+              };
+              await Bun.write(
+                join(usageDir, `${key}.json`),
+                JSON.stringify({
+                  updatedAt: Date.now(),
+                  used: update.used ?? null,
+                  size: update.size ?? null,
+                  ...turn,
+                }),
+              );
+              // Devin has no account-level usage API (gemeten 15-09-2026: v3
+              // 404, enterprise 403), so the picker's usage source is this
+              // box's own ledger: one line per turn. Devin emits the same
+              // usage_update twice per turn (second one tagged with
+              // subagent_context), hence the dedupe on identical numbers.
+              const fingerprint = JSON.stringify(turn);
+              if (fingerprint !== state.lastUsageFingerprint) {
+                state.lastUsageFingerprint = fingerprint;
+                appendFileSync(
+                  join(usageDir, "ledger.jsonl"),
+                  JSON.stringify({ at: Date.now(), key, model, ...turn }) + "\n",
+                );
+              }
+            } catch {
+              // Usage is cosmetic: never break a turn over a snapshot write.
+            }
+          }
           applyAcpSessionUpdate(params.update, sink, state);
         });
       const connection = app.connect(stream);

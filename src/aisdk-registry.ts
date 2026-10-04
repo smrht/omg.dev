@@ -15,10 +15,12 @@ import {
   statSync,
   appendFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { PATHS } from "./config.ts";
+import { agentUnitName } from "./agent-unit-oom.ts";
 import { removeCursor } from "./agents/backends/cmd-tail.ts";
 import type { CodexServiceTier } from "./service-tier.ts";
+import type { CyberAccessProgram } from "./model-discovery.ts";
 
 // Resolved per call, not captured at import. Tests point PATHS.data at a temp
 // dir after this module loads; a captured constant made them read and write the
@@ -95,10 +97,38 @@ export type AisdkEntry = {
   // The Claude harness leaves this undefined — the deterministic sessionId
   // already IS its transcript id.
   threadId?: string | null;
+  // Explicit cyber access program chosen for a managed codex-aisdk session.
+  // null/absent = automatic (the account default, which is standard). "off"
+  // does not exist as a state: the control plane sends an explicit "standard".
+  cyberAccessProgram?: CyberAccessProgram | null;
+  // Marker written ONLY by harness builds that understand the
+  // set_cyber_access_program command. Older codex harnesses omit it; the
+  // control plane reads this to reject program changes with an upgrade hint
+  // instead of silently dropping the command on the floor.
+  cyberAccessProgramControl?: boolean;
   // Pending interactive question for headless harnesses (OpenCode `question`
   // tool). Live-ws publishes this as a session `prompt` event; answer/dismiss
   // route through the command file. Null/absent when no question is open.
   prompt?: AisdkPrompt | null;
+  // Execution host of this harness (mac-headchat integration). Absent/null
+  // = this Agentbox (the only case before the contract existed). A "mac"
+  // entry is still an ordinary LOCAL harness process (harnessPid is local);
+  // only the native provider subprocess runs remotely over the stream
+  // transport (src/mac-chat/**).
+  executionHost?: "agentbox" | "mac" | null;
+  // Remote provider-init state for a mac-hosted harness: written "pending"
+  // at spawn, flipped by the harness when the first stream handshake answers
+  // (ready carries remotePid/scratch; failed carries a sanitized reason).
+  // "unknown" means the transport errored after send — reconcile by
+  // requestId, never auto-retry.
+  remoteInit?: {
+    state: "pending" | "ready" | "failed" | "unknown";
+    requestId?: string | null;
+    remotePid?: number | null;
+    scratch?: string | null;
+    reason?: string | null;
+    updatedAt?: number;
+  } | null;
 };
 
 export type AisdkCommand =
@@ -111,7 +141,12 @@ export type AisdkCommand =
   // OpenCode (and future headless) interactive questions — option index is the
   // 0-based index into the registry prompt.options array.
   | { type: "answer"; index: number }
-  | { type: "dismiss" };
+  | { type: "dismiss" }
+  // Explicit cyber access program for a codex-aisdk session. Validated by the
+  // harness against live discovery metadata; an incompatible value is
+  // surfaced visibly and never silently downgraded. Takes effect on the NEXT
+  // turn, so an in-flight request keeps the program it froze.
+  | { type: "set_cyber_access_program"; cyberAccessProgram: CyberAccessProgram };
 
 function entryPath(sessionId: string): string {
   return join(dir(), `${sessionId}.json`);
@@ -170,6 +205,27 @@ function readEntryAt(path: string): AisdkEntry | null {
   if (hit && hit.mtimeNs === mtimeNs && hit.size === size) return hit.entry;
   try {
     const entry = JSON.parse(readFileSync(path, "utf8")) as AisdkEntry;
+    // Canonical identity + minimum shape, and nothing more. A registry row
+    // lives at exactly `<sessionId>.json` and every entry any backend has
+    // written carries a positive integer harnessPid. Auxiliary journals that
+    // share this directory fail BOTH tests: the mac launcher's
+    // <sid>.macstart.json (src/mac-chat/pending.ts) carries the same sessionId
+    // but no harnessPid, and its filename stem is not the id. Live
+    // 2026-10-04: a blind cast let findEntryByAnyId pick that journal as a
+    // phantom entry (harnessPid undefined ⇒ "already exited"), so a codex
+    // close removed the registry while the real harness kept running.
+    // tmuxName and every newer field stay optional: legacy fixture shapes
+    // (see aisdk-registry-cache.test.ts) must keep validating unchanged.
+    // A file that fails this is not an entry — never cached, never returned,
+    // and patchEntry stays a no-op instead of resurrecting it.
+    if (
+      typeof entry?.sessionId !== "string" || !entry.sessionId ||
+      !Number.isInteger(entry.harnessPid) || (entry.harnessPid as number) <= 0 ||
+      basename(path, ".json") !== entry.sessionId
+    ) {
+      entryCache.delete(path);
+      return null;
+    }
     entryCache.set(path, { mtimeNs, size, entry });
     return entry;
   } catch {
@@ -227,7 +283,7 @@ export function listEntries(): AisdkEntry[] {
   const out: AisdkEntry[] = [];
   const seen = new Set<string>();
   for (const f of files) {
-    if (!f.endsWith(".json")) continue;
+    if (!f.endsWith(".json")) continue; // readEntryAt rejects non-entries by identity+shape
     const path = join(root, f);
     seen.add(path);
     const e = readEntryAt(path);
@@ -244,8 +300,13 @@ export function listEntries(): AisdkEntry[] {
 // threadId. The live view surfaces a codex-aisdk session under its threadId
 // once known (so it deep-links to the rollout transcript), but the harness's
 // command file is named by the control-plane key — so a send/interrupt/close
-// arriving with the threadId must map back to the key. Returns the first match.
+// arriving with the threadId must map back to the key. The canonical key is
+// answered by a DIRECT file read first; only aliases (threadId) need the
+// directory scan. That order-independence matters: auxiliary files sharing
+// the id must never win a lookup race against the real entry.
 export function findEntryByAnyId(id: string): AisdkEntry | null {
+  const direct = readEntry(id);
+  if (direct) return direct;
   for (const e of listEntries()) {
     if (e.sessionId === id || (e.threadId && e.threadId === id)) return e;
   }
@@ -299,22 +360,90 @@ export function currentBootId(): string | null {
 }
 
 // Force-stop a direct harness that did not consume its graceful `close`
-// command. Contained sessions live in their own transient systemd service;
-// stopping that unit reaps the whole cgroup. Plain sessions are single harness
-// processes whose SDK child is first given a grace window by the caller.
+// command. Contained sessions live in their own transient systemd service
+// (lfg-agent-<tmuxName>, see containedAgentCommand in tmux.ts); stopping that
+// unit reaps the whole cgroup, KillMode=control-group included. Plain sessions
+// are single harness processes whose SDK child is first given a grace window
+// by the caller.
+//
+// The return value means "a stop was issued", NOT "the process is gone" —
+// the caller must prove the exit with waitForHarnessExit before removing any
+// control-plane state. Three safety rules, each fail-closed:
+//   1. The systemd unit is only ever stopped when it is EXACTLY this entry's
+//      own unit AND the recorded harness pid's cgroup names that same unit.
+//      The unit name embeds the session's unique managed name, so this can
+//      never touch a shared or foreign unit.
+//   2. A pid whose cgroup names a DIFFERENT lfg-agent unit is a reused pid
+//      inside another session: neither that unit nor that pid is signalled.
+//   3. On Linux, a pid that is alive but whose cgroup cannot be read has an
+//      unprovable identity: no signal goes out. Platforms without /proc
+//      (macOS dev baseline) keep the direct SIGTERM fallback — that IS their
+//      contained path.
+export type HarnessTerminateDeps = {
+  /** Test seam: cgroup of a pid, or null when /proc/<pid>/cgroup is unreadable. */
+  readCgroup?: (pid: number) => string | null;
+  /** Test seam: `systemctl --user stop <unit>`; returns the exit code. */
+  systemctlStop?: (unit: string) => number;
+};
+
+let harnessTerminateDeps: HarnessTerminateDeps | null = null;
+
+/** Install dependency hooks so the safety rules above are testable anywhere. */
+export function setHarnessTerminateDepsForTests(deps: HarnessTerminateDeps | null): void {
+  harnessTerminateDeps = deps;
+}
+
+type CgroupProbe =
+  | { kind: "read"; unit: string | null }
+  | { kind: "unreadable" }
+  | { kind: "no-procfs" };
+
+const LFG_AGENT_UNIT_RE = /(lfg-agent-[^/\s]+\.service)/;
+
+function probeHarnessCgroup(pid: number): CgroupProbe {
+  const reader = harnessTerminateDeps?.readCgroup;
+  if (reader) {
+    const raw = reader(pid);
+    return raw === null ? { kind: "unreadable" } : { kind: "read", unit: raw.match(LFG_AGENT_UNIT_RE)?.[1] ?? null };
+  }
+  if (process.platform !== "linux") return { kind: "no-procfs" };
+  try {
+    const raw = readFileSync(`/proc/${pid}/cgroup`, "utf8");
+    return { kind: "read", unit: raw.match(LFG_AGENT_UNIT_RE)?.[1] ?? null };
+  } catch {
+    return { kind: "unreadable" };
+  }
+}
+
+function stopHarnessUnit(unit: string): number {
+  const stop = harnessTerminateDeps?.systemctlStop;
+  if (stop) return stop(unit);
+  try {
+    return Bun.spawnSync(["systemctl", "--user", "stop", unit]).exitCode ?? 1;
+  } catch {
+    return 1;
+  }
+}
+
 export function terminateHarnessProcess(entry: AisdkEntry): boolean {
+  const pid = entry.harnessPid;
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  const probe = probeHarnessCgroup(pid);
+  if (probe.kind === "read" && probe.unit) {
+    // Identity proof: the pid must live in THIS entry's own transient unit.
+    // Any other lfg-agent unit means the recorded pid is gone and the number
+    // was reused inside someone else's session — refuse both the unit stop
+    // and the direct signal (rule 2 above).
+    const own = /^[A-Za-z0-9-]+$/.test(entry.tmuxName ?? "") ? agentUnitName(entry.tmuxName) : null;
+    if (!own || probe.unit !== own) return false;
+    return stopHarnessUnit(own) === 0;
+  }
+  if (probe.kind === "unreadable") return !isPidAlive(pid);
   try {
-    const cgroup = readFileSync(`/proc/${entry.harnessPid}/cgroup`, "utf8");
-    const unit = cgroup.match(/(lfg-agent-[^/\s]+\.service)/)?.[1];
-    if (unit) {
-      return Bun.spawnSync(["systemctl", "--user", "stop", unit]).exitCode === 0;
-    }
-  } catch {}
-  try {
-    process.kill(entry.harnessPid, "SIGTERM");
+    process.kill(pid, "SIGTERM");
     return true;
   } catch {
-    return !isPidAlive(entry.harnessPid);
+    return !isPidAlive(pid);
   }
 }
 

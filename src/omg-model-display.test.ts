@@ -42,6 +42,15 @@ describe("omg model display", () => {
     expect(parseOmgModel("omg/newvendor/thing-1")!.providerLabel).toBe("Newvendor");
   });
 
+  test("claude family aliases show the release they resolve to", () => {
+    expect(omgModelLabel("opus")).toBe("Opus 5.5");
+    expect(omgModelLabel("fable")).toBe("Fable 5.1");
+    expect(omgModelLabel("sonnet")).toBe("Sonnet 5");
+    expect(omgModelLabel("claude-sonnet-5-5")).toBe("Sonnet 5.5");
+    expect(omgModelLabel("haiku")).toBe("Haiku 4.5");
+    expect(omgModelSearchText("opus")).toBe("opus opus 5.5");
+  });
+
   test("ids from other agents pass through unchanged", () => {
     expect(parseOmgModel("claude-opus-4-8")).toBeNull();
     expect(parseOmgModel("gpt-5.6")).toBeNull();
@@ -68,12 +77,13 @@ describe("claude model display", () => {
   test("Claude CLI ids and aliases get a short family name", () => {
     const ids = ["opus", "claude-opus-5-5", "claude-fable-5-1", "fable", "sonnet", "haiku", "claude-opus-4-8-20260101"];
     expect(ids.map((id) => omgModelLabel(id))).toEqual([
-      "Opus",
+      // Agentbox: bare aliases carry the release they land on (CLAUDE_ALIAS_LABELS).
+      "Opus 5.5",
       "Opus 5.5",
       "Fable 5.1",
-      "Fable",
-      "Sonnet",
-      "Haiku",
+      "Fable 5.1",
+      "Sonnet 5",
+      "Haiku 4.5",
       "Opus 4.8",
     ]);
   });
