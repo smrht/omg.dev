@@ -1,5 +1,5 @@
 import { OverviewToolbar, useOverviewPreferences, buildOverviewGroups, flattenOverview } from "./components/session-overview";
-import { DesktopWorkspace, type WorkspaceSummary } from "./components/desktop-workspace";
+import { type WorkspaceSummary } from "./components/desktop-workspace";
 import { SessionUsageControls } from "./components/session-usage-controls";
 import { WorkspaceFindingsMenu } from "./components/workspace-findings";
 import { OMG_DEFAULT_MODEL, OMG_MODELS } from "../../src/omg-models";
@@ -13048,13 +13048,8 @@ function RailStage({
   // steal the stage back after the user has opened another row.
   const handledFocusRef = useRef<string | null>(null);
 
-  // ── Redesigned sessions workspace (smrht/sites-beheer#1024) ──────────────
-  // The workspace is the sessions surface's default shape. `stageMode` swaps
-  // it for the full rail+columns stage; the workspace stays MOUNTED (hidden)
-  // while the stage is up so the composer draft, the filters and the list
-  // scroll survive the round-trip. Other surfaces (bots/schedules/board) never
-  // show the workspace but keep it mounted for the same reason.
-  const [stageMode, setStageMode] = useState(false);
+  // Sam's desktop entry is the session rail and transcript stage. Keep the
+  // shared selection helpers in stage mode; there is no overview round-trip.
   // The row selected for the workspace's summary pane. Deliberately NOT the
   // stage `preview`: selecting a row here only reads roster data that is
   // already loaded. It never mounts a transcript, never joins columnIds /
@@ -13064,7 +13059,7 @@ function RailStage({
   // Mirror of the workspace list's scroll offset, restored when the workspace
   // becomes visible again (some engines drop it under display:none).
   const workspaceListScrollRef = useRef(0);
-  const workspaceUp = !!workspaceComposer && railSurface === "sessions" && !stageMode;
+  const workspaceUp = false;
 
   const bySid = useMemo(() => {
     const m = new Map<string, Session>();
@@ -13098,7 +13093,7 @@ function RailStage({
     // A deep link / external focus is a request to SEE the session: leave the
     // workspace for the full stage, with the summary kept in sync for the
     // return trip.
-    setStageMode(true);
+
     setSelectedWorkspaceSid(sid);
     setPreview(sid);
     setCursor(sid);
@@ -13379,7 +13374,7 @@ function RailStage({
       // A report in the stage gives way to the session picked beside it.
       onCloseStageSheet?.();
       // Board mode shows one session beside the board, pinned or not.
-      setStageMode(true);
+
       if (railSurface !== "board" && validPinned.includes(sid)) return; // already a persistent column
       setPreview(sid);
     },
@@ -13401,7 +13396,7 @@ function RailStage({
         toast.error(`${MAX_COLUMNS} columns max — unpin one first`);
         return;
       }
-      setStageMode(true);
+
       setPinned([...validPinned, sid]);
       setPreview((p) => (p === sid ? null : p));
     },
@@ -13584,7 +13579,7 @@ function RailStage({
         // Keep the panes nearest the just-clicked end.
         range = b >= a ? range.slice(range.length - MAX_COLUMNS) : range.slice(0, MAX_COLUMNS);
       }
-      setStageMode(true);
+
       setPinned(range);
       setPreview(null);
       setCursor(sid);
@@ -13605,7 +13600,7 @@ function RailStage({
         // definition) mounts a transcript.
         if (shift && anchorRef.current) {
           selectTo(sid);
-          setStageMode(true);
+
           pulseStage(sid);
           return;
         }
@@ -13635,7 +13630,7 @@ function RailStage({
       if (!sid) return;
       setSelectedWorkspaceSid(sid);
       setCursor(sid);
-      setStageMode(true);
+
       openSession(sid);
       pulseStage(sid);
     },
@@ -14304,141 +14299,9 @@ function RailStage({
     </RailGroup>
   );
 
-  // ── Redesigned sessions workspace ─────────────────────────────────────────
-  // Mounted whenever RailStage is, and hidden unless it is the active shape:
-  // keeping it mounted while the stage (or another rail surface) is up is what
-  // preserves the composer draft, the filters and the list scroll across the
-  // round-trip. "Open gesprek" leaves; "← Gesprekken" comes back to exactly
-  // this tree.
-  const workspaceNode = workspaceComposer ? (
-    <div className="h-full min-h-0 min-w-0 flex-1" hidden={!workspaceUp}>
-      <DesktopWorkspace
-        brand={
-          <RuntimeStatusBrand>
-            <ProductBrand compact hosted={hosted} />
-          </RuntimeStatusBrand>
-        }
-        surface={railSurface}
-        onOpenSessions={onOpenSessions}
-        onOpenBots={onOpenBots}
-        onOpenAuto={onOpenAuto}
-        onOpenComputer={onOpenComputer}
-        onOpenSettings={onOpenSettings}
-        showBots={navShowBots}
-        showSchedules={navShowSchedules}
-        botsUnread={botsUnreadAny}
-        chatsUnread={overviewUnreadAny}
-        projectFilter={projectFilter}
-        projectOptions={projectOptions}
-        onProjectChange={onProjectChange}
-        projectLabel={(value) => projectFilterLabel(value, shortProject)}
-        headerControls={
-          <>
-            {/* The workspace header is a fixed 48px row, so the Updates list
-                opens in a popover anchored to a compact trigger
-                (workspace-findings.tsx) rather than the rail's inline panel,
-                which clipped inside headerControls. Shown while the workspace
-                is up regardless of railCollapsed; the inline panel stays in
-                the actual rail below. */}
-            {findings.length ? (
-              <WorkspaceFindingsMenu
-                findings={findings}
-                nameFor={nameFor}
-                onOpenReport={onOpenReport}
-                onTriageFindings={onTriageFindings}
-                onClearFindings={onClearFindings}
-                clearFindingsBusy={clearFindingsBusy}
-                triageBusy={autoTriageBusy}
-                actions={
-                  <AutoTriageButton
-                    count={findings.length}
-                    busy={autoTriageBusy}
-                    onClick={() => onTriageFindings()}
-                    compact
-                  />
-                }
-              />
-            ) : null}
-            {onOpenAsk ? (
-              <>
-                {hosted ? null : <UpdateNavButton />}
-                <AskNavButton active={false} onOpen={onOpenAsk} />
-              </>
-            ) : null}
-            {onUserChange ? (
-              <UserFilterMenu value={userFilter} users={users} onChange={onUserChange} />
-            ) : null}
-            {pagesMenu}
-          </>
-        }
-        navFooter={
-          <>
-            {!hosted || hostMachines ? <MachineSwitcher variant="rail" collapsed /> : null}
-            {hosted && workspaceUp ? (
-              <div
-                data-lfg-host-slot="rail-footer"
-                data-lfg-rail-collapsed="true"
-                data-lfg-host-settings={hostSettingsInMenu ? "menu" : undefined}
-                className="shrink-0"
-              />
-            ) : null}
-          </>
-        }
-        coach={coach}
-        composer={workspaceComposer({
-          // Persistent page content: there is nothing to close back to.
-          onClose: () => {},
-          onCreated: async (result) => {
-            // Creating from the workspace opens the stage on the new session,
-            // exactly like the empty-stage composer does.
-            const sid = result?.sessionId ?? result?.session?.sessionId;
-            setStageMode(true);
-            if (sid) {
-              setSelectedWorkspaceSid(sid);
-              setPreview(sid);
-              pulseStage(sid);
-            }
-          },
-        })}
-        conversationsToolbar={
-          <OverviewToolbar
-            prefs={overviewPrefs}
-            count={overviewGroups.reduce((n, g) => n + g.count, 0)}
-            project={projectFilter !== "__all" ? shortProject(projectFilter) : undefined}
-            onClearProject={() => onProjectChange?.("__all")}
-          />
-        }
-        density={overviewPrefs.density}
-        selectedSid={selectedWorkspaceSid}
-        summary={workspaceSummary}
-        onOpenStage={openStageFromWorkspace}
-        listScrollMemory={workspaceListScrollRef}
-        active={workspaceUp}
-      >
-
-        {!overviewGroups.length ? (
-          <p role="status" className="px-3 py-6 text-sm text-muted-foreground">
-            Geen gesprekken gevonden. Pas je zoekopdracht of filters aan.
-          </p>
-        ) : null}
-        <SessionGroups
-          groups={overviewGroups}
-          pinnedNodes={[]}
-          pinnedCount={0}
-          collapsed={false}
-          projectFilter={projectFilter}
-          onProjectChange={onProjectChange}
-          renderItem={renderRailItem}
-        />
-      </DesktopWorkspace>
-    </div>
-  ) : null;
-
   return (
     <div ref={workspaceRef} className="flex h-full min-h-0">
-      {workspaceNode}
-      {/* The full stage: the original rail + columns surface. Hidden while the
-          sessions workspace is up; the other surfaces always show it. */}
+      {/* The session rail and stage are the desktop entry surface. */}
       {!workspaceUp && <div className="flex h-full min-h-0 min-w-0 flex-1">
       <aside
         // No border-r: the rail sits on the page and the stage beside it is a
@@ -14478,17 +14341,7 @@ function RailStage({
               <PanelLeftOpen className="size-4" />
             </button>
             <RuntimeStatusDot />
-            {railSurface === "sessions" ? (
-              <button
-                type="button"
-                onClick={() => setStageMode(false)}
-                aria-label="Terug naar gesprekken"
-                title="Terug naar gesprekken"
-                className="flex size-8 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted"
-              >
-                <ArrowLeft className="size-4" />
-              </button>
-            ) : null}
+
             <button
               type="button"
               onClick={startNew}
@@ -14565,20 +14418,7 @@ function RailStage({
               the collapse control, where it read as app furniture rather than
               as the first row of this list. Chat only — the Bots surface has
               its own New bot. */}
-          {/* The way back to the redesigned workspace. The stage is a mode you
-              left the workspace FOR, so the rail names the destination the
-              same way the workspace header names this one. */}
-          {!railCollapsed && railSurface === "sessions" ? (
-            <button
-              type="button"
-              onClick={() => setStageMode(false)}
-              aria-label="Terug naar gesprekken"
-              className="mb-1 flex h-10 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            >
-              <ArrowLeft className="size-4 shrink-0" />
-              <span className="min-w-0 flex-1 truncate">Gesprekken</span>
-            </button>
-          ) : null}
+
           {!railCollapsed ? (
             // "New session in <folder>". The folder picker sits on this row's
             // trailing edge, where the C shortcut hint was, instead of taking
