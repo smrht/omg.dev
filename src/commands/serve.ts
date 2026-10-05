@@ -10851,7 +10851,17 @@ a{color:#60a5fa}
             // every other project shipped with no source-control record at all,
             // which is how posts that were never committed became
             // indistinguishable from posts that landed and deployed.
-            const code = collectShipProvenance(sourceManaged, body.commitRefs);
+            // Week-retro 05-10-2026 (I-17): a session in sites-beheer that ships
+            // commits it made in another registered project used to be checked
+            // against its own cwd and refused. When the post names a project that
+            // resolves to exactly one registered local repo, verify the commits
+            // there; otherwise keep the session's own checkout as before.
+            let evidenceManaged = sourceManaged;
+            if (sourceManaged && body.commitRefs?.length && body.project) {
+              const matches = (await listRepos().catch(() => [])).filter((repo) => repo.project === body.project);
+              if (matches.length === 1) evidenceManaged = { ...sourceManaged, cwd: matches[0]!.cwd };
+            }
+            const code = collectShipProvenance(evidenceManaged, body.commitRefs);
             const unlanded = shipBlockReason(code);
             if (unlanded && code) {
               // Refused, not annotated. A post the reader has to distrust is

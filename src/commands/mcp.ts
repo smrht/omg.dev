@@ -648,7 +648,18 @@ export function buildOmgMcpServer(): McpServer {
           // transcriptPath is always "lfg://session/<sessionId>" — a second
           // copy of the id we just returned.
           const { transcriptPath: _drop, ...rest } = session;
-          return { ...rest, sessionId: shortSid(session.sessionId) };
+          // Week-retro 05-10-2026 (I-18): one oversized historical field (first
+          // prompt, title, summary) used to push the whole list past the MCP
+          // output cap and into a spill file. Clip long strings and say which.
+          const clippedFields: string[] = [];
+          const bounded = Object.fromEntries(Object.entries(rest).map(([key, value]) => {
+            if (typeof value === "string" && value.length > 2000) {
+              clippedFields.push(key);
+              return [key, value.slice(0, 2000)];
+            }
+            return [key, value];
+          }));
+          return { ...bounded, ...(clippedFields.length ? { clippedFields } : {}), sessionId: shortSid(session.sessionId) };
         }),
       });
     },
