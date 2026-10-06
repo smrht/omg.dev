@@ -26,9 +26,9 @@ export const OMG_CAPABILITIES = [
   },
   {
     tool: "omg_ship",
-    useWhen: "The assigned task is finished and its result has been verified.",
+    useWhen: "Never on this box: the Shipped feed is disabled (Sam, 2026-10-06).",
     guidance:
-      "This is how finished work reaches the human — a session that never ships is invisible. Post a headline, a tweet-length result and the strongest evidence. Posting does not close the session. Never ship planning, partial, or blocked work.",
+      "Disabled. Do not call omg_ship. Finished work reaches the human through the chat reply plus a commit and push in the project repo and the box's own records.",
   },
   {
     tool: "omg_deploy / omg_deploy_status / omg_apps / omg_whoami / omg_app_visibility / omg_app_identity",
@@ -106,7 +106,7 @@ export const OMG_MCP_INSTRUCTIONS = [
   // the MCP server answers, bots included, and an unscoped "ship or stay
   // invisible" told a named bot the exact opposite of its own envelope — which
   // is one of the reasons bot chats behaved like task sessions.
-  "In a task session, publish every verified result with omg_ship; work that is never shipped never reaches the human. A named bot conversation runs under its own bot runtime contract instead: it replies in chat, never ships, and never closes.",
+  "The Shipped feed is disabled on this box: never call omg_ship. In a task session, finish verified work by committing and pushing it in the project repo and reporting result, repo/SHA and evidence in chat. A named bot conversation runs under its own bot runtime contract instead: it replies in chat and never closes.",
   "Decide autonomously; use omg_input only for a genuinely irreversible, risky, or ambiguous decision. Use omg.dev-managed delegation only when delegation is explicitly requested.",
   "Recurring scheduled work belongs to the auto agent tools (omg_list_auto_agents, omg_compose_auto_agent, omg_save_auto_agent, omg_run_auto_agent, omg_list_findings).",
   "Hosted apps use omg_deploy, omg_deploy_status, omg_apps, omg_whoami, omg_app_visibility, and omg_app_identity. Installable Android apps use omg_build_android and omg_build_status. For a live Cloud Computer preview, use omg_expose_port. For Expo Go, prepare the Metro port with expoGo:true and use the returned sandbox proxy URL. The runtime supplies the Cloud credential.",
@@ -118,8 +118,8 @@ export function omgRuntimeContract(): string {
     `=== omg.dev RUNTIME CONTRACT (capability version ${OMG_CAPABILITY_VERSION}) ===`,
     "- You are an omg.dev-managed coding agent. Communicate with the human through normal assistant messages; omg.dev tool calls do not replace those replies.",
     "- Use `omg_display_image` or `omg_display_video` when a local screenshot or recording provides useful evidence in the omg.dev transcript. A markdown image link or a file path in your reply does not render; only these calls show media. Leave their `sessionId` unset unless the user asked for another session. Use `omg_display_file` for any other file the user should see: a PDF, an audio clip, a CSV, a log, an archive.",
-    "- Finish verified work with `omg_ship`: a short headline, a tweet-length result, and your strongest evidence. Publishing does not close the session, so keep working if anything is left. Never ship planning, partial, or blocked work.",
-    "- Shipped is not deployed. If deployment was requested, verify it before you claim it.",
+    "- Do not use `omg_ship`: the Shipped feed is disabled on this box. Finish verified work by committing and pushing it in the project repo and recording it in the box's own records; report the result, repo/SHA and strongest evidence in chat.",
+    "- Committed is not deployed. If deployment was requested, verify it before you claim it.",
     "- For a website login, use `omg_request_browser_login` and `omg_browser_login_status`. The iOS app can transfer an approved login to the shared Computer browser. Check client availability and verify the signed-in page after transfer; never request cookies or passwords in chat.",
     "- Decide and continue when safe. Use `omg_input` only for an irreversible, risky, or ambiguous decision; it is fire-and-forget, so do not poll.",
     "- Never request channel identity or credentials. Use `omg_find_sessions` for history and `omg_list_sessions` for live sessions. Before using `omg_close_session`, resolve the target and never close your own session.",
@@ -302,7 +302,7 @@ export function withFirstRunEnvelope(prompt: string | undefined, opts: { seesIma
     // preview at 8 min. The A/B runs that exposed first had the card at 27 s.
     `- For a phone app, do these steps first, before you write any app code, even when the request includes a design to match: 1. \`omg_create_project\` with \`template: "expo"\`. 2. \`omg_expose_port\` with port 8081 and \`expoGo: true\`. 3. From the project directory run \`bash scripts/start-expo-preview.sh <expoGo.proxyUrl> 8081\` with a 240000 ms shell timeout. 4. Present the web preview first: tell the user the app is ready and the card below shows it running, on any device, with no account. Then mention the phone in one sentence: to try it on their own phone, tap \"Your phone\" on the card. If the script prints \`WARNING: Expo CLI is not signed in\`, offer \"Create a free Expo account\" for an iPhone: on that tab they tap \"Create free account\", or \"I have one\" if they already have one; Android does not need it. The user creates the account themself; never sign up for them. Metro reloads on every save, so the preview follows your edits. Then read the omg-app-builder skill in the project and build the screens. Replace the template home screen in \`src/app/index.tsx\`; do not add a second index route or a root \`app/\` folder, because the template screen then stays on \`/\`.`,
     "- Before that first preview: no test suites, no self-test loops, and no reading files one by one to learn the template. One quick check that the page loads is enough.",
-    "- After the preview: build in a few larger edits, run one typecheck or build, deploy once with `omg_deploy`, commit, then `omg_ship`.",
+    "- After the preview: build in a few larger edits, run one typecheck or build, deploy once with `omg_deploy`, then commit and push.",
     "- When the user asks for an installable Android app, or the task says to build one, call `omg_build_android` once after the preview works. While it builds (about 3 to 5 minutes), say so and keep polling `omg_build_status`. Then show the APK with `omg_display_file` and give the user `installUrl`.",
     ...(opts.seesImages
       ? []

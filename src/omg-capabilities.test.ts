@@ -23,16 +23,12 @@ describe("omg.dev runtime capabilities", () => {
     expect(prompt).toContain("normal assistant messages");
     expect(prompt).toContain("omg_display_image");
     expect(prompt).toContain("omg_display_video");
-    // Regression guard: 83ea6d3 split omg_output into native replies plus
-    // omg_ship and dropped the shipping bullet entirely, so agents stopped
-    // shipping for two days while CI stayed green. Shipping is how finished
-    // work reaches the human — it must never fall out of the contract again.
-    expect(prompt).toContain("omg_ship");
-    // Publishing is no longer a lifecycle event. The contract must not tell
-    // agents to close a session by shipping it.
+    // Agentbox (Sam, 2026-10-06): the Shipped feed is disabled. The contract
+    // must say so explicitly and point at commit + push + chat instead.
+    expect(prompt).toContain("Do not use `omg_ship`");
+    expect(prompt).not.toContain("Finish verified work with `omg_ship`");
     expect(prompt).not.toContain("closeSession");
-    expect(prompt).toContain("Publishing does not close the session");
-    expect(prompt).toContain("Shipped is not deployed");
+    expect(prompt).toContain("Committed is not deployed");
     // Landing is a local self-repo concern. The ship endpoint owns that gate
     // and returns its exact recovery command only to an affected LFG session.
     // Putting it in this global prompt leaks LFG release plumbing into every
@@ -139,9 +135,10 @@ describe("omg.dev runtime capabilities", () => {
 
   // Two envelopes reach a bot: this contract and the MCP server's instructions,
   // which used to order "ship or stay invisible" at every session indiscriminately.
-  test("the MCP instructions scope shipping to task sessions", () => {
-    expect(OMG_MCP_INSTRUCTIONS).toContain("In a task session, publish every verified result");
-    expect(OMG_MCP_INSTRUCTIONS).toContain("never ships, and never closes");
+  test("the MCP instructions keep the Shipped feed disabled", () => {
+    expect(OMG_MCP_INSTRUCTIONS).toContain("never call omg_ship");
+    expect(OMG_MCP_INSTRUCTIONS).not.toContain("publish every verified result with omg_ship");
+    expect(OMG_MCP_INSTRUCTIONS).toContain("replies in chat and never closes");
   });
 
   // The first "Hey Scout!" went unanswered because the launch envelope told the
