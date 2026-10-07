@@ -267,3 +267,18 @@ test("no host prop renders no host row, and never an Auto option", () => {
   expect(card.textContent).not.toContain("Uitvoeren op");
   expect(card.textContent).not.toContain("Auto");
 });
+
+test("project row names where the chat starts and opens the project chooser", () => {
+  const onOpen = mock(() => {});
+  renderSheet({ project: { label: "2buyit", onOpen } });
+  const row = body().querySelector('[aria-label^="Project: 2buyit"]');
+  expect(row).not.toBeNull();
+  expect(row?.textContent).toContain("2buyit");
+  click(row);
+  expect(onOpen.mock.calls.length).toBe(1);
+});
+
+test("no project prop renders no project row", () => {
+  renderSheet();
+  expect(body().querySelector('[aria-label^="Project:"]')).toBeNull();
+});

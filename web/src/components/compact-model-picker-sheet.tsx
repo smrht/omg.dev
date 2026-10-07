@@ -16,7 +16,7 @@ import { useEffect, useLayoutEffect, useId, useRef, useState, type ReactNode, ty
 import { createPortal } from "react-dom";
 import { pickerThinkingLabel } from "../lib/model-picker-display";
 import { ExecutionHostChoice, type ExecutionHostOption } from "./execution-host-control";
-import { Check, ChevronDown, ChevronLeft, ChevronRight, Circle, Gauge, Plus, Search, Star, X, Zap } from "lucide-react";
+import { Check, ChevronDown, ChevronLeft, ChevronRight, Circle, Folder, Gauge, Plus, Search, Star, X, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export type PickerAgentTile = {
@@ -60,6 +60,7 @@ export function CompactModelPickerSheet({
   fast,
   tibo,
   host,
+  project,
   usage,
 }: {
   open: boolean;
@@ -98,6 +99,13 @@ export function CompactModelPickerSheet({
    */
   host?: { options: ExecutionHostOption[]; onPick: (id: string) => void; onRefresh?: () => void } | null;
   usage?: { summary: string; details?: ReactNode } | null;
+  /**
+   * Where the new chat starts. The row names the current project and opens
+   * the composer's own project sheet (search, No project, add a folder); the
+   * caller closes this card first. A phone had no other folder control in
+   * the inline composer once the old setup sheet was replaced (Sam, 2026-10-07).
+   */
+  project?: { label: string; onOpen: () => void } | null;
 }) {
   const [page, setPage] = useState<"root" | "models" | "profiles" | "usage">("root");
   const [agentsOpen, setAgentsOpen] = useState(false);
@@ -291,6 +299,22 @@ export function CompactModelPickerSheet({
                       ) : null}
                     </ul>
                   </div>
+                ) : null}
+
+                {project ? (
+                  <button
+                    type="button"
+                    onClick={project.onOpen}
+                    aria-label={`Project: ${project.label}. Kies een project`}
+                    className="flex min-h-12 w-full items-center gap-3 border-b border-border px-1 text-left outline-none focus-visible:bg-muted"
+                  >
+                    <Folder className="size-4 shrink-0 text-muted-foreground" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-xs text-muted-foreground">Project</span>
+                      <span className="block truncate text-sm font-medium">{project.label}</span>
+                    </span>
+                    <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
+                  </button>
                 ) : null}
 
                 <div className="flex min-h-11 items-center justify-between">

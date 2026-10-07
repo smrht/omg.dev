@@ -6469,6 +6469,7 @@ export function App() {
     });
   });
   const [projectFilter, setProjectFilter] = useState(readCachedProjectFilter);
+  const { view: overviewView } = useOverviewPreferences();
   // The mobile side navigation. One drawer now answers "where do I go",
   // replacing both the bottom surface bar and the overflow menu.
   const [navOpen, setNavOpen] = useState(false);
@@ -9786,10 +9787,8 @@ export function App() {
 
       {/* The folder rail under the header, as on iOS. It is the mobile
           composer's folder control: the chosen project is where a new
-          session starts. It shows in every list grouping (Aandacht, Alle
-          chats, Projecten): it was tied to Projecten, so on the default view
-          a phone had no way to pick a folder for a new chat (Sam, 2026-10-07). */}
-      {isMobile && tab === "live" && projectOptions.length > 0 ? (
+          session starts. */}
+      {isMobile && tab === "live" && overviewView === "projects" && projectOptions.length > 0 ? (
         <ProjectPillRail
           projects={projectPillsFor(projectOptions, shortProject, {
             prefs: folderMenuPrefs,
@@ -25229,6 +25228,11 @@ export function NewSessionDialog({
       ? `${closest.label}: ${Math.round(closest.pct)}% gebruikt`
       : "Limiet niet beschikbaar";
   })();
+  // The project the inline composer will start in, named the same way as the
+  // drawer's project pill. Null while it would only be a fallback guess.
+  const composerProjectName = unassigned
+    ? selectedRepoName
+    : repos.find((item) => item.cwd === selectedRepo)?.name || null;
   const agentSheet =
     variant === "inline" ? (
       <CompactModelPickerSheet
@@ -25293,6 +25297,7 @@ export function NewSessionDialog({
           onPick: (id) => setExecutionHost(id as ExecutionHostId),
           onRefresh: executionHosts.refresh,
         }}
+        project={{ label: composerProjectName ?? "Kies project", onOpen: openProjectSheet }}
         daybreak={
           offersDaybreak(daybreakPrograms)
             ? {
@@ -25330,7 +25335,10 @@ export function NewSessionDialog({
 
   // The inline summary line: agent · model · thinking (· Daybreak · host),
   // mirroring what the picker below it will change.
+  // The project leads the line: on a phone it is the only place that says
+  // where the next chat starts (Sam, 2026-10-07).
   const pickerSummary = [
+    composerProjectName,
     agentHeaderLabel,
     view.showComposerModels ? pickerModelDisplay(model).label || "Model" : null,
     agentSupportsThinking(agent) ? pickerThinkingLabel(thinkingLevelLabel(thinkingLevel)) : null,
