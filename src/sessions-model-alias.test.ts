@@ -9,4 +9,6 @@ test("the session list folds Claude ids to one alias per family (Agentbox)", () 
   expect(modelAlias("claude-sonnet-5")).toBe("sonnet");
   expect(modelAlias("claude-sonnet-5-5")).toBe("claude-sonnet-5-5");
   expect(modelAlias("claude-sonnet-5-5[1m]")).toBe("claude-sonnet-5-5");
+  expect(modelAlias("claude-haiku-5-5")).toBe("claude-haiku-5-5");
+  expect(modelAlias("claude-haiku-4-5-20251001")).toBe("haiku");
 });

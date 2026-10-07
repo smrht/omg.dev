@@ -41,6 +41,7 @@ export type SkillCatalogItem = {
 // 2026-09-24. They only order the picker, newest first. Add a row when a new
 // pinned id joins the list; an alias takes the newest date in its family.
 const CLAUDE_RELEASES: Record<string, string> = {
+  "claude-haiku-5-5": "2026-10-07",
   "claude-sonnet-5-5": "2026-09-28",
   "claude-opus-5-5": "2026-09-21",
   "claude-fable-5-1": "2026-08-28",
@@ -51,16 +52,17 @@ const CLAUDE_RELEASES: Record<string, string> = {
   "claude-haiku-4-5-20251001": "2025-10-15",
 };
 
-// What each bare alias resolves to today (measured 2026-09-28 on claude
-// 2.1.284 with `claude -p --model <alias>`). An alias sorts on the release it
+// What each bare alias resolves to today (measured 2026-10-07 on claude
+// 2.1.293 with `claude -p --model <alias>`: sonnet -> claude-sonnet-5-5,
+// haiku -> claude-haiku-5-5). An alias sorts on the release it
 // actually lands on, not on the newest pin in its family: `sonnet` still lands
 // on Sonnet 5 while the Sonnet 5.5 rollout runs, so it must not jump above
 // Opus 5.5 just because claude-sonnet-5-5 is pinned.
 const CLAUDE_ALIAS_TARGETS: Record<string, string> = {
   opus: "claude-opus-5-5",
   fable: "claude-fable-5-1",
-  sonnet: "claude-sonnet-5",
-  haiku: "claude-haiku-4-5-20251001",
+  sonnet: "claude-sonnet-5-5",
+  haiku: "claude-haiku-5-5",
 };
 
 function claudeReleaseDate(model: string): string | null {
@@ -90,12 +92,18 @@ export function sortClaudeModelsByRelease(models: readonly string[]): string[] {
 // reach 5.5 from the picker. When `claude -p --model sonnet` reports
 // claude-sonnet-5-5, drop the pin and bump CLAUDE_ALIAS_LABELS.sonnet instead.
 // The picker shows the release via CLAUDE_ALIAS_LABELS / claudeModelLabel.
+//
+// 07-10-2026 (Sam): Haiku 5.5 is out and the picker shows only the current
+// releases. Sonnet 5 and Haiku 4.5 are gone; Sonnet 5.5 and Haiku 5.5 are
+// pinned ids because the web bundle labels the bare `sonnet`/`haiku` aliases
+// "Sonnet 5"/"Haiku 4.5" (CLAUDE_ALIAS_LABELS in packages/protocol), and a
+// pinned id gets its label from the id itself without a web rebuild.
+// `opus` and `fable` stay aliases: favourites are stored per model id.
 export const CLAUDE_MODELS: string[] = sortClaudeModelsByRelease([
   "claude-sonnet-5-5",
   "opus",
   "fable",
-  "sonnet",
-  "haiku",
+  "claude-haiku-5-5",
 ]);
 export const CODEX_MODELS: string[] = [
   "gpt-6.1-sol",
@@ -347,7 +355,7 @@ const LABELS: Record<CodingAgentKind, string> = {
 };
 
 export const MODEL_OPTIONS: Record<CodingAgentKind, { defaultModel: string; models: readonly string[] }> = {
-  claude: { defaultModel: "sonnet", models: CLAUDE_MODELS },
+  claude: { defaultModel: "claude-sonnet-5-5", models: CLAUDE_MODELS },
   aisdk: { defaultModel: "opus", models: AISDK_MODELS },
   codex: { defaultModel: "gpt-5.6-sol", models: CODEX_MODELS },
   "codex-aisdk": { defaultModel: "gpt-5.6-sol", models: CODEX_AISDK_MODELS },

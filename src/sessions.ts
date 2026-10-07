@@ -2493,6 +2493,8 @@ export function modelAlias(id: string | null | undefined): string | null {
   // Collapsing it would highlight Sonnet 5 as the live model and resume there.
   if (/sonnet-5[-.]5/.test(m)) return "claude-sonnet-5-5";
   if (m.includes("sonnet")) return "sonnet";
+  // Haiku 5.5 has its own pinned picker row (07-10-2026), like Sonnet 5.5.
+  if (/haiku-5[-.]5/.test(m)) return "claude-haiku-5-5";
   if (m.includes("haiku")) return "haiku";
   // Since claude 2.1.280 the `fable` alias lands on Fable 5.1 itself, so every
   // fable id (5, 5-1, and whatever comes next) collapses to the one alias.
