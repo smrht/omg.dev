@@ -6469,7 +6469,6 @@ export function App() {
     });
   });
   const [projectFilter, setProjectFilter] = useState(readCachedProjectFilter);
-  const { view: overviewView } = useOverviewPreferences();
   // The mobile side navigation. One drawer now answers "where do I go",
   // replacing both the bottom surface bar and the overflow menu.
   const [navOpen, setNavOpen] = useState(false);
@@ -9787,8 +9786,10 @@ export function App() {
 
       {/* The folder rail under the header, as on iOS. It is the mobile
           composer's folder control: the chosen project is where a new
-          session starts. */}
-      {isMobile && tab === "live" && overviewView === "projects" && projectOptions.length > 0 ? (
+          session starts. It shows in every list grouping (Aandacht, Alle
+          chats, Projecten): it was tied to Projecten, so on the default view
+          a phone had no way to pick a folder for a new chat (Sam, 2026-10-07). */}
+      {isMobile && tab === "live" && projectOptions.length > 0 ? (
         <ProjectPillRail
           projects={projectPillsFor(projectOptions, shortProject, {
             prefs: folderMenuPrefs,
