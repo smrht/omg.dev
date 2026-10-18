@@ -242,7 +242,13 @@ function commandFor(key: ProviderKey): string[] | null {
   }
   if (key === "opencode") {
     const bin = opencodePath();
-    return bin ? [bin, "models", "--verbose"] : null;
+    // OpenCode exits before a piped stdout is fully drained: the catalog came back
+    // with 46-90 of 111 models and without the zai-coding-plan variants, so every
+    // GLM subagent with a thinking level failed (agentbox week-retro 2026-10-18).
+    // Writing to a file first and then cat'ing it returns the complete list.
+    return bin
+      ? ["sh", "-c", 'T=$(mktemp) || exit 1; "$0" models --verbose > "$T"; s=$?; cat "$T"; rm -f "$T"; exit $s', bin]
+      : null;
   }
   if (key === "fx") {
     const bin = fxPath();
