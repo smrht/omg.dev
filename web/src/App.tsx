@@ -14672,7 +14672,7 @@ function RailStage({
           // card any more: with nothing to show, the useful thing to show is
           // the place to start one. The hosted coach, when present, sits
           // above it.
-          <div className={cn("flex h-full min-h-0 flex-1 flex-col overflow-y-auto", STAGE_PANEL)}>
+          <div className={cn("flex h-full min-h-0 flex-1 flex-col", STAGE_PANEL)}>
             {coach ? (
               <div className="mx-auto w-full max-w-xl shrink-0 px-4 pt-4 text-left">{coach}</div>
             ) : null}
@@ -14691,7 +14691,11 @@ function RailStage({
                 }
               },
             })}
-            <TakenVandaag onOpenSession={(sid) => activate(sid, false)} onAlles={() => overviewPrefs.setView("taken")} />
+            {/* Alleen de takenlijst scrolt: de composer blijft overflow-visible
+                zodat zijn suggestiemenu's omhoog kunnen uitsteken. */}
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <TakenVandaag onOpenSession={(sid) => activate(sid, false)} onAlles={() => overviewPrefs.setView("taken")} />
+            </div>
           </div>
         )}
       </div>
@@ -25554,7 +25558,7 @@ export function NewSessionDialog({
               e.currentTarget.form?.requestSubmit();
             }
           }}
-          placeholder={attachments.length ? "Add a note for the files…" : variant === "inline" || variant === "workspace" ? "Waar werken we aan?" : "What should we work on?"}
+          placeholder={attachments.length ? "Add a note for the files…" : "Waar werken we aan?"}
           className={cn(
             "border-0 bg-transparent text-base leading-relaxed shadow-none focus-visible:border-0 focus-visible:ring-0",
             variant === "stage"
@@ -25822,7 +25826,7 @@ export function NewSessionDialog({
       <div
         // overflow-visible on purpose: see the form's stage branch. The
         // suggest menus need to escape upward past the greeting.
-        className="flex min-h-0 shrink-0 flex-col items-center justify-start overflow-visible px-4 pt-[14vh] pb-6"
+        className="flex min-h-0 shrink-0 flex-col items-center justify-start overflow-visible px-4 pt-[max(2rem,calc(50vh-200px))] pb-6"
         data-testid="new-session-stage"
         onKeyDown={(e) => {
           if (e.key === "Escape" && !e.defaultPrevented) {

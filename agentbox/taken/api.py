@@ -42,6 +42,13 @@ def merged() -> dict:
         status = s.get("status", "open")
         if status == "later" and s.get("tot") and datetime.fromisoformat(s["tot"]) <= now:
             status = "open"
+        # Nieuw bericht in dezelfde draad, opnieuw gemarkeerde bestelling: weer open.
+        if status != "open" and i.get("tijd") and s.get("om") and i.get("soort") != "gedaan":
+            try:
+                if datetime.fromisoformat(i["tijd"]) > datetime.fromisoformat(s["om"]):
+                    status = "open"
+            except ValueError:
+                pass
         items.append({**i, "status": status, "afgevinkt": s.get("om")})
     return {"bijgewerkt": data.get("bijgewerkt"), "bronnen": data.get("bronnen", {}),
             "ververst": running["p"] is not None and running["p"].poll() is None, "items": items}

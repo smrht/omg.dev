@@ -88,9 +88,11 @@ function wanneer(iso?: string) {
 }
 
 export function deelTaken(items: Taak[]) {
-  const open = items.filter(i => i.status === "open" && i.soort !== "gedaan" && i.soort !== "melding")
+  // Een vastgelopen bot (Copyreviewer e.d.) is geen werk voor Sam: dat is een melding.
+  const isMelding = (i: Taak) => i.soort === "melding" || (i.machine && i.soort === "vast");
+  const open = items.filter(i => i.status === "open" && i.soort !== "gedaan" && !isMelding(i))
     .sort((a, b) => RANG[a.soort] - RANG[b.soort] || (b.tijd ?? "").localeCompare(a.tijd ?? ""));
-  const meldingen = items.filter(i => i.status === "open" && i.soort === "melding");
+  const meldingen = items.filter(i => i.status === "open" && isMelding(i));
   const later = items.filter(i => i.status === "later");
   const gedaan = items.filter(i => (i.soort === "gedaan" && i.status !== "later") || (i.status === "gedaan" && isVandaag(i.afgevinkt)))
     .sort((a, b) => (b.afgevinkt ?? b.tijd ?? "").localeCompare(a.afgevinkt ?? a.tijd ?? ""));
