@@ -28,7 +28,7 @@ for (const [naam, w, h, mobiel] of [["desktop", 1440, 900, false], ["mobiel", 39
     if (ok) break;
   }
   await sleep(800);
-  if (extraJs) { await ev(`(async()=>{${extraJs}})()`); await sleep(1500); }
+  if (extraJs) { const uit = await ev(`(async()=>{${extraJs}})()`); await sleep(1500); if (uit !== undefined) console.log("extra", JSON.stringify(uit)); }
   const maat = await ev(`(() => { const rows=[...document.querySelectorAll("[data-overview-row]")]; const vis=rows.filter(r=>{const b=r.getBoundingClientRect();return b.height>0&&b.top>=0&&b.bottom<=innerHeight}); const first=rows[0]?.getBoundingClientRect().top??-1; const comp=document.querySelector("[data-testid=new-session-stage] form, [data-testid=new-session-stage] textarea")?.closest("form")?.getBoundingClientRect().height??-1; return {rijenZichtbaar:vis.length, rijHoogte:Math.round(rows[0]?.getBoundingClientRect().height??0), eersteRijTop:Math.round(first), composerHoogte:Math.round(comp), connecting:document.body.innerText.includes("Connecting")}; })()`);
   console.log(naam, JSON.stringify(maat));
   const shot = await send("Page.captureScreenshot", { format: "png" }, s);

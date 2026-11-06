@@ -144,3 +144,13 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
 /* Nieuwe sessie houdt zijn label; de mapkiezer geeft ruimte. */
 .ab-newrow > :last-child { min-width: 0; flex-shrink: 1; }
 .ab-newrow > button:first-child { flex-shrink: 0; flex-basis: auto; }
+
+/* Geen kaders op rust: de cursorring alleen tijdens toetsenbordwerk in de
+   zijbalk, de open rij alleen een vlakke tint. */
+[data-agentbox-rail]:not(:focus-within) [data-rail-sid].ring-2 { box-shadow: none !important; }
+[data-agentbox-rail] [data-overview-row].lfg-gborder { border-color: transparent !important; box-shadow: none !important; background: var(--accent) !important; }
+[data-agentbox-rail] [data-overview-row].lfg-gborder::before { display: none !important; }
+
+/* Slash-menu op het startscherm: lager, zodat de composer hoog kan blijven
+   staan zonder dat het menu tegen de bovenrand wordt afgekapt. */
+[data-testid="new-session-stage"] .bottom-full .overflow-y-auto { max-height: min(12rem, 42dvh); }

@@ -25833,7 +25833,7 @@ export function NewSessionDialog({
       <div
         // overflow-visible on purpose: see the form's stage branch. The
         // suggest menus need to escape upward past the greeting.
-        className="flex min-h-0 shrink-0 flex-col items-center justify-start overflow-visible px-4 pt-[max(2rem,calc(50vh-150px))] pb-4"
+        className="flex min-h-0 shrink-0 flex-col items-center justify-start overflow-visible px-4 pt-[max(2rem,calc(42vh-170px))] pb-4"
         data-testid="new-session-stage"
         onKeyDown={(e) => {
           if (e.key === "Escape" && !e.defaultPrevented) {
