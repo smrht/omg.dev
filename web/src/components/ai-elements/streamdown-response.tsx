@@ -111,6 +111,8 @@ export function StreamdownResponse({ className, mode = "static", children, compo
       // override through props.
       codeBlockMaxHeight={Infinity}
       tableMaxHeight={Infinity}
+      // agentbox: geen regelnummers; de meeste blokken zijn tekst om te plakken.
+      lineNumbers={false}
       {...props}
     >
       {children}

@@ -1,5 +1,5 @@
 import { OverviewToolbar, useOverviewPreferences, buildOverviewGroups, flattenOverview } from "./components/session-overview";
-import { TakenLijst, TakenVandaag } from "./components/taken";
+import { TakenLijst, TakenVandaag, MeldingenPagina, MELDINGEN_EVENT, OPDRACHT_EVENT, neemOpdracht, opdrachtVerstuurd } from "./components/taken";
 import { type WorkspaceSummary } from "./components/desktop-workspace";
 import { SessionUsageControls } from "./components/session-usage-controls";
 import { WorkspaceFindingsMenu } from "./components/workspace-findings";
@@ -707,6 +707,7 @@ import {
   UpdateSettingsRow,
 } from "./components/update-drawer";
 import { UsageCampfireHost, useUsageRingLongPress, openUsageCampfire } from "./components/UsageCampfire";
+import { RailUsageMeters, UsageWindowRow, MeterBar, tightestWindow, leftPct, windowName, resetText } from "./components/usage-meters";
 import { BankedResetCredits } from "./components/BankedResetCredits";
 import {
   consumeBankedReset,
@@ -6318,6 +6319,18 @@ export function App() {
     },
     [navigate],
   );
+  // agentbox: Meldingen is het scherm op de oude Notifications-plek; een
+  // opdracht vanuit een melding gaat terug naar Live, waar de composer staat.
+  useEffect(() => {
+    const naarMeldingen = () => setTab("notifications");
+    const naarLive = () => setTab((current) => (current === "notifications" || current === "artifacts" ? DEFAULT_TAB : current));
+    window.addEventListener(MELDINGEN_EVENT, naarMeldingen);
+    window.addEventListener(OPDRACHT_EVENT, naarLive);
+    return () => {
+      window.removeEventListener(MELDINGEN_EVENT, naarMeldingen);
+      window.removeEventListener(OPDRACHT_EVENT, naarLive);
+    };
+  }, [setTab]);
   const openBot = useCallback(
     (botId: string, conversationId?: string | null) => {
       const keepHostMode = (prev: AppSearch): AppSearch => ({
@@ -9320,21 +9333,9 @@ export function App() {
       [s.sessionId, s.nativeSessionId].filter((x): x is string => !!x),
     ),
   );
-  const notificationsPage = (active: boolean) => (
-    <Suspense fallback={<div className="py-10 text-center text-sm text-muted-foreground">Loading…</div>}>
-      <ShippedPage
-        active={active}
-        notificationIdentity={identity}
-        liveSessionIds={liveSessionIdSet}
-        onOpenSession={(sid) => {
-          openHistoricalSession({
-            sessionId: sid,
-            reviewLabel: "Question",
-          });
-        }}
-        onReviewSession={openShippedSession}
-      />
-    </Suspense>
+  // agentbox: Notifications (de stilgevallen Shipped-feed) is vervangen door Meldingen.
+  const notificationsPage = (_active: boolean) => (
+    <MeldingenPagina onOpenSession={(sid) => openHistoricalSession({ sessionId: sid, reviewLabel: "Melding" })} />
   );
   const artifactsPage = (active: boolean) => (
     <Suspense fallback={<div className="py-10 text-center text-sm text-muted-foreground">Loading…</div>}>
@@ -10671,9 +10672,9 @@ function UsageRingsLoadingIndicator() {
   return (
     <span
       className="flex shrink-0 items-center justify-center rounded-full p-1 pl-4 md:pl-1"
-      title="Loading usage"
+      title="Limiet laden"
     >
-      <UsageRingsLoading />
+      <MeterBar left={null} className="w-8 animate-pulse motion-reduce:animate-none" />
     </span>
   );
 }
@@ -10715,22 +10716,11 @@ function UsageDetailsBody({ provider }: { provider: ProviderUsage }) {
         ) : null}
       </div>
       {windows.length ? (
-        <div className="flex items-center gap-3">
-          <UsageRings windows={windows} size={52} className="my-0.5" />
-          <div className="min-w-0 flex-1 space-y-1.5">
-            {windows.map((w, i) => (
-              <div key={w.label} className="flex items-center gap-2 text-xs">
-                <span
-                  className="size-2.5 shrink-0 rounded-full"
-                  style={{ backgroundColor: USAGE_RING_COLORS[i % USAGE_RING_COLORS.length] }}
-                />
-                <span className="min-w-0 flex-1 truncate text-muted-foreground">{w.label}</span>
-                <span className="shrink-0 font-medium tabular-nums">
-                  {w.pct == null ? "—" : `${Math.round(w.pct)}%`}
-                </span>
-              </div>
-            ))}
-          </div>
+        // agentbox: per venster wat er NOG OVER is, met balk en resettijd.
+        <div className="space-y-2.5">
+          {windows.map((w) => (
+            <UsageWindowRow key={w.label} w={w} />
+          ))}
         </div>
       ) : (
         <p className="text-xs text-muted-foreground">
@@ -10740,9 +10730,11 @@ function UsageDetailsBody({ provider }: { provider: ProviderUsage }) {
       {windows.length && provider.note ? (
         <p className="mt-2 text-[11px] leading-snug text-muted-foreground/80">{provider.note}</p>
       ) : null}
-      {windows.some((w) => w.resetsAt) ? (
+      {provider.resetCredits?.availableCount ? (
         <p className="mt-2 border-t border-border/60 pt-2 text-[11px] text-muted-foreground/80">
-          {windows.find((w) => w.resetsAt) ? fmtReset(windows.find((w) => w.resetsAt)!.resetsAt) : ""}
+          {provider.resetCredits.availableCount === 1
+            ? "1 gratis reset beschikbaar"
+            : `${provider.resetCredits.availableCount} gratis resets beschikbaar`}
         </p>
       ) : null}
     </>
@@ -10769,12 +10761,12 @@ function UsageRingsButton({
         render={
           <button
             type="button"
-            aria-label={`${provider.label} usage. Long-press for all agents.`}
-            title={`${provider.label} usage · long-press for all agents · Shift`}
+            aria-label={`${provider.label}: limiet over. Lang indrukken voor alle agents.`}
+            title={(provider.windows ?? []).map((w) => `${provider.label} ${windowName(w.label)}: ${leftPct(w) == null ? "geen cijfer" : `${Math.round(leftPct(w)!)}% over`}${w.resetsAt ? `, ${resetText(w.resetsAt)}` : ""}`).join("\n") || `${provider.label}: geen limietcijfers`}
             className={cn(
               // The wider left pad keeps the rings clear of the screen edge on
               // the mobile inline composer; on desktop it just reads as a gap.
-              "flex shrink-0 touch-none select-none items-center justify-center rounded-full p-1 pl-4 transition active:scale-90 [-webkit-touch-callout:none] md:pl-1",
+              "flex shrink-0 touch-none select-none items-center justify-center rounded-md px-1.5 py-1 pl-4 transition hover:bg-muted active:scale-95 [-webkit-touch-callout:none] md:pl-1.5",
               className,
             )}
             onPointerDown={longPress.onPointerDown}
@@ -10788,19 +10780,27 @@ function UsageRingsButton({
               }
             }}
           >
-            {windows.length ? (
-              <UsageRings windows={windows} />
-            ) : (
-              <UsageRings windows={[{ label: "usage", pct: null, resetsAt: null }]} />
-            )}
+            {/* agentbox: geen ring maar "nog 20%" van het venster dat het eerst op is. */}
+            {(() => {
+              const tight = tightestWindow(windows);
+              const left = tight ? leftPct(tight) : null;
+              return (
+                <span className="flex items-center gap-1.5 text-xs tabular-nums">
+                  <MeterBar left={left} className="w-8" />
+                  <span className={cn(left != null && left <= 10 ? "text-destructive" : left != null && left <= 25 ? "text-primary" : "text-muted-foreground")}>
+                    {left == null ? "—" : `${Math.round(left)}%`}
+                  </span>
+                </span>
+              );
+            })()}
           </button>
         }
       />
       <DropdownMenuContent side="top" align="start" sideOffset={8} className="w-64 p-3">
         <UsageDetailsBody provider={provider} />
         <p className="mt-2 border-t border-border/60 pt-2 text-[11px] text-muted-foreground/70">
-          Long-press rings for all agents ·{" "}
-          <kbd className="rounded bg-muted px-1 font-mono text-[10px]">Shift</kbd> to toggle
+          Alle agents: lang indrukken of{" "}
+          <kbd className="rounded bg-muted px-1 font-mono text-[10px]">Shift</kbd>
         </p>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -10906,7 +10906,7 @@ function PagesMenu({
           {hiddenPages.includes("notifications") ? null : (
             <DropdownMenuRadioItem value="notifications">
               <Bell className="size-5 shrink-0 text-muted-foreground" />
-              Notifications
+              Meldingen
             </DropdownMenuRadioItem>
           )}
           {hiddenPages.includes("artifacts") ? null : (
@@ -13344,6 +13344,14 @@ function RailStage({
     }
     onNew();
   };
+  // agentbox: "Opdracht geven" op een melding of taak opent de composer.
+  const startNewRef = useRef(startNew);
+  startNewRef.current = startNew;
+  useEffect(() => {
+    const opdracht = () => window.setTimeout(() => startNewRef.current(), 0);
+    window.addEventListener(OPDRACHT_EVENT, opdracht);
+    return () => window.removeEventListener(OPDRACHT_EVENT, opdracht);
+  }, []);
 
   // Stage columns are open transcript surfaces even though they do not use the
   // mobile card collapse toggle. Keep the app-level lazy stream manager in sync
@@ -14524,6 +14532,8 @@ function RailStage({
             header carries the status line instead. Without a status line
             (no shell headline), the header keeps the mark and this stays
             empty. */}
+        {/* agentbox: limieten per agent, onderaan de zijbalk. */}
+        <RailUsageMeters collapsed={railCollapsed} />
         {railHeadline ? (
           <div
             className={cn(
@@ -21664,6 +21674,14 @@ function useOrganicActivityPresence(active: boolean) {
   };
 }
 
+// agentbox: werkregel in het Nederlands ("Worked for 3m" -> "Gewerkt 3m").
+function werkLabelNl(label: string): string {
+  return label
+    .replace(/^Worked for /, "Gewerkt ")
+    .replace(/^Worked$/, "Gewerkt")
+    .replace(/^Working for /, "Bezig ");
+}
+
 function OrganicActivityEffect({
   active,
   className,
@@ -21954,7 +21972,7 @@ const ToolGroup = memo(function ToolGroup({
           left, so the row looked closer to the edge than the text above it. */}
       {/* No leading dot, live or finished. The live ring and the ticking
           "Working for 25s" already say the run is going. */}
-      <span className="relative z-[1] truncate font-mono">{label}</span>
+      <span className="relative z-[1] truncate font-mono">{werkLabelNl(label)}</span>
       {/* The chevron says the row opens, as on the phone. */}
       <ChevronRight className="relative z-[1] size-3 shrink-0 opacity-60" aria-hidden="true" />
     </button>
@@ -24515,6 +24533,26 @@ export function NewSessionDialog({
       project: composerProject,
     });
   }
+  // agentbox: een opdracht vanuit Meldingen/Taken komt hier als tekst binnen.
+  const setPromptRef = useRef(setPrompt);
+  setPromptRef.current = setPrompt;
+  useEffect(() => {
+    const pak = () => {
+      const tekst = neemOpdracht();
+      if (tekst == null) return;
+      setPromptRef.current(tekst);
+      window.setTimeout(() => {
+        const veld = document.querySelector<HTMLTextAreaElement>("[data-workspace-composer] textarea, [data-testid='new-session-stage'] textarea, textarea[placeholder='Waar werken we aan?']");
+        if (veld && veld.offsetParent !== null) {
+          veld.focus();
+          veld.setSelectionRange(veld.value.length, veld.value.length);
+        }
+      }, 60);
+    };
+    pak();
+    window.addEventListener(OPDRACHT_EVENT, pak);
+    return () => window.removeEventListener(OPDRACHT_EVENT, pak);
+  }, []);
 
   function openProjectSheet() {
     setAgentPopoverOpen(false);
@@ -24720,6 +24758,7 @@ export function NewSessionDialog({
     // seconds — so left standing it would answer a submit the person has
     // already replaced, starting a second session from stale text.
     toast.dismiss(agentLimitToastId("create"));
+    opdrachtVerstuurd(taskPrompt);
     setPromptState("");
     setAttachments([]);
     // Carry each attachment's real upload state across. Most will already be

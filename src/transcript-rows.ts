@@ -160,6 +160,17 @@ type FoldedSpan<T extends ChatRenderMessage> = {
 //
 // Idempotent. A `work` row on the input is a run of its steps, so a folded
 // list folds to itself and two folded pages join at their seam.
+/**
+ * Claude Code writes a meta user line after every image it reads ("[Image:
+ * original 1280x2170, displayed at 1180x2000. Multiply coordinates ..."). It is
+ * harness bookkeeping, not something the person typed, and rendered as a user
+ * bubble it also split one run of work into two rows. Dropped before folding.
+ */
+const IMAGE_READ_META = /^\[Image: original \d+x\d+, displayed at \d+x\d+\./;
+export function isImageReadMeta(message: ChatRenderMessage): boolean {
+  return message.role === "user" && (message.kind ?? "text") === "text" && IMAGE_READ_META.test(message.text ?? "");
+}
+
 function foldWorkSpans<T extends ChatRenderMessage>(messages: ReadonlyArray<T>): FoldedSpan<T>[] {
   const out: FoldedSpan<T>[] = [];
   const openRun = (): FoldedSpan<T> | null => {
@@ -171,6 +182,7 @@ function foldWorkSpans<T extends ChatRenderMessage>(messages: ReadonlyArray<T>):
   };
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index]!;
+    if (isImageReadMeta(message)) continue;
     if (message.kind === WORK_ROW_KIND) {
       const steps = (message.steps ?? []) as T[];
       if (!steps.length) continue; // withdrawn, see ChatRenderMessage.steps

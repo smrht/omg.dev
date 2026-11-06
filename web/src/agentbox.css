@@ -176,3 +176,110 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
   .ab-tab-streep { transition: none; }
   .session-overview [data-overview-row][data-row-busy] .rail-preview { animation: none; background: none; color: var(--muted-foreground); }
 }
+
+/* ── Ronde 4: chat ─────────────────────────────────────────────────────────
+   Codeblok = één vlak, geen kaart-in-kaart. Taal en knoppen in één smalle
+   kopregel, tekst loopt af in plaats van zijwaarts te scrollen. */
+.markdown [data-streamdown="code-block"] {
+  position: relative;
+  margin: 0.85rem 0;
+  gap: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--code-bg);
+  overflow: hidden;
+}
+.markdown [data-streamdown="code-block-header"] {
+  height: 28px;
+  padding: 0 0.75rem;
+  font-size: 11px;
+  color: var(--muted-foreground);
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+}
+.markdown [data-streamdown="code-block-header"] > span { margin-left: 0; }
+.markdown [data-streamdown="code-block-header"][data-language="text"],
+.markdown [data-streamdown="code-block-header"][data-language="plaintext"],
+.markdown [data-streamdown="code-block-header"][data-language=""] { border-bottom: 0; height: 0; overflow: hidden; }
+.markdown [data-streamdown="code-block-actions"] {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  z-index: 2;
+  opacity: 0.55;
+  transition: opacity 150ms ease;
+}
+.markdown [data-streamdown="code-block"]:hover [data-streamdown="code-block-actions"],
+.markdown [data-streamdown="code-block-actions"]:focus-within { opacity: 1; }
+.markdown [data-streamdown="code-block-actions"] > * { background: transparent !important; border: 0 !important; box-shadow: none !important; }
+.markdown [data-streamdown="code-block-body"] {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0.6rem 0.85rem 0.7rem;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.markdown [data-streamdown="code-block-body"] pre {
+  background: transparent !important;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: inherit;
+}
+/* Tekst zonder taal is meestal een tweet, mail of prompt: in de leesletter. */
+.markdown [data-streamdown="code-block"][data-language="text"] [data-streamdown="code-block-body"],
+.markdown [data-streamdown="code-block"][data-language="plaintext"] [data-streamdown="code-block-body"],
+.markdown [data-streamdown="code-block"][data-language=""] [data-streamdown="code-block-body"] {
+  padding-right: 4.5rem;
+}
+.markdown [data-streamdown="code-block"][data-language="text"] pre,
+.markdown [data-streamdown="code-block"][data-language="plaintext"] pre,
+.markdown [data-streamdown="code-block"][data-language=""] pre,
+.markdown [data-streamdown="code-block"][data-language="text"] code,
+.markdown [data-streamdown="code-block"][data-language="plaintext"] code,
+.markdown [data-streamdown="code-block"][data-language=""] code {
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+
+/* Lopende tekst: rustiger ritme, lijsten minder ingesprongen. */
+.markdown p { margin: 0.55em 0; }
+.markdown ul, .markdown ol { padding-left: 1.15em; margin: 0.5em 0; }
+.markdown li { margin: 0.2em 0; }
+.markdown li::marker { color: var(--muted-foreground); }
+.markdown strong { font-weight: 600; }
+.markdown blockquote { border-left: 2px solid var(--border); padding-left: 0.85em; color: var(--muted-foreground); }
+
+/* Jouw bericht: compacte, vlakke ballon zonder glas. */
+.user-bubble.markdown,
+.dark .user-bubble.markdown {
+  border-radius: 14px;
+  border: 0;
+  --user-bubble-padding: 7px 12px;
+  background: color-mix(in oklab, var(--foreground) 7%, var(--background));
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* "Gewerkt 3m": een stille regel, geen mono-ruis. Het bewegende lijntje
+   gebruikt het accent in plaats van de blauw-paarse gradient. */
+.tool-call-row { font-size: 12px; color: color-mix(in oklab, var(--muted-foreground) 85%, transparent); }
+.tool-call-row .font-mono { font-family: var(--font-sans); letter-spacing: 0; }
+.tool-call-row--live::after {
+  background-image: linear-gradient(90deg, transparent, var(--primary), transparent) !important;
+  height: 1.5px !important;
+}
+
+/* Opdracht geven: hoofdactie in de accenttint, niet zeven volle blokken. */
+.melding-opdracht { background: color-mix(in oklab, var(--primary) 12%, transparent); color: var(--primary); transition: background-color 150ms ease, color 150ms ease; }
+.melding-opdracht:hover { background: var(--primary); color: var(--primary-foreground); }
+.markdown [data-streamdown="code-block-actions"],
+.markdown [data-streamdown="code-block-actions"] * { background: transparent !important; border-color: transparent !important; box-shadow: none !important; }
+.markdown ul, .markdown ol { list-style-position: outside; padding-left: 1.25em; }
+.markdown li > p { margin: 0; }
+@media (max-width: 767px) {
+  .markdown [data-streamdown="code-block"][data-language="text"] [data-streamdown="code-block-body"],
+  .markdown [data-streamdown="code-block"][data-language=""] [data-streamdown="code-block-body"] { padding-right: 3rem; }
+}

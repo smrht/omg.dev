@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Check, Clock, ExternalLink, RotateCcw } from "lucide-react";
+import { Check, Clock, CornerDownRight, ExternalLink, RotateCcw } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // Taken: wat er voor Sam ligt, automatisch verzameld uit mail, gesprekken en
@@ -43,6 +43,58 @@ async function laad(): Promise<TakenData> {
   return cache;
 }
 
+/** Status zetten buiten de hook om (ook vanuit de composer na een opdracht). */
+export async function zetTaak(id: string, status: Taak["status"]) {
+  if (cache) {
+    cache = { ...cache, items: cache.items.map(i => i.id === id ? { ...i, status, afgevinkt: status === "open" ? null : new Date().toISOString() } : i) };
+    window.dispatchEvent(new Event(EVENT));
+  }
+  await fetch(`/api/taken/item/${encodeURIComponent(id)}`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }),
+  }).catch(() => undefined);
+  laad().catch(() => undefined);
+}
+
+// Opdracht geven: Sam reageert op een melding vaker met werk dan met wegklikken.
+// De knop zet de melding als tekst in de composer van een nieuwe sessie; pas als
+// die sessie echt start, gaat de melding naar "gedaan". Annuleren laat hem staan.
+export const OPDRACHT_EVENT = "agentbox-opdracht";
+export const MELDINGEN_EVENT = "agentbox-meldingen";
+let wachtend: { id: string; tekst: string } | null = null;
+let lopend: { id: string; tekst: string } | null = null;
+
+export function opdrachtTekst(t: Taak): string {
+  const kop = t.soort === "melding" ? "Melding" : t.soort === "vast" ? "Vastgelopen" : LABEL[t.soort];
+  const regels = [`${kop}: ${t.titel}`];
+  const meta = [t.wie, t.tijd ? new Date(t.tijd).toLocaleString("nl-NL", { dateStyle: "short", timeStyle: "short" }) : ""].filter(Boolean).join(" · ");
+  if (meta) regels.push(meta);
+  if (t.detail) regels.push(t.detail);
+  if (t.sessie) regels.push(`Sessie: ${t.sessie}`);
+  if (t.link) regels.push(`Link: ${t.link}`);
+  return `${regels.join("\n")}\n\nOpdracht: `;
+}
+
+export function geefOpdracht(t: Taak) {
+  wachtend = { id: t.id, tekst: opdrachtTekst(t) };
+  window.dispatchEvent(new Event(OPDRACHT_EVENT));
+}
+
+/** De composer pakt de wachtende opdracht één keer op. */
+export function neemOpdracht(): string | null {
+  const w = wachtend;
+  wachtend = null;
+  if (!w) return null;
+  lopend = w;
+  return w.tekst;
+}
+
+/** Na een echte start: staat de meldingstekst nog in de prompt, dan is hij afgehandeld. */
+export function opdrachtVerstuurd(prompt: string) {
+  const l = lopend;
+  lopend = null;
+  if (l && prompt.includes(l.tekst.split("\n")[0]!)) void zetTaak(l.id, "gedaan");
+}
+
 export function useTaken() {
   const [data, setData] = useState<TakenData | null>(cache);
   const [fout, setFout] = useState(false);
@@ -57,16 +109,7 @@ export function useTaken() {
     window.addEventListener(EVENT, opWijziging);
     return () => { dood = true; window.clearInterval(t); document.removeEventListener("visibilitychange", zicht); window.removeEventListener(EVENT, opWijziging); };
   }, []);
-  const zet = useCallback(async (id: string, status: Taak["status"]) => {
-    if (cache) {
-      cache = { ...cache, items: cache.items.map(i => i.id === id ? { ...i, status, afgevinkt: status === "open" ? null : new Date().toISOString() } : i) };
-      window.dispatchEvent(new Event(EVENT));
-    }
-    await fetch(`/api/taken/item/${encodeURIComponent(id)}`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }),
-    }).catch(() => undefined);
-    laad().catch(() => undefined);
-  }, []);
+  const zet = useCallback((id: string, status: Taak["status"]) => zetTaak(id, status), []);
   return { data, fout, zet };
 }
 
@@ -87,9 +130,10 @@ function wanneer(iso?: string) {
   return dagen <= 1 ? "gisteren" : `${dagen} dagen`;
 }
 
+// Een vastgelopen bot (Copyreviewer e.d.) is geen werk voor Sam: dat is een melding.
+export const isMelding = (i: Taak) => i.soort === "melding" || (!!i.machine && i.soort === "vast");
+
 export function deelTaken(items: Taak[]) {
-  // Een vastgelopen bot (Copyreviewer e.d.) is geen werk voor Sam: dat is een melding.
-  const isMelding = (i: Taak) => i.soort === "melding" || (i.machine && i.soort === "vast");
   const open = items.filter(i => i.status === "open" && i.soort !== "gedaan" && !isMelding(i))
     .sort((a, b) => RANG[a.soort] - RANG[b.soort] || (b.tijd ?? "").localeCompare(a.tijd ?? ""));
   const meldingen = items.filter(i => i.status === "open" && isMelding(i));
@@ -128,6 +172,8 @@ function TaakRij({ taak, onOpenSession, zet, klein, smal }: {
         <div className={cn("taak-knoppen flex shrink-0 items-center", smal && "taak-knoppen-zweef")}>
           {taak.status === "open" ? (
             <>
+              <button type="button" onClick={() => geefOpdracht(taak)} title="Opdracht geven" aria-label={`Opdracht geven: ${taak.titel}`}
+                className="flex size-9 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary"><CornerDownRight className="size-4" /></button>
               {!smal && <button type="button" onClick={() => zet(taak.id, "later")} title="Later (morgen terug)" aria-label={`Later: ${taak.titel}`}
                 className="flex size-9 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary"><Clock className="size-4" /></button>}
               <button type="button" onClick={() => zet(taak.id, "gedaan")} title="Gedaan" aria-label={`Gedaan: ${taak.titel}`}
@@ -158,7 +204,7 @@ function Bronregel({ data }: { data: TakenData }) {
 }
 
 /** De Taken-tab in de zijbalk: alles, gegroepeerd. */
-export function TakenLijst({ onOpenSession, smal, zoek = "" }: { onOpenSession?: (sid: string) => void; smal?: boolean; zoek?: string }) {
+export function TakenLijst({ onOpenSession, onMeldingen = () => window.dispatchEvent(new Event(MELDINGEN_EVENT)), smal, zoek = "" }: { onOpenSession?: (sid: string) => void; onMeldingen?: () => void; smal?: boolean; zoek?: string }) {
   const { data, fout, zet } = useTaken();
   const [meldingenOpen, setMeldingenOpen] = useState(false);
   const delen = useMemo(() => {
@@ -172,7 +218,15 @@ export function TakenLijst({ onOpenSession, smal, zoek = "" }: { onOpenSession?:
       <Kop aantal={delen.open.length}>Voor jou</Kop>
       {delen.open.length ? <ul>{delen.open.map(t => <TaakRij key={t.id} taak={t} zet={zet} onOpenSession={onOpenSession} smal={smal} />)}</ul>
         : <p className="py-2 text-sm text-muted-foreground">Niets dat op jou wacht.</p>}
-      {delen.meldingen.length > 0 && <>
+      {delen.meldingen.length > 0 && onMeldingen && (
+        <button type="button" onClick={onMeldingen}
+          className="taken-meldingen-link mt-3 flex min-h-10 w-full items-center gap-2 rounded-md border border-border/70 px-3 text-left text-sm hover:bg-muted focus-visible:outline-2 focus-visible:outline-primary">
+          <span className="font-medium">Meldingen</span>
+          <span className="tabular-nums text-muted-foreground">{delen.meldingen.length}</span>
+          <span className="ml-auto text-xs text-muted-foreground">openen</span>
+        </button>
+      )}
+      {delen.meldingen.length > 0 && !onMeldingen && <>
         <button type="button" onClick={() => setMeldingenOpen(o => !o)} aria-expanded={meldingenOpen}
           className="taken-kop mt-4 flex min-h-9 items-center text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground hover:text-foreground">
           Meldingen <span className="ml-1.5 font-normal tabular-nums">{delen.meldingen.length}</span><span className="ml-1.5 font-normal normal-case tracking-normal">{meldingenOpen ? "verbergen" : "tonen"}</span>
@@ -210,5 +264,76 @@ export function TakenVandaag({ onOpenSession, onAlles }: { onOpenSession?: (sid:
       )}
       <Bronregel data={data} />
     </section>
+  );
+}
+
+/**
+ * Meldingen als eigen scherm (vervangt het oude Notifications-scherm, dat de
+ * stilgevallen Shipped-feed was). Hoofdactie is "Opdracht geven"; afhandelen
+ * is de tweede knop.
+ */
+export function MeldingenPagina({ onOpenSession }: { onOpenSession?: (sid: string) => void }) {
+  const { data, fout, zet } = useTaken();
+  const [toonAf, setToonAf] = useState(false);
+  const items = data?.items ?? [];
+  const open = useMemo(() => items.filter(i => i.status === "open" && isMelding(i))
+    .sort((a, b) => Number(!!b.machine && b.soort === "vast") - Number(!!a.machine && a.soort === "vast") || (b.tijd ?? "").localeCompare(a.tijd ?? "")), [items]);
+  const af = useMemo(() => items.filter(i => isMelding(i) && i.status === "gedaan" && isVandaag(i.afgevinkt)), [items]);
+  return (
+    <section aria-label="Meldingen" className="taken meldingen-pagina mx-auto w-full max-w-3xl px-4 pb-16 pt-8 md:px-8">
+      <header className="mb-4">
+        <h1 className="text-[22px] font-semibold tracking-tight">Meldingen <span className="ml-1 text-base font-normal tabular-nums text-muted-foreground">{open.length}</span></h1>
+        <p className="mt-1 text-sm text-muted-foreground">Shopmeldingen, facturen, monitors en vastgelopen bots. Geef een opdracht of handel af.</p>
+      </header>
+      {!data ? <p role="status" className="py-6 text-sm text-muted-foreground">{fout ? "Meldingen niet bereikbaar." : "Meldingen laden…"}</p>
+        : open.length === 0 ? <p className="py-6 text-sm text-muted-foreground">Geen open meldingen.</p>
+        : <ul className="divide-y divide-border/70 border-y border-border/70">{open.map(t => <MeldingRij key={t.id} taak={t} zet={zet} onOpenSession={onOpenSession} />)}</ul>}
+      {af.length > 0 && <div className="mt-6">
+        <button type="button" onClick={() => setToonAf(v => !v)} aria-expanded={toonAf}
+          className="taken-kop flex min-h-9 items-center text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground hover:text-foreground">
+          Vandaag afgehandeld <span className="ml-1.5 font-normal tabular-nums">{af.length}</span>
+        </button>
+        {toonAf && <ul>{af.map(t => <TaakRij key={t.id} taak={t} zet={zet} onOpenSession={onOpenSession} klein />)}</ul>}
+      </div>}
+      {data && <Bronregel data={data} />}
+    </section>
+  );
+}
+
+function MeldingRij({ taak, zet, onOpenSession }: { taak: Taak; zet: (id: string, s: Taak["status"]) => void; onOpenSession?: (sid: string) => void }) {
+  const kanOpenen = !!(taak.sessie && onOpenSession) || !!taak.link;
+  const open = () => {
+    if (taak.sessie && onOpenSession) onOpenSession(taak.sessie);
+    else if (taak.link) window.open(taak.link, "_blank", "noopener");
+  };
+  return (
+    <li className="taak melding-rij flex flex-col gap-2 py-3.5 sm:flex-row sm:items-start sm:gap-4" data-soort={taak.soort}>
+      <div className="flex min-w-0 flex-1 items-start gap-3">
+        <span aria-hidden="true" className="taak-stip mt-[7px] size-2 shrink-0 rounded-full" />
+        <div className="min-w-0 flex-1">
+          <p className="text-[15px] font-medium leading-snug text-foreground">{taak.titel}</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            <span className="taak-soort font-medium">{taak.soort === "vast" ? "Vastgelopen" : LABEL[taak.soort]}</span>
+            {" · "}<span className="tabular-nums">{wanneer(taak.tijd)}</span>
+            {taak.wie ? <> · {taak.wie}</> : null}
+          </p>
+          {taak.detail ? <p className="mt-1 line-clamp-2 text-sm leading-relaxed text-muted-foreground">{taak.detail}</p> : null}
+        </div>
+      </div>
+      <div className="flex shrink-0 items-center gap-1.5 pl-5 sm:pl-0">
+        <button type="button" onClick={() => geefOpdracht(taak)}
+          className="melding-opdracht inline-flex h-9 items-center gap-1.5 rounded-md px-3 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">
+          <CornerDownRight className="size-4" aria-hidden="true" />Opdracht geven
+        </button>
+        <button type="button" onClick={() => zet(taak.id, "gedaan")}
+          className="inline-flex h-9 items-center gap-1.5 rounded-md px-3 text-sm text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary">
+          <Check className="size-4" aria-hidden="true" />Afhandelen
+        </button>
+        {kanOpenen ? <button type="button" onClick={open} title={taak.sessie ? "Gesprek openen" : "Openen"} aria-label={`Openen: ${taak.titel}`}
+          className="flex size-9 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary">
+          <ExternalLink className="size-4" />
+        </button> : null}
+      </div>
+    </li>
   );
 }
