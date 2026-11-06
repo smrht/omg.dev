@@ -1,0 +1,7 @@
+[Unit]
+Description=Taken-API voor de agentbox-UI (alleen lezen van bronnen, afvinkstatus lokaal)
+[Service]
+ExecStart=/usr/bin/python3 /home/agent/omg-agentbox/agentbox/taken/api.py
+Restart=on-failure
+[Install]
+WantedBy=default.target

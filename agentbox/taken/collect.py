@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""Taken-collector: verzamelt open werk voor Sam uit bestaande bronnen. Alleen lezen.
+
+Bronnen:
+- gesprek: omg-sessies waarvan het laatste bericht eindigt op een echte "Jij: ..." (niet "niks"),
+  of die vastgelopen zijn.
+- gedaan:  omg-sessies die vandaag eindigden op "Jij: niks".
+- mail:    Gmail-inbox (contactexpertly, primair, 7 dagen, niet aan agent@) waar het laatste
+           bericht niet van ons komt. Via Executor, alleen lezen.
+- bestelling: orders in dpit met open aandachtspunt of zonder track & trace na 6 dagen.
+
+Schrijft ~/.local/state/taken/items.json. Verstuurt niets, wijzigt niets in de bronnen.
+"""
+from __future__ import annotations
+import hashlib, json, os, re, subprocess, sys, time, urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+STATE = Path(os.environ.get("TAKEN_STATE", Path.home() / ".local/state/taken"))
+OMG = os.environ.get("OMG_API", "http://127.0.0.1:8766")
+EXECUTOR = str(Path.home() / "bin/executor-mcp")
+NOW = time.time()
+
+
+def iso(ts: float | None) -> str | None:
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat() if ts else None
+
+
+def one_line(t: str, n: int = 160) -> str:
+    t = re.sub(r"[`*#>]|\[([^\]]*)\]\([^)]*\)", lambda m: m.group(1) or "", t or "")
+    t = re.sub(r"\s+", " ", t).strip()
+    return t if len(t) <= n else t[: n - 1].rsplit(" ", 1)[0] + "…"
+
+
+def first_sentence(t: str) -> str:
+    t = re.sub(r"\s+", " ", re.sub(r"[`*#>]", "", t or "")).strip()
+    t = re.sub(r"^Jij hoeft niets te doen[^.!?]*[.!?:]\s*", "", t) or t
+    m = re.match(r"(.{20,220}?[.!?])(\s|$)", t)
+    return one_line(m.group(1) if m else t, 200)
+
+
+def vast_detail(text: str) -> str:
+    """Leesbare reden voor een vastgelopen sessie; ruwe JSON-oordelen worden één zin."""
+    t = (text or "").strip()
+    m = re.search(r'"verdict"\s*:\s*"([A-Z_]+)"', t)
+    if m:
+        b = re.search(r'"blockers"\s*:\s*\[\s*"([^"]{3,200})', t)
+        return one_line(f"Oordeel {m.group(1).lower()}" + (f": {b.group(1)}" if b else ", wacht op afronding"), 140)
+    if re.search(r"capacity|rate.?limit|overloaded", t, re.I):
+        return "Model had geen capaciteit, opnieuw starten"
+    if re.search(r"terminated by signal|stopped unexpectedly", t, re.I):
+        return "Agent stopte onverwacht, opnieuw starten"
+    return one_line(t.split("\n")[-1] or "Vastgelopen", 140)
+
+
+def sessions() -> list[dict]:
+    out = []
+    data = json.load(urllib.request.urlopen(f"{OMG}/api/sessions", timeout=20))["sessions"]
+    today = datetime.now().date()
+    for s in data:
+        last = (s.get("last") or {})
+        text = last.get("text") or ""
+        if last.get("role") not in (None, "assistant"):
+            continue
+        sid = s["sessionId"]
+        title = one_line(s.get("title") or "Gesprek", 70)
+        at = (s.get("lastActivityAt") or 0) / 1000 or None
+        machine = bool(s.get("botName")) or title.startswith(("Mailtaak", "Mail-intake"))
+        jij = re.findall(r"Jij:\s*([^\n]{2,240})", text)
+        base = {"sessie": sid, "tijd": iso(at), "machine": machine}
+        if s.get("status") == "blocked":
+            out.append({**base, "id": f"gesprek:{sid}:vast", "bron": "gesprek", "soort": "vast",
+                        "titel": title, "detail": vast_detail(text)})
+            continue
+        if s.get("busy"):
+            continue
+        if jij:
+            j = jij[-1].strip().rstrip(".")
+            if re.match(r"niks\b", j, re.I):
+                if at and datetime.fromtimestamp(at).date() == today:
+                    out.append({**base, "id": f"gedaan:{sid}:{int(at)}", "bron": "gedaan", "soort": "gedaan",
+                                "titel": title, "detail": first_sentence(text)})
+            else:
+                # sleutel op de tekst: een nieuwe vraag in hetzelfde gesprek is een nieuwe taak
+                key = hashlib.sha1(j.encode()).hexdigest()[:8]
+                out.append({**base, "id": f"gesprek:{sid}:{key}", "bron": "gesprek", "soort": "vraag",
+                            "titel": one_line(j, 200), "detail": title})
+    return out
+
+
+GMAIL_JS = r"""
+const q = "in:inbox category:primary newer_than:7d -to:agent@1704media.nl";
+const g = tools.google_gmail.user.contactexpertly.gmail.users;
+const r = await g.threads.list({userId:"me", q, maxResults:40});
+if (!r || r.ok !== true || r.http?.status !== 200) throw new Error("threadlijst mislukt");
+const out = [];
+for (const t of (r.data.threads || [])) {
+  const d = await g.threads.get({userId:"me", id:t.id, format:"metadata", metadataHeaders:["From","Subject","Date"]});
+  if (!d || d.ok !== true) continue;
+  const msgs = d.data.messages || [];
+  const last = msgs[msgs.length-1] || {};
+  const h = Object.fromEntries((last.payload?.headers||[]).map(x=>[x.name,x.value]));
+  const first = Object.fromEntries((msgs[0]?.payload?.headers||[]).map(x=>[x.name,x.value]));
+  out.push({id:t.id, from:h.From||"", subject:first.Subject||h.Subject||"", snippet:last.snippet||"",
+            labels:last.labelIds||[], internalDate:Number(last.internalDate||0), count:msgs.length});
+}
+return {ok:true, complete:!r.data.nextPageToken, threads:out};
+"""
+
+
+AUTOMAAT = re.compile(r"no-?reply|noreply|notificat|mailer|administratie|beheer|wordpress@|woocommerce|"
+                      r"^\[|nieuwe bestelling|factuur|invoice|receipt|backlink offline|bevestiging", re.I)
+
+
+def is_melding(van: str, onderwerp: str) -> bool:
+    """Automatische meldingen (shopnotificaties, facturen, monitors): wel tonen, niet als taak."""
+    return bool(AUTOMAAT.search(van) or AUTOMAAT.search(onderwerp))
+
+
+def mails() -> list[dict]:
+    p = subprocess.run([EXECUTOR, "call", "execute", json.dumps({"code": GMAIL_JS})],
+                       capture_output=True, text=True, timeout=240)
+    res = json.loads(p.stdout)["result"]["structuredContent"]
+    if res.get("status") != "completed":
+        raise RuntimeError("executor gaf geen completed")
+    out = []
+    for t in res["result"]["threads"]:
+        if "SENT" in t["labels"]:
+            continue  # laatste bericht komt van ons
+        name = re.sub(r"\s*<[^>]+>", "", t["from"]).strip().strip('"') or t["from"]
+        melding = is_melding(t["from"], t["subject"] or "")
+        out.append({"id": f"mail:{t['id']}", "bron": "mail", "soort": "melding" if melding else "mail",
+                    "titel": one_line(t["subject"] or "(geen onderwerp)", 120),
+                    "detail": one_line(t["snippet"], 160), "wie": one_line(name, 50),
+                    "ongelezen": "UNREAD" in t["labels"],
+                    "link": f"https://mail.google.com/mail/u/?authuser=contactexpertly@gmail.com#all/{t['id']}",
+                    "tijd": iso(t["internalDate"] / 1000 if t["internalDate"] else None)})
+    return out
+
+
+ORDERS_PY = r"""
+import json, datetime
+from django.utils import timezone
+from django.db.models import Q
+from orders.models import Order
+now = timezone.now()
+qs = Order.objects.exclude(status__in=["delivered","cancelled","refunded"]).filter(
+    Q(internal_attention_required_at__isnull=False, open_loops_dismissed_at__isnull=True)
+    | Q(status__in=["new","processing"], created_at__lt=now-datetime.timedelta(days=6), tracking_number__in=["",None])
+).filter(created_at__gte=now-datetime.timedelta(days=90), fraud_hold=False)
+out = []
+for o in qs.order_by("created_at")[:60]:
+    out.append({"pk":o.pk, "nr":o.order_number, "shop":o.store.name if o.store else "", "status":o.status,
+                "klant":o.customer_status, "naam":o.customer_name, "uitzondering":o.tracking_exception_label or "",
+                "tracking":bool(o.tracking_number), "besteld":o.created_at.isoformat(),
+                "aandacht":o.internal_attention_required_at.isoformat() if o.internal_attention_required_at else None})
+print("TAKEN_JSON" + json.dumps(out))
+"""
+
+
+def orders() -> list[dict]:
+    p = subprocess.run(["ssh", "-o", "BatchMode=yes", "netcup-vps8000-wp",
+                        "sudo docker exec -i dpit_web python manage.py shell"],
+                       input=ORDERS_PY, capture_output=True, text=True, timeout=90)
+    line = next((l for l in p.stdout.splitlines() if l.startswith("TAKEN_JSON")), None)
+    if line is None:
+        raise RuntimeError("geen orderuitvoer")
+    out = []
+    for o in json.loads(line[len("TAKEN_JSON"):]):
+        days = (NOW - datetime.fromisoformat(o["besteld"]).timestamp()) / 86400
+        if o["uitzondering"] or o["klant"] == "delayed":
+            why = f"vertraagd ({o['uitzondering'] or o['klant']})"
+        elif not o["tracking"]:
+            why = f"nog geen track & trace na {int(days)} dagen"
+        else:
+            why = "vraagt aandacht"
+        out.append({"id": f"bestelling:{o['pk']}", "bron": "bestelling", "soort": "bestelling",
+                    "titel": f"#{str(o['nr']).lstrip('#')} {o['shop']}", "detail": why, "wie": one_line(o["naam"] or "", 40),
+                    "link": f"https://orders.nummerschilderen.com/admin/orders/order/{o['pk']}/change/",
+                    "tijd": o["aandacht"] or o["besteld"]})
+    return out
+
+
+def main() -> int:
+    STATE.mkdir(parents=True, exist_ok=True)
+    prev = {}
+    f = STATE / "items.json"
+    if f.exists():
+        try:
+            prev = json.loads(f.read_text())
+        except Exception:
+            prev = {}
+    result = {"bijgewerkt": iso(NOW), "bronnen": {}, "items": []}
+    for name, fn in (("gesprek", sessions), ("mail", mails), ("bestelling", orders)):
+        try:
+            items = fn()
+            result["items"] += items
+            result["bronnen"][name] = {"ok": True, "aantal": len(items), "om": iso(NOW)}
+        except Exception as e:  # bron faalt: vorige items van die bron blijven staan
+            keep = [i for i in prev.get("items", []) if i["bron"] == name or (name == "gesprek" and i["bron"] == "gedaan")]
+            result["items"] += keep
+            old = prev.get("bronnen", {}).get(name, {})
+            result["bronnen"][name] = {"ok": False, "fout": type(e).__name__ + ": " + str(e)[:160],
+                                       "aantal": len(keep), "om": old.get("om")}
+    first_seen = {i["id"]: i.get("gezien") for i in prev.get("items", [])}
+    for i in result["items"]:
+        i["gezien"] = first_seen.get(i["id"]) or iso(NOW)
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text(json.dumps(result, ensure_ascii=False, indent=1))
+    tmp.replace(f)
+    print(json.dumps(result["bronnen"], ensure_ascii=False))
+    return 0 if all(b["ok"] for b in result["bronnen"].values()) else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,7 @@
+[Unit]
+Description=Taken-collector elke 10 minuten
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+[Install]
+WantedBy=timers.target
