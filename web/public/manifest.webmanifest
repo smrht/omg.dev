@@ -1,6 +1,6 @@
 {
-  "name": "omg",
-  "short_name": "omg",
+  "name": "agentbox",
+  "short_name": "agentbox",
   "description": "Live view + control for omg coding sessions and agents.",
   "id": "/lfg-hs-2026-08-05",
   "start_url": "/",

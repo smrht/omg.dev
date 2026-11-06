@@ -38,7 +38,7 @@ export function InstallInstructions({ mode, open, onOpenChange }: {
           <div className="mb-2 flex size-14 items-center justify-center rounded-2xl bg-primary/10 text-primary">
             {ios ? <Share className="size-7" /> : <Download className="size-7" />}
           </div>
-          <DialogTitle>{ios ? "Install omg on your Home Screen" : "Install omg on your Mac"}</DialogTitle>
+          <DialogTitle>{ios ? "Zet agentbox op je beginscherm" : "Installeer agentbox op je Mac"}</DialogTitle>
           <DialogDescription>
             {ios
               ? "Open omg like an app, without browser controls."
@@ -117,9 +117,9 @@ export function PwaInstallCallout() {
       <aside className="mx-3 mt-2 flex items-center gap-3 rounded-2xl border border-primary/20 bg-card/90 px-3 py-2.5 shadow-sm backdrop-blur-xl">
         <OmgBrandMark className="size-10 text-muted-foreground" />
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-semibold">Install omg</div>
+          <div className="text-sm font-semibold">Installeer agentbox</div>
           <div className="truncate text-xs text-muted-foreground">
-            Faster launch, its own window, and a home-screen icon.
+            Sneller open, eigen venster en een icoon op je beginscherm.
           </div>
         </div>
         <Button size="sm" onClick={() => void action.act()} disabled={action.busy}>
@@ -161,7 +161,7 @@ export function PwaInstallSettingsSection() {
                 <Download className="size-4" />
               </span>
               <span>
-                <span className="block text-sm font-medium">Install omg</span>
+                <span className="block text-sm font-medium">Installeer agentbox</span>
                 <span className="block text-xs text-muted-foreground">Open it from your desktop or Home Screen</span>
               </span>
             </div>
