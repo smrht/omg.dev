@@ -62,3 +62,12 @@ describe("session references in markdown", () => {
     expect(ui.queryAll("a[data-session-ref]").map((a) => a.textContent)).toEqual(["deadbeef"]);
   });
 });
+
+ test("historical thread links render as text without opening a removed page", async () => {
+  ui.render(<StreamdownResponse>{"See [#Old team](omg:thread_11111111-1111-4111-8111-111111111111)."}</StreamdownResponse>);
+  await ui.flushAsync();
+  expect(ui.text()).toContain("Old team");
+  expect(ui.query("button[data-thread-ref]")).toBeNull();
+  expect(ui.query("a[href^='omg:thread_']")).toBeNull();
+  expect(opened).toEqual([]);
+});

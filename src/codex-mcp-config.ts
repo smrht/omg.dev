@@ -36,7 +36,7 @@ export function codexConfigPath(): string {
   return home ? join(home, "config.toml") : join(process.env.HOME ?? homedir(), ".codex", "config.toml");
 }
 
-function readCodexConfig(path: string): Record<string, unknown> | null {
+export function readCodexConfig(path: string): Record<string, unknown> | null {
   try {
     if (!existsSync(path)) return null;
     const parsed = Bun.TOML.parse(readFileSync(path, "utf8"));

@@ -1,8 +1,18 @@
 // Running Claude Code sessions: enumerate live `claude` processes and tail
 // their on-disk transcripts (~/.claude/projects/<proj>/<sessionId>.jsonl).
 import { readFile, readdir, readlink } from "node:fs/promises";
-import { statSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { statSync, readFileSync } from "node:fs";
 import { join, basename } from "node:path";
+import {
+  CodexHeadStore,
+  deriveCodexHead,
+  displayTextOf,
+  samePromptHashed,
+  stripConversationPrefix,
+  titleMatches as promptTitleMatches,
+  type CodexHeadEntry,
+  type PromptProjection,
+} from "./codex-head-cache.ts";
 import { panePidForSession, tmuxHasSession, tmuxTargetForPid, capturePane, isBusy, isJcodeBusy } from "./tmux";
 import { isManagedName, listManaged, managedContainment, patchManaged, type ManagedSession } from "./managed";
 import { agentUnitName, agentUnitOomKilled } from "./agent-unit-oom.ts";
@@ -21,10 +31,18 @@ import { homedir } from "node:os";
 import { projectName } from "./projects";
 import { usesCommandFileRuntime } from "./coding-agent-adapters";
 import type { CodingAgentKind } from "./coding-agents";
-import { OMG_CAPABILITY_VERSION, stripOmgRuntimeContract } from "./omg-capabilities.ts";
 import {
+  OMG_CAPABILITY_VERSION,
+  hasOmgRuntimeContract,
+  stripOmgRuntimeContract,
+} from "./omg-capabilities.ts";
+import {
+  backfillConfirmedInternalRows,
   cachedFingerprints,
+  getCachedResumableSession,
   getCachedTranscriptPath,
+  hideInternalRosterRows,
+  hideManagedAliasRows,
   upsertResumableRows,
   pruneResumableExcept,
   queryHistoricalCache,
@@ -101,6 +119,7 @@ const DIRECT_INDEX_MANAGED_AGENTS = new Set<ManagedSession["agent"]>([
   "devin",
   "copilot",
   "jcode",
+  "zcode",
 ]);
 
 type SessionProfile = {
@@ -420,6 +439,13 @@ export type Session = {
    * mark, so a fleet spread across several logins is readable at a glance.
    */
   claudeAccountId?: string | null;
+  /**
+   * Host this session runs on (src/execution-host.ts). Always reported as the
+   * effective host: rows from before the field existed are agentbox, because
+   * they run on this box. Recovery, respawn, fork and resume reuse it; a
+   * running session never changes host.
+   */
+  executionHost?: "agentbox" | "mac";
   launching?: boolean;
   startedAt: number | null;
   transcriptPath: string | null;
@@ -442,6 +468,8 @@ export type Session = {
   // without a live effort control or older sessions launched before it was
   // tracked.
   thinkingLevel?: string | null;
+  cyberAccessProgram?: import("./model-discovery.ts").CyberAccessProgram | null;
+  cyberAccessProgramControl?: boolean;
   /** Fast when Codex launched on its higher-throughput account service tier. */
   serviceTier?: "fast" | null;
   fastMode?: boolean;
@@ -684,6 +712,7 @@ export function managedLaunchRow(
     persistent: m.persistent,
     capabilityVersion: m.capabilityVersion ?? null,
     capabilitiesStale: m.capabilityVersion !== OMG_CAPABILITY_VERSION,
+    executionHost: m.executionHost ?? "agentbox",
     // Still booting counts as launching: the record says "running" but the
     // harness has not come up yet, and the card should say so rather than
     // present an agent that cannot take a message yet as ready.
@@ -736,7 +765,7 @@ export function managedLaunchRow(
       : explained
       ? {
           status: "blocked" as const,
-          statusReason: "provider_error" as const,
+          statusReason: lastIndexedAssistantMessage(sessionId)?.text?.startsWith("Local storage error:") ? null : "provider_error" as const,
           statusDetail:
             lastIndexedAssistantMessage(sessionId)?.text?.replace(/\s+/g, " ").trim().slice(0, 180) ||
             "The coding agent stopped before it could start.",
@@ -758,6 +787,7 @@ function managedLineage(m: ManagedSession | undefined): Pick<
   | "capabilityVersion"
   | "capabilitiesStale"
   | "claudeAccountId"
+  | "executionHost"
 > {
   return {
     parentSessionId: m?.parentSessionId ?? null,
@@ -771,6 +801,7 @@ function managedLineage(m: ManagedSession | undefined): Pick<
     capabilityVersion: m?.capabilityVersion ?? null,
     capabilitiesStale: !!m && m.capabilityVersion !== OMG_CAPABILITY_VERSION,
     claudeAccountId: m?.claudeAccountId ?? null,
+    executionHost: m?.executionHost ?? "agentbox",
   };
 }
 
@@ -976,6 +1007,105 @@ export async function setSessionTitle(
   // Don't wait for the mtime to prove the write — this process just made it.
   titleOverridesCache = null;
   if (t) updateCachedSessionTitle(sessionId, all[sessionId]);
+}
+
+// The controlled first prompt of the scheduled-task launcher (cron `claude -p`
+// on agentbox2, skill body under /home/agent/.claude/scheduled-tasks/). The
+// signature is the FULL three-part shape — the text must OPEN with the fixed
+// Dutch routine start, and carry both the skill-read instruction naming the
+// scheduled-tasks path and the headless agentbox2 line. All parts, never a
+// keyword: a human chat that merely mentions "Voer de geplande routine" (or an
+// older routine variant without the headless line) lacks part of the shape and
+// stays listed. Exported for the issue-552 regression test.
+const ROUTINE_LAUNCH_PROMPT_PREFIX = "Voer de geplande routine";
+const ROUTINE_LAUNCH_PROMPT_PARTS: readonly string[] = [
+  "Lees eerst",
+  "/home/agent/.claude/scheduled-tasks/",
+  "Je draait headless op dedicated agentbox2",
+];
+
+export function isRoutineLaunchPrompt(text: string): boolean {
+  if (!text.startsWith(ROUTINE_LAUNCH_PROMPT_PREFIX)) return false;
+  return ROUTINE_LAUNCH_PROMPT_PARTS.every((part) => text.includes(part));
+}
+
+// Launch signals for a claude transcript's FIRST user message (issue 552) —
+// both classifications read that one message in a single pass:
+//
+// 1. launchContract: omg wraps the first prompt of every claude it spawns in
+//    the runtime contract (the tmux launchers and the AI-SDK backends), while
+//    an interactive CLI session opens with what the human typed and
+//    aisdk-managed chats keep the contract out of the user turn entirely. The
+//    envelope recognises all three brand spellings forever
+//    (omg-capabilities.ts), so its presence is the strongest durable
+//    "launched by omg" signal a claude transcript carries. The BOT contract
+//    header never matches CONTRACT_HEADERS, so bot transcripts stay out.
+// 2. sourceKind "routine": the controlled scheduled-task signature above. A
+//    cron `claude -p` routine carries NO omg envelope, so the routine family
+//    needs its own marker — this is what makes future legacy run-routine
+//    transcripts (like cba6e1e7) auto-hide instead of depending on the
+//    one-time id backfill in resume-cache.ts.
+//
+// Both are source signals, not title guesses. Exported for the issue-552
+// regression test.
+export function hasClaudeLaunchClassification(originator: string | null | undefined): boolean {
+  return (
+    originator === "claude_sdk_ts" ||
+    originator === "claude_sdk_cli" ||
+    originator === "claude_other"
+  );
+}
+
+export async function transcriptLaunchSignals(
+  path: string,
+): Promise<{ launchContract: boolean; sourceKind: string | null; originator: string | null }> {
+  try {
+    const text = await Bun.file(path).slice(0, 256 * 1024).text();
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      let x: {
+        type?: string;
+        isMeta?: boolean;
+        parentUuid?: string | null;
+        promptSource?: unknown;
+        entrypoint?: unknown;
+        message?: { content?: unknown };
+      };
+      try {
+        x = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (x.type !== "user" || x.isMeta || x.parentUuid != null) continue;
+      const c = x.message?.content;
+      const t =
+        typeof c === "string"
+          ? c
+          : Array.isArray(c)
+            ? (c as Array<{ type?: string; text?: string }>).find(
+                (e) => e?.type === "text" && typeof e.text === "string",
+              )?.text ?? null
+            : null;
+      return {
+        launchContract: t ? hasOmgRuntimeContract(t) : false,
+        sourceKind: t && isRoutineLaunchPrompt(t) ? "routine" : null,
+        // Every headless launch carries promptSource "sdk"; the entrypoint
+        // only says WHICH headless door was used. "sdk-ts" is the Agent SDK,
+        // "sdk-cli" a `claude -p` from a cron or script — both are automation,
+        // neither is a chat. Pinning this to one entrypoint is what let the
+        // daily `claude -p` routines back into the roster; the prefix covers
+        // the doors that do not exist yet, and an interactive session (which
+        // never sets promptSource "sdk") still classifies as claude_other.
+        originator:
+          x.promptSource === "sdk" && typeof x.entrypoint === "string" && x.entrypoint.startsWith("sdk-")
+            ? x.entrypoint === "sdk-ts"
+              ? "claude_sdk_ts"
+              : "claude_sdk_cli"
+            : "claude_other",
+      };
+    }
+  } catch {}
+  return { launchContract: false, sourceKind: null, originator: null };
 }
 
 // Claude's /resume picker titles a session by its first real user prompt; mirror
@@ -1501,7 +1631,10 @@ type CodexThread = {
   cwd: string | null;
   createdAt: number | null;
   updatedAt: number | null;
-  firstUserText: string | null;
+  /** Compact first-prompt projection (hash + previews), never the full text. */
+  prompt: PromptProjection;
+  originator: string | null;
+  sourceKind: string | null;
 };
 
 // A rollout's header (session_meta line + first user prompt) is written once at
@@ -1509,91 +1642,72 @@ type CodexThread = {
 // a pure function of the path: cache it permanently and re-read only the cheap
 // mtime each poll. Without this, every listSessions() re-read+parsed ~384KB of
 // EVERY historical codex rollout (O(all codex sessions ever)) every 5 seconds.
-type CodexHead = { id: string; cwd: string | null; createdAt: number | null; firstUserText: string | null };
-const codexHeadCache = new Map<string, CodexHead | null>();
-
-// ...and because it is immutable, it survives a restart too.
+// Issue 552: the head also carries the rollout's launch provenance from the
+// same session_meta line — originator (who drove the SDK: "codex_sdk_ts" for
+// programmatic launches, "codex_exec" for a shell, "t3code_desktop" for the
+// old T3 app) and sourceKind ("exec"/"vscode" for direct launches, the
+// "subagent" marker when a parent thread spawned this one). Immutable like
+// the rest of the header, so it caches with it.
 //
-// The in-memory cache above made every poll after the first one cheap, but the
-// first one still read and parsed the head of EVERY rollout on the box — 3,515
-// files and 1.8GB here. That was the last freeze left: measured at 10.6s on the
-// rebuild ~a minute after each deploy, during which the whole server stopped.
+// The persisted cache is the compact v3 store in codex-head-cache.ts: heads
+// keyed by rollout path with the first prompt reduced to a hash (for
+// samePrompt binding against live process command lines) plus short previews
+// (for managed-title matching and display). The legacy v2 file
+// (codex-heads.json, full prompts, ~700MB live) is only ever READ — as the
+// migration input on first boot, streaming in bounded chunks so the event
+// loop stays responsive — and never rewritten or deleted.
 //
-// The heads are keyed by path and a rollout's header never changes, so the map
-// is valid forever. Writing it out means a restart reads one file instead of
-// thousands: measured here, the first rebuild after a restart goes from 3.9s to
-// 0.25s across 3,517 rollouts.
-//
-// The prompts are stored whole, which makes the file ~10MB at that count and
-// grows it by a few KB per new codex session. That is deliberate: `samePrompt`
-// binds a live codex process to its rollout by comparing the full first prompt
-// against the process command line, so a truncated copy would silently stop
-// matching long prompts. Storing a hash for matching and a short preview for
-// display would shrink this a lot, and is the right move if the file ever
-// becomes the problem — it is not while it replaces reading 1.8GB.
-//
-// A path that has since been deleted is dropped when we next look at it; a
-// corrupt or foreign-version file just fails to load and we rebuild from
-// scratch, which is only as slow as before.
+// A corrupt or foreign-version cache file just fails to load and we rebuild
+// from rollout heads on demand, which is only as slow as before.
 const CODEX_LIVE_ROLLOUT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
-const CODEX_HEAD_CACHE_VERSION = 1;
-const codexHeadCachePath = () => join(PATHS.data, "codex-heads.json");
-let codexHeadCacheLoaded = false;
-let codexHeadCacheDirty = 0;
-let codexHeadFlushTimer: ReturnType<typeof setTimeout> | null = null;
-
-function loadCodexHeadCache(): void {
-  if (codexHeadCacheLoaded) return;
-  codexHeadCacheLoaded = true;
-  try {
-    const raw = JSON.parse(readFileSync(codexHeadCachePath(), "utf8")) as {
-      version?: number;
-      heads?: Record<string, CodexHead | null>;
-    };
-    if (raw.version !== CODEX_HEAD_CACHE_VERSION || !raw.heads) return;
-    for (const [path, head] of Object.entries(raw.heads)) codexHeadCache.set(path, head);
-  } catch {
-    // No cache, unreadable, or written by another version: parse as before.
-  }
-}
+const codexHeads = new CodexHeadStore({
+  v3Path: () => join(PATHS.data, "codex-heads-v3.jsonl"),
+  v2Path: () => join(PATHS.data, "codex-heads.json"),
+});
 
 /** Persist after a burst of new parses rather than on every one. */
 function scheduleCodexHeadFlush(): void {
-  if (codexHeadFlushTimer || codexHeadCacheDirty === 0) return;
-  codexHeadFlushTimer = setTimeout(() => {
-    codexHeadFlushTimer = null;
-    const pending = codexHeadCacheDirty;
-    codexHeadCacheDirty = 0;
-    try {
-      const heads: Record<string, CodexHead | null> = {};
-      for (const [path, head] of codexHeadCache) heads[path] = head;
-      const tmp = `${codexHeadCachePath()}.${process.pid}.tmp`;
-      writeFileSync(tmp, JSON.stringify({ version: CODEX_HEAD_CACHE_VERSION, heads }));
-      renameSync(tmp, codexHeadCachePath());
-    } catch {
-      // Best effort: a cache we could not write is a slow start, not a failure.
-      codexHeadCacheDirty = pending;
-    }
-  }, 5_000);
-  (codexHeadFlushTimer as { unref?: () => void }).unref?.();
+  codexHeads.scheduleFlush();
 }
 
-async function parseCodexHead(path: string): Promise<CodexHead | null> {
+async function parseCodexHead(path: string): Promise<CodexHeadEntry | null> {
   try {
     const first = (await Bun.file(path).slice(0, 128 * 1024).text()).split("\n")[0];
     if (!first) return null;
     const row = JSON.parse(first) as {
       type?: string;
-      payload?: { id?: string; cwd?: string; timestamp?: string };
+      payload?: {
+        id?: string;
+        cwd?: string;
+        timestamp?: string;
+        originator?: unknown;
+        source?: unknown;
+      };
     };
     const id = row.payload?.id ?? path.match(UUID)?.[0] ?? null;
     if (row.type !== "session_meta" || !id) return null;
-    return {
-      id,
-      cwd: row.payload?.cwd ?? null,
-      createdAt: row.payload?.timestamp ? Date.parse(row.payload.timestamp) : null,
-      firstUserText: await firstUserTextFromTop(path),
-    };
+    // session_meta.source is a plain string ("exec", "vscode") for direct
+    // launches, or an object when a parent thread spawned this rollout
+    // ({subagent: {thread_spawn: {parent_thread_id, …}}} / {subagent: {other}}).
+    // The parent id inside is codex-native, not an LFG session id, so the kind
+    // — not the id — is the roster-relevant lineage signal.
+    let sourceKind: string | null = null;
+    const src = row.payload?.source;
+    if (typeof src === "string") sourceKind = src;
+    else if (src && typeof src === "object" && "subagent" in (src as Record<string, unknown>))
+      sourceKind = "subagent";
+    // The full first prompt is read once here and immediately reduced to the
+    // compact projection — it is never retained or persisted whole.
+    return deriveCodexHead(
+      {
+        id,
+        cwd: row.payload?.cwd ?? null,
+        createdAt: row.payload?.timestamp ? Date.parse(row.payload.timestamp) : null,
+        originator: typeof row.payload?.originator === "string" ? row.payload.originator : null,
+        sourceKind,
+      },
+      await firstUserTextFromTop(path),
+    );
   } catch {
     return null;
   }
@@ -1625,7 +1739,7 @@ function rolloutStartedAtFromPath(path: string): number | null {
  * this without a window and is unaffected.
  */
 async function codexThreads(opts?: { sinceMs?: number }): Promise<CodexThread[]> {
-  loadCodexHeadCache();
+  await codexHeads.ready();
   const out: CodexThread[] = [];
   // A rollout is filed under the day it started but appended to for as long as
   // its session lives, so the cutoff is generous: a week of slack between "not
@@ -1636,18 +1750,26 @@ async function codexThreads(opts?: { sinceMs?: number }): Promise<CodexThread[]>
       const startedAt = rolloutStartedAtFromPath(path);
       if (startedAt !== null && startedAt < cutoff) continue;
     }
-    let head = codexHeadCache.get(path);
+    let head = codexHeads.get(path);
     if (head === undefined) {
       head = await parseCodexHead(path);
-      codexHeadCache.set(path, head);
-      codexHeadCacheDirty++;
+      codexHeads.set(path, head);
     }
     if (!head) continue;
     let updatedAt: number | null = null;
     try {
       updatedAt = statSync(path).mtimeMs;
     } catch {}
-    out.push({ id: head.id, path, cwd: head.cwd, createdAt: head.createdAt, updatedAt, firstUserText: head.firstUserText });
+    out.push({
+      id: head.id,
+      path,
+      cwd: head.cwd,
+      createdAt: head.createdAt,
+      updatedAt,
+      prompt: head.prompt,
+      originator: head.originator ?? null,
+      sourceKind: head.sourceKind ?? null,
+    });
   }
   scheduleCodexHeadFlush();
   return out;
@@ -1709,18 +1831,26 @@ function codexPromptFromCmd(cmd: string): string | null {
   return m?.[1]?.trim() || null;
 }
 
-function samePrompt(a: string | null, b: string | null): boolean {
-  if (!a || !b) return false;
-  const clean = (s: string) => s.replace(/\s+/g, " ").trim();
-  return clean(a) === clean(b);
-}
-
 function promptStartsWithTitle(prompt: string | null, title: string | null | undefined): boolean {
   if (!prompt || !title) return false;
   const clean = (s: string) => stripConversationPrefix(s).replace(/\s+/g, " ").trim();
   const p = clean(prompt);
   const t = clean(title);
   return !!t && (p === t || p.startsWith(t));
+}
+
+/**
+ * Managed-title binding against a thread's compact prompt projection. The
+ * stored preview answers every title up to TITLE_PREVIEW_CHARS exactly; a
+ * longer title than the preview is decided by re-reading the rollout head —
+ * rollouts are immutable and on disk, so this stays exact, and it is rare
+ * enough (titles are short) not to matter for the poll budget.
+ */
+async function threadPromptStartsWithTitle(t: CodexThread, title: string | null | undefined): Promise<boolean> {
+  const verdict = promptTitleMatches(t.prompt, title);
+  if (verdict !== "unknown") return verdict;
+  const full = await firstUserTextFromTop(t.path).catch(() => null);
+  return promptStartsWithTitle(full, title);
 }
 
 // How far an unclaimed transcript may lag the freshest transcript in the same
@@ -1756,32 +1886,31 @@ async function newestUnclaimedInCwd(
   return { path: best.path, id: best.id };
 }
 
-function inferCodexThreadForManaged(
+async function inferCodexThreadForManaged(
   m: ManagedSession,
   threads: CodexThread[],
   claimed: Set<string> = new Set(),
-): CodexThread | null {
+): Promise<CodexThread | null> {
   if (m.agent !== "codex") return null;
   const createdAt = m.createdAt ?? 0;
   const minTime = createdAt - 5 * 60_000;
   const maxTime = createdAt + 45 * 60_000;
-  const matches = threads
-    .map((t) => {
-      if (claimed.has(t.id)) return null;
-      const created = t.createdAt ?? 0;
-      const promptMatch = promptStartsWithTitle(t.firstUserText, m.title);
-      const cwdMatch = !!m.cwd && t.cwd === m.cwd;
-      const timeMatch = !!created && created >= minTime && created <= maxTime;
-      if (!promptMatch && !(cwdMatch && timeMatch)) return null;
-      let score = 0;
-      if (promptMatch) score += 100;
-      if (cwdMatch) score += 80;
-      if (timeMatch) score += 60 - Math.min(55, Math.abs(created - createdAt) / 60_000);
-      return { thread: t, score };
-    })
-    .filter((x): x is { thread: CodexThread; score: number } => !!x)
-    .sort((a, b) => b.score - a.score || (b.thread.createdAt ?? 0) - (a.thread.createdAt ?? 0));
-  return matches[0]?.thread ?? null;
+  const candidates: { thread: CodexThread; score: number }[] = [];
+  for (const t of threads) {
+    if (claimed.has(t.id)) continue;
+    const created = t.createdAt ?? 0;
+    const promptMatch = await threadPromptStartsWithTitle(t, m.title);
+    const cwdMatch = !!m.cwd && t.cwd === m.cwd;
+    const timeMatch = !!created && created >= minTime && created <= maxTime;
+    if (!promptMatch && !(cwdMatch && timeMatch)) continue;
+    let score = 0;
+    if (promptMatch) score += 100;
+    if (cwdMatch) score += 80;
+    if (timeMatch) score += 60 - Math.min(55, Math.abs(created - createdAt) / 60_000);
+    candidates.push({ thread: t, score });
+  }
+  candidates.sort((a, b) => b.score - a.score || (b.thread.createdAt ?? 0) - (a.thread.createdAt ?? 0));
+  return candidates[0]?.thread ?? null;
 }
 
 async function findManagedCodexTranscript(m: ManagedSession): Promise<string | null> {
@@ -1789,7 +1918,7 @@ async function findManagedCodexTranscript(m: ManagedSession): Promise<string | n
     const byId = await findCodexTranscriptById(m.nativeSessionId);
     if (byId) return byId;
   }
-  const thread = inferCodexThreadForManaged(m, await codexThreads());
+  const thread = await inferCodexThreadForManaged(m, await codexThreads());
   if (!thread) return null;
   rememberNativeSession(m, thread.id);
   return thread.path;
@@ -1802,17 +1931,15 @@ function stripHumanPrefix(text: string): string {
   return stripConversationPrefix(text);
 }
 
-function stripConversationPrefix(text: string): string {
-  return text.replace(/^(?:Human|User):[ \t]+/i, "");
-}
-
 // One-line projection of a user prompt for titles, cards and previews. LFG
 // wraps the first prompt of a managed session in its runtime contract, so
 // without this every managed session is titled "=== LFG RUNTIME CONTRACT…"
 // instead of what the human actually asked for. Transcript rendering keeps the
 // full text — the web client collapses the envelope there itself.
+// The implementation lives in codex-head-cache.ts so the cache derivation and
+// every display surface share one exact definition.
 function promptDisplayText(text: string): string {
-  return stripConversationPrefix(stripOmgRuntimeContract(text)).trim().replace(/\s+/g, " ");
+  return displayTextOf(text);
 }
 
 function extractText(content: unknown): string {
@@ -2326,15 +2453,18 @@ async function lastUserText(path: string): Promise<string | null> {
 export function modelAlias(id: string | null | undefined): string | null {
   if (!id) return null;
   const m = id.toLowerCase();
-  // Opus 5.5 is pinned the same way (see CLAUDE_MODELS). Collapsing it to the
-  // floating "opus" alias hides the version and would resume on the alias.
-  if (/opus-5[-.]5/.test(m)) return "claude-opus-5-5";
+  // Agentbox: one row per family (see CLAUDE_MODELS). `opus` lands on 5.5 and
+  // the picker labels it so, so a pinned 5.5 id folds to the alias too.
   if (m.includes("opus")) return "opus";
+  // Sonnet 5.5 has its own picker row while `sonnet` still lands on Sonnet 5.
+  // Collapsing it would highlight Sonnet 5 as the live model and resume there.
+  if (/sonnet-5[-.]5/.test(m)) return "claude-sonnet-5-5";
   if (m.includes("sonnet")) return "sonnet";
+  // Haiku 5.5 has its own pinned picker row (07-10-2026), like Sonnet 5.5.
+  if (/haiku-5[-.]5/.test(m)) return "claude-haiku-5-5";
   if (m.includes("haiku")) return "haiku";
-  // Fable 5.1 has no short alias, so the picker carries its full id. Collapsing
-  // it to "fable" would highlight Fable 5 as the live model and resume there.
-  if (/fable-5[-.]1/.test(m)) return "claude-fable-5-1";
+  // Since claude 2.1.280 the `fable` alias lands on Fable 5.1 itself, so every
+  // fable id (5, 5-1, and whatever comes next) collapses to the one alias.
   if (m.includes("fable")) return "fable";
   return id;
 }
@@ -2692,7 +2822,7 @@ export async function listSessions(): Promise<Session[]> {
               t.cwd === cwd &&
               !claimedCodex.has(t.id) &&
               (t.createdAt ?? 0) >= minTime &&
-              samePrompt(t.firstUserText, prompt),
+              samePromptHashed(t.prompt.promptHash, prompt),
           )
           .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0] ?? null;
       if (thread) sessionId = thread.id;
@@ -2706,7 +2836,7 @@ export async function listSessions(): Promise<Session[]> {
     const tmuxName = tmuxTarget ? tmuxTarget.split(":")[0] : null;
     const managedRec = tmuxName ? managedByName.get(tmuxName) : undefined;
     if (!thread && managedRec) {
-      thread = inferCodexThreadForManaged(managedRec, codex, claimedCodex);
+      thread = await inferCodexThreadForManaged(managedRec, codex, claimedCodex);
       if (thread) sessionId = thread.id;
     }
     if (thread) {
@@ -3152,6 +3282,8 @@ export async function listSessions(): Promise<Session[]> {
       // be explicit about intent.
       model: publicAgent === "aisdk" || isPi ? modelAlias(e.model) : e.model,
       thinkingLevel: e.thinkingLevel ?? managedRec?.thinkingLevel ?? null,
+      cyberAccessProgram: e.cyberAccessProgram ?? managedRec?.cyberAccessProgram ?? null,
+      cyberAccessProgramControl: e.cyberAccessProgramControl === true,
       serviceTier: e.serviceTier ?? managedRec?.serviceTier ?? null,
       fastMode:
         e.fastMode ??
@@ -3522,11 +3654,12 @@ export type ResumableSession = {
   // Which engine the session was recorded with. "claude" resumes via the claude
   // CLI (`claude --resume`); "codex" resumes via a codex-aisdk harness keyed to
   // the rollout's threadId. The serve /resume endpoint branches on this.
-  agent: "claude" | "codex" | "opencode" | "omg" | "pi" | "grok" | "cursor" | "fx" | "muse" | "copilot" | "jcode";
-  backend?: "aisdk" | "codex-aisdk" | "opencode" | "omg" | "pi" | "grok" | "cursor" | "fx" | "muse" | "copilot" | "jcode";
+  agent: "claude" | "codex" | "opencode" | "omg" | "pi" | "grok" | "cursor" | "fx" | "muse" | "copilot" | "jcode" | "zcode";
+  backend?: "aisdk" | "codex-aisdk" | "opencode" | "omg" | "pi" | "grok" | "cursor" | "fx" | "muse" | "copilot" | "jcode" | "zcode";
   resumeHandle?: string | null;
   model?: string | null;
   thinkingLevel?: string | null;
+  cyberAccessProgram?: import("./model-discovery.ts").CyberAccessProgram | null;
   serviceTier?: "fast" | null;
   fastMode?: boolean;
   assignedUser?: string | null;
@@ -3631,7 +3764,12 @@ async function refreshResumableCacheOnce(focusSessionId?: string): Promise<void>
   let budget = RESUMABLE_ENRICH_BUDGET;
   for (const c of candidates) {
     const prev = fingerprints.get(c.id);
-    if (prev && prev.mtimeMs === c.mtime) continue; // unchanged -> keep cached row
+    if (
+      prev &&
+      prev.mtimeMs === c.mtime &&
+      hasClaudeLaunchClassification(prev.originator)
+    )
+      continue; // unchanged and launch-classified -> keep cached row
     if (budget-- <= 0) break; // remainder backfills on the next refresh
     const cwd = await cwdForTranscript(c.path).catch(() => null);
     const managedRec = managedById.get(c.id) ?? (cwd ? managedByCwd.get(cwd) : undefined);
@@ -3649,6 +3787,13 @@ async function refreshResumableCacheOnce(focusSessionId?: string): Promise<void>
       path: c.path,
       mtimeMs: c.mtime,
       assignedUser: managedRec ? assignments[managedRec.tmuxName] ?? null : null,
+      // One read of the first user message classifies both launch signals
+      // (issue 552): the omg envelope and the controlled routine signature.
+      ...(await transcriptLaunchSignals(c.path).catch(() => ({
+        launchContract: false,
+        sourceKind: null as string | null,
+        originator: null as string | null,
+      }))),
     });
   }
 
@@ -3660,10 +3805,29 @@ async function refreshResumableCacheOnce(focusSessionId?: string): Promise<void>
     const prev = fingerprints.get(t.id);
     if (prev && prev.mtimeMs === mtime) continue;
     const managedRec = managedById.get(t.id) ?? (t.cwd ? managedByCwd.get(t.cwd) : undefined);
-    // firstUserText stays raw on the thread — it is matched against the launch
-    // cmd (which carries the same envelope) to bind a rollout to its managed
-    // session — so the envelope comes off here, at the display boundary.
-    const codexPrompt = t.firstUserText ? promptDisplayText(t.firstUserText) || null : null;
+    // The thread carries only the compact prompt projection (hash + preview);
+    // the cache never stores the whole prompt. But the resume picker SEARCHES
+    // title/lastUserText, so a keyword past the 280-char preview must still
+    // match — history rows keep the full display prompt. For a truncated
+    // projection that means re-reading the rollout's immutable first prompt
+    // here, exactly the pre-v3 semantics. This loop already early-continues
+    // on an unchanged fingerprint, so the re-read only happens for fresh or
+    // changed rows, never as an every-poll scan of all files.
+    let codexPrompt: string | null = t.prompt.displayPreview || null;
+    if (t.prompt.displayTruncated) {
+      const full = await firstUserTextFromTop(t.path).catch(() => null);
+      const fullDisplay = full !== null ? promptDisplayText(full) || null : null;
+      if (fullDisplay !== null) {
+        codexPrompt = fullDisplay;
+      } else {
+        // The rollout could not be re-read (deleted or unreadable mid-
+        // refresh). Never clobber the stored full text with the short
+        // preview: keep the existing row's searchable text if there is one.
+        const existing = getCachedResumableSession(t.id);
+        if (existing?.lastUserText) codexPrompt = existing.lastUserText;
+        else if (codexPrompt !== null) codexPrompt = codexPrompt + "…";
+      }
+    }
     changed.push({
       sessionId: t.id,
       cwd: t.cwd,
@@ -3678,6 +3842,8 @@ async function refreshResumableCacheOnce(focusSessionId?: string): Promise<void>
       path: t.path,
       mtimeMs: mtime,
       assignedUser: managedRec ? assignments[managedRec.tmuxName] ?? null : null,
+      originator: t.originator ?? null,
+      sourceKind: t.sourceKind ?? null,
     });
   }
 
@@ -3815,7 +3981,10 @@ async function refreshResumableCacheOnce(focusSessionId?: string): Promise<void>
     // DeepSeek Harness ACP supports live multi-turn sessions but intentionally
     // exposes no load/resume method. Keep its closed transcript out of the
     // Resume picker instead of offering a button that would start fresh.
-    // Devin's `devin acp` has the same fresh-session-only surface.
+    // Devin's `devin acp` has the same fresh-session-only surface as
+    // DeepSeek Harness ACP: no load/resume method, so keep closed sessions
+    // out of the Resume picker instead of offering a button that would
+    // start fresh.
     if (m.agent === "deepseek" || m.agent === "devin") continue;
     if (!sessionHasIndexedMessages(m.sessionId)) continue;
     const recent = await indexedRecentMessages(sessionIndexKey(m.sessionId), m.sessionId, 80)
@@ -3833,7 +4002,7 @@ async function refreshResumableCacheOnce(focusSessionId?: string): Promise<void>
         ? m.agent
         : m.agent === "pi"
           ? "pi"
-          : m.agent === "grok" || m.agent === "cursor" || m.agent === "copilot" || m.agent === "jcode"
+          : m.agent === "grok" || m.agent === "cursor" || m.agent === "copilot" || m.agent === "jcode" || m.agent === "zcode"
             ? m.agent
             : "aisdk";
     const agent = backend === "codex-aisdk"
@@ -3842,7 +4011,7 @@ async function refreshResumableCacheOnce(focusSessionId?: string): Promise<void>
         ? backend
       : backend === "pi"
         ? "pi"
-        : backend === "grok" || backend === "cursor" || backend === "copilot" || backend === "jcode"
+        : backend === "grok" || backend === "cursor" || backend === "copilot" || backend === "jcode" || backend === "zcode"
           ? backend
         : "claude";
     const sdkEntry = sdkEntries.get(m.sessionId);
@@ -3869,6 +4038,12 @@ async function refreshResumableCacheOnce(focusSessionId?: string): Promise<void>
       model: sdkEntry?.model || m.model || null,
       assignedUser: assignments[m.tmuxName] || null,
       managed: true,
+      // Lineage for the internal-roster repair (issue 552): either parent id
+      // shape proves "somebody's child" — subagents spawned from a native
+      // codex parent only carry parentNativeSessionId.
+      parentSessionId: m.parentSessionId ?? m.parentNativeSessionId ?? null,
+      spawnedBy: m.spawnedBy ?? null,
+      botId: m.botId ?? null,
       scheduled: isScheduleSpawned(m.spawnedBy),
     });
   }
@@ -3887,6 +4062,23 @@ async function refreshResumableCacheOnce(focusSessionId?: string): Promise<void>
 
   upsertResumableRows(changed);
   pruneResumableExcept(seen);
+  // Managed/native alias repair (issue 547). Runs after EVERY refresh over the
+  // whole table, not just this pass's `changed` rows: the native rollout row
+  // and its managed catalog row can land in different refresh moments, so only
+  // a table-wide pass guarantees the pair is closed whichever refresh
+  // completes it.
+  hideManagedAliasRows();
+  // Internal-roster repair (issue 552), same table-wide contract: managed
+  // lineage hides child/review workers (bots exempt, forks listed), codex
+  // session_meta provenance hides SDK/subagent rollouts, the claude
+  // launch-envelope flag hides omg-launched transcripts, and sourceKind
+  // "routine" hides the controlled scheduled-task launcher's transcripts —
+  // including future legacy ones, not just the backfilled ids. Whichever
+  // refresh first classifies a row is the one that hides it; the
+  // confirmed-screenshot backfill runs exactly once per database behind a
+  // durable marker.
+  hideInternalRosterRows();
+  backfillConfirmedInternalRows();
 }
 
 // Refresh at most once per throttle window (unless forced); concurrent callers

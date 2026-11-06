@@ -33,11 +33,21 @@ import type { SessionMsg } from "../../sessions.ts";
 import { sessionTitleFromPrompt } from "../../omg-capabilities.ts";
 import { indexSessionMessagesDirect, reindexFileHistoryUnderSessionKey } from "../../transcript-index.ts";
 import { makeDraftPublisher } from "./draft.ts";
-import { codexOmgMcpConfig, type CodexConfigValue } from "../../codex-mcp-config.ts";
+import { codexConfigPath, codexOmgMcpConfig, readCodexConfig, type CodexConfigValue } from "../../codex-mcp-config.ts";
+import { codexSdkOptionsForModel } from "./codex-muse.ts";
 import {
   withCodexServiceTierConfig,
   type CodexServiceTier,
 } from "../../service-tier.ts";
+import {
+  codexAppServerTrustedArgv,
+  CodexDaybreakError,
+  resolveCyberAccessProgram,
+  type CyberAccessProgram,
+} from "../../codex-daybreak.ts";
+import { readModelDiscoveryCacheSync, type CodexModelCapabilities } from "../../model-discovery.ts";
+import { isMuseCodexModel } from "./codex-muse.ts";
+import { CodexAppServerThread, type CodexBridgeEvents } from "./codex-app-server-session.ts";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { initialCmdOffset, readNewCmdLines, writeCursor } from "./cmd-tail.ts";
 import {
@@ -46,25 +56,54 @@ import {
   isAisdkStreamStalled,
 } from "./aisdk-session.ts";
 import { extractAttachments } from "../../attachment-images.ts";
+import { contextPreambleText, toWireContextDetailed, validatedCentralContext, type WireContext } from "../../mac-chat/context.ts";
+import { createRemoteCodexTransport, remoteCodexUserInput } from "../../mac-chat/codex-transport.ts";
+import { macBridgeMcpServers } from "../../mac-chat/mcp.ts";
+import { macSshSpawn } from "../../mac-chat/stream.ts";
+import { recordMacStartRequest, updateMacStart } from "../../mac-chat/pending.ts";
+
+function parseExecutionHost(argv: string[]): "agentbox" | "mac" {
+  // Strict two-token parse (WIRE-RECONCILIATION defect 11): the joined-token
+  // check silently launched locally on a requested Mac session.
+  const i = argv.indexOf("--execution-host");
+  if (i < 0 || i + 1 >= argv.length) return "agentbox";
+  const value = argv[i + 1]!;
+  if (value === "mac" || value === "agentbox") return value;
+  console.error(`codex-aisdk-session: unknown --execution-host "${value}"`);
+  process.exit(1);
+}
 
 function arg(argv: string[], name: string): string | undefined {
   const i = argv.indexOf(name);
   return i >= 0 ? argv[i + 1] : undefined;
 }
 
-// Only an EXPLICIT override redirects the SDK away from its bundled codex
-// binary. The SDK pins a matching @openai/codex dependency (protocol-tested
-// pairing); pointing it at an older global CLI risks a protocol mismatch, so —
-// unlike the old provider — we no longer prefer the global binary by default.
-function resolveCodexPathOverride(): string | undefined {
-  const explicit = process.env.LFG_CODEX_PATH;
-  if (!explicit) return undefined;
+// Drive the installed Codex CLI, just like the Claude Agent SDK harness drives
+// the installed Claude CLI. Release bundles can lag the machine-wide agent by
+// several versions; that made a model visible in omg.dev while the bundled
+// binary still rejected it as too new. LFG_CODEX_PATH remains the explicit
+// escape hatch, otherwise PATH is the source of truth for the current agent.
+export function resolveCodexPathOverride(
+  env: Record<string, string | undefined> = process.env,
+  which: (name: string) => string | null = (name) => Bun.which(name),
+): string | undefined {
+  const candidate = env.LFG_CODEX_PATH?.trim() || which("codex");
+  if (!candidate) return undefined;
   try {
-    const real = realpathSync(explicit);
+    const real = realpathSync(candidate);
     return existsSync(real) ? real : undefined;
   } catch {
     return undefined;
   }
+}
+
+export function requireCodexPathOverride(
+  env: Record<string, string | undefined> = process.env,
+  which: (name: string) => string | null = (name) => Bun.which(name),
+): string {
+  const path = resolveCodexPathOverride(env, which);
+  if (!path) throw new Error("installed Codex CLI not found; refusing bundled SDK fallback");
+  return path;
 }
 
 /**
@@ -141,6 +180,72 @@ function omgMcpConfig(serviceTier?: CodexServiceTier): { config?: { [key: string
   return config ? { config } : {};
 }
 
+// ---------------------------------------------------------------------------
+// Cyber access program routing (Daybreak on ordinary managed sessions)
+// ---------------------------------------------------------------------------
+
+/** Live per-model metadata for the codex family — the only program source. */
+function codexAisdkCapabilities(): Record<string, CodexModelCapabilities> | undefined {
+  return readModelDiscoveryCacheSync()?.providers?.["codex-aisdk"]?.modelCapabilities;
+}
+
+/**
+ * Validate the `--cyber-access-program` launch arg BEFORE the harness boots.
+ * Same rule as every explicit program request: unknown names, missing
+ * metadata, or a program this account does not offer abort startup visibly —
+ * no silent fallback to the automatic default.
+ */
+export function parseCyberAccessProgramArg(
+  raw: string | undefined,
+  capabilities: Record<string, CodexModelCapabilities> | undefined,
+  model: string,
+): { cyberAccessProgram: CyberAccessProgram | null } {
+  if (raw == null || raw === "") return { cyberAccessProgram: null };
+  const { cyberAccessProgram } = resolveCyberAccessProgram({ model, requested: raw, capabilities });
+  return { cyberAccessProgram: cyberAccessProgram ?? null };
+}
+
+/**
+ * Which engine drives this turn. An explicit program needs the app-server
+ * bridge (the SDK has no wire for it), and once a session has bridged, later
+ * turns keep the bridge even on explicit "standard" — that preserves the
+ * SAME persistent thread instead of forking the conversation between engines.
+ *
+ * MAC ROUTE: every remote turn rides the bridge transport (existing
+ * CodexAppServerThread with an injected ssh-stream transport) — standard
+ * turns included — preserving Daybreak/fast/tier/reasoning/resume exactly.
+ */
+export function resolveCodexBridgePlan(input: {
+  program: CyberAccessProgram | null;
+  bridgeThreadId: string | null;
+  remote?: boolean;
+}): "bridge" | "sdk" {
+  if (input.remote) return "bridge";
+  return input.program != null || input.bridgeThreadId != null ? "bridge" : "sdk";
+}
+
+/**
+ * The trusted app-server argv for one bridged turn: the SAME config layer a
+ * normal SDK turn gets (OMG MCP session binding + service tier, muse refused
+ * below), flattened into `--config key=value` TOML by the safe encoder. Muse
+ * models never bridge: their provider config belongs to the SDK path, and a
+ * program request for them was already rejected at validation.
+ */
+export function buildCodexAppServerBridgeArgv(input: {
+  model: string;
+  serviceTier?: CodexServiceTier;
+  codexPath: string;
+  codexConfig?: Record<string, unknown> | null;
+}): string[] {
+  if (isMuseCodexModel(input.model)) {
+    throw new CodexDaybreakError("program-not-offered", `"${input.model}" runs on the Muse provider; cyber access programs need a Codex-native model`);
+  }
+  const options = codexSdkOptionsForModel(input.model, omgMcpConfig(input.serviceTier), {
+    ...(input.codexConfig !== undefined ? { codexConfig: input.codexConfig } : {}),
+  });
+  return codexAppServerTrustedArgv(input.codexPath, options.config);
+}
+
 // Shared thread options for both the interactive harness and the one-shot
 // runner: full access + never-approve mirrors the tmux codex session's
 // `--sandbox danger-full-access --ask-for-approval never`.
@@ -192,7 +297,7 @@ function codexCompletedItemMessage(item: Record<string, unknown>, turnNonce: str
   }
   if (type === "command_execution") {
     const command = typeof item.command === "string" ? item.command : "";
-    const output = stringifyValue(item.output ?? item.stdout ?? item.stderr).trim();
+    const output = stringifyValue(item.output ?? item.aggregated_output ?? item.stdout ?? item.stderr).trim();
     const text = compactText([command ? `$ ${command}` : "command_execution", output].filter(Boolean).join("\n"));
     return { id, role: "assistant", kind: "tool_use", text, ts };
   }
@@ -246,10 +351,12 @@ export async function pipeToCodexAiSdk(
   const model = opts.model ?? "gpt-5.5";
   const cwd = opts.cwd ?? process.cwd();
   const { Codex } = await import("@openai/codex-sdk");
-  const codexPathOverride = resolveCodexPathOverride();
+  const codexPathOverride = requireCodexPathOverride();
+  // A muse-spark model rides Meta's Responses API on the Muse subscription
+  // (see codex-muse.ts); every other model keeps the plain OMG MCP layer.
   const codex = new Codex({
-    ...(codexPathOverride ? { codexPathOverride } : {}),
-    ...omgMcpConfig(opts.serviceTier),
+    codexPathOverride,
+    ...codexSdkOptionsForModel(model, omgMcpConfig(opts.serviceTier), { codexConfig: readCodexConfig(codexConfigPath()) }),
   });
 
   log(`[runner] piping ${prompt.length} chars to codex via codex-sdk (${model})`);
@@ -303,6 +410,25 @@ export async function cmdCodexAisdkSession(argv: string[]): Promise<void> {
   const recoveredAt = Number(arg(argv, "--recovered-at")) || null;
   // Resuming a closed codex session: the rollout's threadId is known up front.
   const resumeThreadId = arg(argv, "--resume");
+  // MAC ROUTE (integration revision 2): the harness stays local; the native
+  // codex app-server subprocess streams to the MacBook M1 over ssh. Auth is
+  // the Mac's own login.
+  const executionHost = parseExecutionHost(argv);
+  // Explicit cyber access program (Daybreak) for this session. Validated
+  // BEFORE the harness boots: an incompatible request exits visibly instead
+  // of silently degrading to the automatic default.
+  const programArg = arg(argv, "--cyber-access-program");
+  let requestedProgram: CyberAccessProgram | null = null;
+  try {
+    requestedProgram = parseCyberAccessProgramArg(programArg, codexAisdkCapabilities(), model).cyberAccessProgram;
+  } catch (error) {
+    console.error(`codex-aisdk-session: --cyber-access-program: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
+  // Once a turn rode the app-server bridge, EVERY later turn keeps it —
+  // including explicit "standard" or no program — so the conversation stays
+  // on one persistent thread instead of forking between engines.
+  let bridgeThreadId: string | null = null;
   // Everything after `--` is the initial prompt.
   const dashI = argv.indexOf("--");
   const initialPrompt = dashI >= 0 ? argv.slice(dashI + 1).join(" ").trim() : "";
@@ -327,20 +453,107 @@ export async function cmdCodexAisdkSession(argv: string[]): Promise<void> {
   }
 
   const { Codex } = await import("@openai/codex-sdk");
-  const codexPathOverride = resolveCodexPathOverride();
-  // Omitting `env` inherits process.env (HOME → ~/.codex auth, LFG_* for MCP).
+  // MAC transport configuration (env from the launcher; secrets never argv).
+  const macTarget = executionHost === "mac" ? (process.env.LFG_MAC_SSH_TARGET ?? "").trim() : "";
+  const macBridgeUrl = executionHost === "mac" ? (process.env.LFG_MAC_BRIDGE_URL ?? "").replace(/\/+$/, "") : "";
+  const macBridgeToken = executionHost === "mac" ? (process.env.LFG_MAC_BRIDGE_TOKEN ?? "") : "";
+  const macNamespaces = executionHost === "mac"
+    ? (process.env.LFG_MAC_NAMESPACES ?? "").split(",").map((s) => s.trim()).filter(Boolean)
+    : [];
+  const macFirstRequestId = executionHost === "mac" ? (process.env.LFG_MAC_REQUEST_ID ?? "").trim() : "";
+  if (executionHost === "mac" && (!macTarget || !macBridgeUrl || !macBridgeToken || macNamespaces.length === 0)) {
+    console.error("codex-aisdk-session: mac-transport mist LFG_MAC_SSH_TARGET/LFG_MAC_BRIDGE_URL/LFG_MAC_BRIDGE_TOKEN/LFG_MAC_NAMESPACES; refusing to start");
+    process.exit(1);
+  }
+  // Bridge MCP entries per namespace (frozen wire shape: url + bearer). The
+  // URL must NAME the session lease (?session=mac-<key>) or the bridge
+  // answers 401 session_required — bearer alone is not a session. The one
+  // shared builder (mac-chat/mcp.ts) derives it from this harness's central
+  // key, which is the id the launcher minted the lease for.
+  const macMcpServers = (): Record<string, { type: "http"; url: string; bearerToken: string; headerName: string }> =>
+    macBridgeMcpServers({
+      bridgeUrl: macBridgeUrl,
+      bridgeToken: macBridgeToken,
+      sessionId: key,
+      namespaces: macNamespaces,
+    });
+  let macRequestUsed = false;
+  const macNextRequestId = (): string => {
+    const id = macFirstRequestId && !macRequestUsed ? macFirstRequestId : crypto.randomUUID();
+    macRequestUsed = true;
+    // EVERY turn's stream id is journaled before it touches the network:
+    // unknown outcomes reconcile by the id live on the Mac, across all turns.
+    recordMacStartRequest(key, id);
+    return id;
+  };
+  let macRemoteInitReported = false;
+  const macReportInit = (state: "ready" | "failed" | "unknown", detail: { requestId?: string | null; pid?: number; cwd?: string; reason?: string }): void => {
+    patchEntry(key, {
+      executionHost: "mac",
+      remoteInit: {
+        state,
+        ...(detail.requestId !== undefined ? { requestId: detail.requestId ?? null } : {}),
+        ...(detail.pid !== undefined ? { remotePid: detail.pid } : {}),
+        ...(detail.cwd !== undefined ? { scratch: detail.cwd } : {}),
+        ...(detail.reason !== undefined ? { reason: detail.reason } : {}),
+        updatedAt: Date.now(),
+      },
+    });
+    if (!macRemoteInitReported && (state === "ready" || state === "failed")) {
+      macRemoteInitReported = true;
+      updateMacStart(key, {
+        state,
+        ...(detail.pid !== undefined ? { remotePid: detail.pid } : {}),
+        ...(detail.reason ? { reason: detail.reason } : {}),
+      });
+    }
+  };
+  /**
+   * Remote trusted config overrides: NONE — model/effort ride the thread/turn
+   * protocol and metadata.settings, and Fast rides metadata.settings (the
+   * supervisor injects the exact service-tier.ts argv natively; item 17).
+   * Keeping argv free of duplicate settings also avoids the peer's
+   * settings-conflict refusal.
+   */
+  const remoteCodexConfig = (): Record<string, unknown> | null => null;
+  /** Full central context for the stream metadata, re-read per turn. */
+  /**
+   * Item 35: ONE validated central-context snapshot per turn (wire + preamble
+   * derived from the same read, so a source change between the two reads
+   * cannot split the turn). REQUIRED instruction failures throw — the turn
+   * path refuses BEFORE any transport spawn or provider input. Optional
+   * skill/memory omissions ride the preamble non-fatally.
+   */
+  const macTurnContext = (): { wire: WireContext; preamble: string } => {
+    const validated = validatedCentralContext("codex", cwd);
+    if (!validated.ok) throw new Error(validated.error);
+    const { wire, omitted } = toWireContextDetailed(validated.context);
+    for (const omission of omitted) {
+      console.error(`codex-aisdk-session ${key}: contextbron niet wire-transportabel: ${omission.path} (${omission.reason})`);
+    }
+    return { wire, preamble: contextPreambleText(validated.context, "codex") };
+  };
+  // MAC ROUTE: no LOCAL codex may be resolved or spawned — the remote turns
+  // ride CodexAppServerThread exclusively. The local SDK client/thread stay
+  // unconstructed in mac mode (an absent local codex binary must not block a
+  // remote session, and a local provider process must never appear).
+  const codexPathOverride = executionHost === "mac" ? undefined : requireCodexPathOverride();
   const createCodex = () => new Codex({
     ...(codexPathOverride ? { codexPathOverride } : {}),
-    ...omgMcpConfig(serviceTier),
+    ...codexSdkOptionsForModel(model, executionHost === "mac" ? {} : omgMcpConfig(serviceTier), {
+      codexConfig: executionHost === "mac" ? null : readCodexConfig(codexConfigPath()),
+    }),
   });
-  let codex = createCodex();
+  let codex = executionHost === "mac" ? null : createCodex();
   let threadThinkingLevel = thinkingLevel;
   // Set when a stream stalls: the SDK handle is unusable afterwards, so the
   // next turn must rebuild it from threadId instead of inheriting the wedge.
   let threadNeedsRebuild = false;
-  let thread = resumeThreadId
-    ? codex.resumeThread(resumeThreadId, threadOptions(model, cwd, thinkingLevel ?? undefined))
-    : codex.startThread(threadOptions(model, cwd, thinkingLevel ?? undefined));
+  let thread = executionHost === "mac"
+    ? null
+    : resumeThreadId
+      ? codex!.resumeThread(resumeThreadId, threadOptions(model, cwd, thinkingLevel ?? undefined))
+      : codex!.startThread(threadOptions(model, cwd, thinkingLevel ?? undefined));
   let threadId: string | null = resumeThreadId ?? null;
 
   // Control-plane registry entry — the moment this exists (and our pid is
@@ -351,6 +564,11 @@ export async function cmdCodexAisdkSession(argv: string[]): Promise<void> {
     sessionId: key,
     agent: "codex",
     threadId,
+    // Marker this harness build understands set_cyber_access_program; the
+    // control plane reads it to reject changes on legacy harnesses instead
+    // of queueing commands nothing would consume.
+    cyberAccessProgramControl: true,
+    cyberAccessProgram: requestedProgram,
     harnessPid: process.pid,
     tmuxName,
     supervisor: "process",
@@ -365,6 +583,19 @@ export async function cmdCodexAisdkSession(argv: string[]): Promise<void> {
     busy: false,
     title: sessionTitleFromPrompt(initialPrompt),
     createdAt: Date.now(),
+    // Mac-hosted: durable local registration, remote init visible per turn.
+    ...(executionHost === "mac"
+      ? {
+          executionHost: "mac" as const,
+          remoteInit: {
+            state: "pending" as const,
+            requestId: macFirstRequestId || null,
+            remotePid: null,
+            scratch: null,
+            updatedAt: Date.now(),
+          },
+        }
+      : {}),
   });
 
   const queue: string[] = [];
@@ -382,6 +613,10 @@ export async function cmdCodexAisdkSession(argv: string[]): Promise<void> {
   const publishDraft = makeDraftPublisher(key);
 
   async function runTurn(prompt: string, signal: AbortSignal): Promise<void> {
+    // Freeze the program request synchronously, before the first await: a
+    // set_cyber_access_program command that lands mid-turn changes the NEXT
+    // turn, never the one already in flight.
+    const frozenProgram = requestedProgram;
     // Codex turns are explicit request/response — no streaming-input merge —
     // so per-turn busy handling in drain() below cannot drift.
     // Unique per turn AND per harness process, so item_N ids never collide
@@ -390,21 +625,126 @@ export async function cmdCodexAisdkSession(argv: string[]): Promise<void> {
     indexSessionMessagesDirect(key, [
       { id: crypto.randomUUID(), role: "user", kind: "text", text: prompt, ts: Date.now() },
     ]);
+    // Set for the bridge branch: disposed in the finally below so no idle
+    // app-server child survives the turn.
+    let bridgeAdapter: CodexAppServerThread | null = null;
+    // Item 35: the turn's ONE validated central-context snapshot (mac route
+    // only) — wire metadata and turn preamble derive from the SAME read.
+    let macTurnCtx: ReturnType<typeof macTurnContext> | null = null;
     try {
-      // Thread options are fixed on a Codex SDK Thread. Recreate the handle
-      // only after an effort change; once the first turn has supplied its id,
-      // resume preserves the same persisted conversation.
-      if (threadNeedsRebuild || thinkingLevel !== threadThinkingLevel) {
-        const opts = threadOptions(model, cwd, thinkingLevel ?? undefined);
-        thread = threadId ? codex.resumeThread(threadId, opts) : codex.startThread(opts);
-        threadThinkingLevel = thinkingLevel;
-        threadNeedsRebuild = false;
+      // SDK path: thread options are fixed on a Codex SDK Thread; recreate
+      // the handle only after an effort change or a stall, resuming the same
+      // persisted conversation once the first turn supplied its id.
+      const plan = resolveCodexBridgePlan({ program: frozenProgram, bridgeThreadId, ...(executionHost === "mac" ? { remote: true } : {}) });
+      let streamSource: {
+        runStreamed: (
+          input: ReturnType<typeof codexInputForPrompt>,
+          options: { signal: AbortSignal },
+        ) => Promise<{ events: CodexBridgeEvents }>;
+      };
+      if (plan === "bridge") {
+        // Validate the frozen program against LIVE metadata before anything
+        // spawns; an incompatible request fails visibly right here, without
+        // touching the queued messages or falling back to the SDK path.
+        const { cyberAccessProgram } = resolveCyberAccessProgram({
+          model,
+          ...(frozenProgram ? { requested: frozenProgram } : {}),
+          capabilities: codexAisdkCapabilities(),
+        });
+        if (executionHost === "mac") {
+          // REMOTE TURN: existing CodexAppServerThread with the ssh-stream
+          // transport (ALL remote turns, standard included — Daybreak/tier/
+          // reasoning/resume preserved exactly). MCP names + instructions
+          // reference ride the metadata (provisioned lease); the fresh
+          // central context rides the turn input; cwd stays the remote
+          // scratch (omitted → the supervisor's child cwd).
+          // Item 35: ONE validated snapshot guards the whole turn — a
+          // REQUIRED instruction failure refuses HERE, before any transport
+          // spawn or provider input; the session stays alive for later
+          // turns once the source is fixed.
+          let turnCtx: ReturnType<typeof macTurnContext>;
+          try {
+            turnCtx = macTurnContext();
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            console.error(`codex-aisdk-session ${key}: beurt GEWEIGERD — ${reason}`);
+            publishDraft(`Mac-route geweigerd: ${reason}`, true);
+            return;
+          }
+          macTurnCtx = turnCtx;
+          bridgeAdapter = new CodexAppServerThread({
+            resumeThreadId: bridgeThreadId ?? threadId ?? resumeThreadId ?? null,
+            model,
+            ...(thinkingLevel ? { effort: thinkingLevel } : {}),
+            ...(cyberAccessProgram ? { cyberAccessProgram, daybreakEnabled: cyberAccessProgram !== "standard" } : {}),
+            transport: createRemoteCodexTransport({
+              deps: { spawn: macSshSpawn },
+              sessionId: key,
+              target: macTarget,
+              context: turnCtx.wire,
+              mcpServers: macMcpServers(),
+              settings: {
+                model,
+                ...(thinkingLevel ? { thinkingLevel } : {}),
+                ...(serviceTier ? { serviceTier } : {}),
+                ...(cyberAccessProgram ? { cyberAccessProgram } : {}),
+              },
+              nextRequestId: macNextRequestId,
+              codexConfig: remoteCodexConfig(),
+              onHandshake: (handshake) => {
+                if (handshake.status === "ready") {
+                  macReportInit("ready", { requestId: handshake.requestId, pid: handshake.pid, cwd: handshake.cwd });
+                } else {
+                  macReportInit("failed", {
+                    requestId: handshake.requestId,
+                    reason: [handshake.reason, handshake.detail].filter(Boolean).join(": ") || `remote weigerde (${handshake.status})`,
+                  });
+                }
+              },
+            }),
+          });
+          streamSource = bridgeAdapter;
+        } else {
+          bridgeAdapter = new CodexAppServerThread({
+            argv: buildCodexAppServerBridgeArgv({
+              model,
+              serviceTier,
+              codexPath: requireCodexPathOverride(),
+              codexConfig: readCodexConfig(codexConfigPath()),
+            }),
+            // After the first bridged turn (explicit standard/off included)
+            // every turn resumes the SAME persistent thread id; a session that
+            // bridged mid-conversation carries its SDK thread id over, because
+            // both engines address the same ~/.codex/sessions rollout.
+            resumeThreadId: bridgeThreadId ?? threadId ?? resumeThreadId ?? null,
+            model,
+            cwd,
+            ...(thinkingLevel ? { effort: thinkingLevel } : {}),
+            ...(cyberAccessProgram ? { cyberAccessProgram, daybreakEnabled: cyberAccessProgram !== "standard" } : {}),
+          });
+          streamSource = bridgeAdapter;
+        }
+      } else {
+        if (threadNeedsRebuild || thinkingLevel !== threadThinkingLevel || !thread) {
+          if (!codex) codex = createCodex();
+          const opts = threadOptions(model, cwd, thinkingLevel ?? undefined);
+          thread = threadId ? codex.resumeThread(threadId, opts) : codex.startThread(opts);
+          threadThinkingLevel = thinkingLevel;
+          threadNeedsRebuild = false;
+        }
+        streamSource = thread;
       }
       // Starting the turn is itself a stream wait: the SDK resolves and spawns
       // its codex binary here, so a broken install hangs on this line.
       lastSdkEventAt = Date.now();
-      const input = codexInputForPrompt(prompt);
-      const { events } = await stallGate.race(thread.runStreamed(input, { signal }));
+      // MAC ROUTE: local_image paths point at the Agentbox filesystem the
+      // remote codex cannot read — inline them as base64 image parts.
+      // MAC ROUTE: the fresh central context rides EVERY turn's input (a
+      // prompt may never ride argv; local_image paths become base64 parts).
+      const input = executionHost === "mac"
+        ? remoteCodexUserInput(codexInputForPrompt(prompt), macTurnCtx!.preamble) as ReturnType<typeof codexInputForPrompt>
+        : codexInputForPrompt(prompt);
+      const { events } = await stallGate.race(streamSource.runStreamed(input, { signal }));
       publishDraft("", true);
       // Manual iteration so each wait for the NEXT event can be interrupted.
       // `for await` offers no way to break out of a hung next().
@@ -473,6 +813,21 @@ export async function cmdCodexAisdkSession(argv: string[]): Promise<void> {
         },
       ]);
     } finally {
+      if (bridgeAdapter) {
+        // One bridge child per turn: dispose it now so no idle app-server
+        // survives between turns. The persistent thread id rides the adapter
+        // and the next bridged turn (explicit standard/off included) resumes
+        // the SAME thread.
+        const bridgeId = bridgeAdapter.id;
+        if (bridgeId && bridgeId !== bridgeThreadId) {
+          bridgeThreadId = bridgeId;
+          if (bridgeId !== threadId) {
+            threadId = bridgeId;
+            patchEntry(key, { threadId });
+          }
+        }
+        await bridgeAdapter.close();
+      }
       publishDraft("", true);
     }
   }
@@ -531,6 +886,32 @@ export async function cmdCodexAisdkSession(argv: string[]): Promise<void> {
         fastMode: cmd.enabled,
         serviceTier: cmd.enabled ? "fast" : null,
       });
+    } else if (cmd.type === "set_cyber_access_program") {
+      // Visible validation, never a silent downgrade: an incompatible
+      // program is reported in the transcript, the queued user messages stay
+      // queued, and the session keeps its previous program for the next turn.
+      try {
+        const { cyberAccessProgram } = resolveCyberAccessProgram({
+          model,
+          requested: cmd.cyberAccessProgram,
+          capabilities: codexAisdkCapabilities(),
+        });
+        requestedProgram = cyberAccessProgram ?? null;
+        patchEntry(key, { cyberAccessProgram: requestedProgram });
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        console.error(`codex-aisdk-session: set_cyber_access_program rejected: ${msg}`);
+        indexSessionMessagesDirect(key, [
+          {
+            id: `${Date.now().toString(36)}cyber_rejected`,
+            role: "assistant",
+            kind: "text",
+            text: `⚠️ Cyber access program not changed: ${msg.slice(0, 800)}`,
+            ts: Date.now(),
+            apiError: true,
+          },
+        ]);
+      }
     } else if (cmd.type === "close") {
       shutdown();
     }

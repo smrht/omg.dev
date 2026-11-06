@@ -35,7 +35,7 @@ export type ManagedSession = {
   tmuxName: string;
   cwd: string;
   createdAt: number;
-  agent?: "claude" | "codex" | "aisdk" | "codex-aisdk" | "opencode" | "omg" | "jcode" | "grok" | "cursor" | "fx" | "muse" | "deepseek" | "devin" | "hermes" | "pi" | "copilot";
+  agent?: "claude" | "codex" | "aisdk" | "codex-aisdk" | "opencode" | "omg" | "jcode" | "grok" | "cursor" | "fx" | "muse" | "deepseek" | "devin" | "hermes" | "pi" | "copilot" | "zcode";
   /** Explicit runtime for new rows. Missing preserves the legacy kind-based runtime. */
   runtime?: "tmux" | "command-file";
   // Stable id shown to clients for lfg-created sessions. For agents that mint a
@@ -48,6 +48,7 @@ export type ManagedSession = {
   model?: string;
   /** Reasoning effort selected for subsequent turns, when the agent supports it. */
   thinkingLevel?: string;
+  cyberAccessProgram?: import("./model-discovery.ts").CyberAccessProgram;
   /** Codex account service tier selected when this session launched. */
   serviceTier?: CodexServiceTier | null;
   /** Provider-native low-latency mode, independent from reasoning effort. */
@@ -100,6 +101,12 @@ export type ManagedSession = {
    * it. Missing on rows created before this field: see managedContainment.
    */
   containment?: ManagedContainment;
+  /**
+   * Host this session was launched on (src/execution-host.ts). Missing is the
+   * legacy case and means agentbox, the box itself. Recovery, respawn, fork
+   * and resume reuse this value; a running session never changes host.
+   */
+  executionHost?: import("./execution-host.ts").ExecutionHostId;
 };
 
 export type ManagedContainment = {
@@ -133,6 +140,7 @@ function keepContainmentRecord(row: ManagedSession, opts?: { onlyIfMissing?: boo
       role: row.role ?? null,
       spawnedBy: row.spawnedBy ?? null,
       tmuxName: row.tmuxName,
+      executionHost: row.executionHost ?? null,
     }, opts);
   } catch (error) {
     console.error(`[managed] containment record for ${row.tmuxName} failed: ${error instanceof Error ? error.message : String(error)}`);

@@ -1,0 +1,1 @@
+["--output-format","stream-json","--verbose","--input-format","stream-json","--effort","high","--model","opus","--disallowedTools","AskUserQuestion","--setting-sources=","--permission-mode","bypassPermissions","--include-partial-messages","--settings","{\"fastMode\":true}"]

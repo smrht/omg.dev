@@ -1,3 +1,4 @@
+import { resolveSubsessionParent, subsessionCreationKey } from "../subsession-policy.ts";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
@@ -23,7 +24,8 @@ Options:
   --model MODEL
   --thinking-level LEVEL
   --cwd PATH
-  --parent SESSION_ID
+  --parent SESSION_ID (required unless LFG_SESSION_ID is set)
+  --task-key KEY (stable logical job, retry-safe)
   --user EMAIL
   --worktree
   --json
@@ -210,9 +212,9 @@ async function cmdCreate(args: string[]) {
     }
   }
   const cwd = await resolveRepo(option(args, "--cwd"));
-  const parentSessionId = hasFlag(args, "--no-parent")
-    ? undefined
-    : option(args, "--parent")?.trim() || activeParent();
+  if (hasFlag(args, "--no-parent")) throw new Error("Een subagent moet aan een hoofdchat gekoppeld zijn; --no-parent is niet toegestaan.");
+  const { sessions: parentRows } = await api<{ sessions: SessionRow[] }>("/api/sessions");
+  const parentSessionId = resolveSubsessionParent(option(args, "--parent") || process.env.LFG_SESSION_ID || process.env.OMG_SESSION_ID, parentRows);
   const body = {
     prompt,
     cwd,
@@ -226,13 +228,14 @@ async function cmdCreate(args: string[]) {
     user: option(args, "--user")?.trim() || process.env.LFG_USER?.trim() || undefined,
     worktree: hasFlag(args, "--worktree") ? true : undefined,
   };
+  const creationKey = subsessionCreationKey(parentSessionId, body, option(args, "--task-key"));
   const created = await api<SessionCreateResponse>("/api/sessions/new", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "Idempotency-Key": creationKey },
     body: JSON.stringify(body),
   });
   if (hasFlag(args, "--json")) {
-    console.log(JSON.stringify({ subagent: created, parentSessionId: parentSessionId ?? null }, null, 2));
+    console.log(JSON.stringify({ ...created, subagent: created, parentSessionId }, null, 0));
     return;
   }
   console.log(

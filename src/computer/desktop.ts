@@ -1,3 +1,5 @@
+import { stopIsolationScopes, persistIsolationDesktop, recoverIsolationDesktop } from "../omg-isolation-computer.ts";
+// Agentbox isolation v1 (issue 1003)
 // The Computer: one shared desktop this box owns, and the browser that runs on
 // it.
 //
@@ -31,9 +33,16 @@
 // what is missing and the command that fixes it, and the desktop only starts
 // when someone asks for it.
 
-import { spawn } from "node:child_process";
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { spawn as rawSpawn } from "node:child_process";
+function spawn(...args: Parameters<typeof rawSpawn>): ReturnType<typeof rawSpawn> {
+  if (process.platform !== "linux") return rawSpawn(...args);
+  const command = args[0];
+  const kind = command === "Xvfb" ? "xvfb" : command === "x11vnc" ? "vnc" : /chrom(e|ium)/.test(command) ? "chrome" : "desktop";
+  return rawSpawn("/home/agent/bin/computer-scope-exec", [kind, "--", command, ...(args[1] as string[])], args[2]);
+}
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+
 
 export interface DesktopConfig {
   /** X display number. 99 keeps us clear of any real session on :0. */
@@ -42,7 +51,7 @@ export interface DesktopConfig {
   height: number;
   /** RFB port for x11vnc. Bound to loopback only. */
   rfbPort: number;
-  /** Chrome DevTools port. Zero lets Chrome claim an isolated loopback port. */
+  /** Chrome DevTools port. Bound to loopback only. */
   cdpPort: number;
   /** Chrome profile directory. Persistent, so logins survive a restart. */
   profileDir: string;
@@ -53,8 +62,9 @@ export interface DesktopConfig {
 /**
  * A port from the environment, or the default when unset or unparseable.
  *
- * Chrome chooses its own port by default. An explicit nonzero CDP port is
- * retained for installations that require a fixed endpoint.
+ * The defaults are fine on a box that runs nothing else, but 9222 is the
+ * conventional Chrome debugging port, so it is exactly the one a box is most
+ * likely to have already spoken for.
  */
 export function envPort(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -68,9 +78,14 @@ export const DEFAULT_DESKTOP: DesktopConfig = {
   width: 1280,
   height: 800,
   rfbPort: envPort("OMG_COMPUTER_RFB_PORT", 5900),
-  cdpPort: envPort("OMG_COMPUTER_CDP_PORT", 0),
+  cdpPort: envPort("OMG_COMPUTER_CDP_PORT", 9222),
+  // Issue 692: a proxy set once in the environment survives restarts and
+  // `omg update` without re-typing it into computer_start. An explicit
+  // proxy=... still wins: startDesktop spreads `partial` over this default.
+  proxy: process.env.OMG_COMPUTER_PROXY || undefined,
   // The preferred location. startDesktop() uses computerDir(), which falls
   // back when this one is not writable.
+
   profileDir: `${process.env.HOME ?? "/tmp"}/.omg/computer/chrome-profile`,
 };
 
@@ -127,14 +142,6 @@ export function computerDir(): string {
 }
 
 type Proc = ReturnType<typeof spawn>;
-const PROCESS_ROLES = ["xvfb", "wm", "vnc", "chrome"] as const;
-type ProcessRole = typeof PROCESS_ROLES[number];
-type DesktopPids = Partial<Record<ProcessRole, number>>;
-interface ProcessIdentity {
-  bootId: string;
-  startTime: string;
-}
-type DesktopIdentities = Partial<Record<ProcessRole, ProcessIdentity>>;
 
 interface DesktopState {
   config: DesktopConfig;
@@ -147,22 +154,12 @@ interface DesktopState {
    * Pids of a desktop we adopted after a restart. Set only when this process
    * did not spawn the stack itself, so it has no child handles to kill.
    */
-  adoptedPids?: DesktopPids;
-  identities: DesktopIdentities;
+  adoptedPids?: { xvfb?: number; wm?: number; vnc?: number; chrome?: number };
 }
 
 // Module-level singleton: one box, one desktop. A second owner of this state
 // would mean two stacks fighting over the same display number and ports.
 let state: DesktopState | null = null;
-
-// Adoption, start and stop all mutate the same desktop. In particular, state
-// is not ready until the start finishes. Queue callers through this one owner.
-let lifecycle: Promise<unknown> = Promise.resolve();
-function desktopOperation<T>(action: () => Promise<T>): Promise<T> {
-  const result = lifecycle.then(action);
-  lifecycle = result.catch(() => {});
-  return result;
-}
 
 // Where the running desktop is recorded, so a RESTARTED server can find it.
 //
@@ -179,9 +176,7 @@ const stateFile = () => join(computerDir(), "desktop.json");
 
 interface PersistedDesktop {
   config: DesktopConfig;
-  pids: DesktopPids;
-  /** Absent only in records written before process identity tracking. */
-  identities?: DesktopIdentities;
+  pids: { xvfb?: number; wm?: number; vnc?: number; chrome?: number };
   startedAt: number;
 }
 
@@ -189,17 +184,18 @@ function writeStateFile(next: DesktopState): void {
   try {
     const record: PersistedDesktop = {
       config: next.config,
-      pids: next.adoptedPids ?? {
+      pids: {
         xvfb: next.xvfb?.pid,
         wm: next.wm?.pid,
         vnc: next.vnc?.pid,
         chrome: next.chrome?.pid,
       },
-      identities: next.identities,
       startedAt: next.startedAt ?? Date.now(),
     };
-    writeFileSync(stateFile(), JSON.stringify(record));
+    const STATE_FILE = stateFile();
+    persistIsolationDesktop(record, STATE_FILE);
   } catch (error) {
+
     // Losing the record only costs us adoption on the next boot; never fail a
     // working start because the file could not be written. Say so, because a
     // missing record is what orphans the desktop on the next restart.
@@ -215,100 +211,150 @@ function clearStateFile(): void {
 
 function readStateFile(): PersistedDesktop | null {
   try {
-    const file = stateFile();
-    if (!existsSync(file)) return null;
-    const record = JSON.parse(readFileSync(file, "utf8")) as PersistedDesktop;
-    if (!record?.config || !record.pids || typeof record.pids !== "object") return null;
-    return record;
+    const STATE_FILE = stateFile();
+    if (!existsSync(STATE_FILE)) return recoverIsolationDesktop(STATE_FILE);
+    return JSON.parse(readFileSync(STATE_FILE, "utf8")) as PersistedDesktop;
+
   } catch {
     return null;
   }
 }
 
-/** Linux start ticks plus boot ID distinguish a process from a reused PID. */
-function processIdentity(pid: number | undefined): ProcessIdentity | undefined {
-  if (!Number.isSafeInteger(pid) || !pid || pid <= 0) return;
+function alive(pid: number | undefined): boolean {
+  if (!pid) return false;
   try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    // comm can contain spaces and parentheses. Field 22 follows the last ')'.
-    const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
-    const startTime = fields[19];
-    const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
-    if (fields[0] === "Z" || !startTime || !/^\d+$/.test(startTime) || !bootId) return;
-    return { bootId, startTime };
-  } catch { return; }
-}
-
-function sameProcess(pid: number | undefined, expected: ProcessIdentity | undefined): boolean {
-  if (!expected) return false;
-  const actual = processIdentity(pid);
-  return !!actual && actual.bootId === expected.bootId && actual.startTime === expected.startTime;
-}
-
-/** Whether this desktop's process for `role` is still the one it started. */
-function roleAlive(s: DesktopState, role: ProcessRole): boolean {
-  const pid = s.adoptedPids ? s.adoptedPids[role] : s[role]?.pid;
-  return sameProcess(pid, s.identities[role]);
-}
-
-// Counts Chrome launches in this process. A cached DevTools attachment from an
-// earlier launch points at a browser that no longer exists; consumers compare
-// this number to know when to drop it.
-let browserLaunches = 0;
-
-/** Changes every time this process launches the desktop's Chrome. */
-export function browserGeneration(): number {
-  return browserLaunches;
-}
-
-/** Legacy PIDs have no start ticks. Require this role's executable and config. */
-function legacyProcessMatches(pid: number, role: ProcessRole, config: DesktopConfig): boolean {
-  try {
-    const executable = basename(readlinkSync(`/proc/${pid}/exe`));
-    const args = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
-    const display = `:${config.display}`;
-    const option = (name: string, value: string) => args[args.indexOf(name) + 1] === value && args.includes(name);
-    if (role === "xvfb") return executable === "Xvfb" && args.includes(display);
-    const env = readFileSync(`/proc/${pid}/environ`, "utf8").split("\0");
-    if (!env.includes(`DISPLAY=${display}`)) return false;
-    if (role === "wm") {
-      return ["openbox", "xfce4-session", "startxfce4"].includes(executable) ||
-        (executable === "dbus-launch" && args.includes("--exit-with-session") && args.some(a => basename(a) === "startxfce4"));
-    }
-    if (role === "vnc") {
-      return executable === "x11vnc" && option("-display", display) &&
-        option("-rfbport", String(config.rfbPort)) && args.includes("-localhost");
-    }
-    return ["chrome", "google-chrome", "google-chrome-stable", "chromium", "chromium-browser"].includes(executable) &&
-      args.includes(`--user-data-dir=${config.profileDir}`) && !args.some(a => a.startsWith("--type=")) &&
-      (args.includes(`--remote-debugging-port=${config.cdpPort}`) || args.includes("--remote-debugging-port=0"));
-  } catch { return false; }
-}
-
-/** Normalize legacy records once. Never replace a mismatched saved identity. */
-function verifiedIdentities(record: PersistedDesktop): DesktopIdentities {
-  const identities: DesktopIdentities = {};
-  for (const role of PROCESS_ROLES) {
-    const pid = record.pids?.[role];
-    const actual = processIdentity(pid);
-    if (!actual) continue;
-    if (record.identities === undefined
-      ? legacyProcessMatches(pid!, role, record.config)
-      : sameProcess(pid, record.identities?.[role])) identities[role] = actual;
+    // Signal 0 tests for existence without touching the process.
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
   }
-  return identities;
 }
 
-function killPid(pid: number | undefined, identity: ProcessIdentity | undefined, signal: NodeJS.Signals = "SIGTERM"): void {
-  // Recheck before EACH signal, including escalation after the grace period.
-  if (!sameProcess(pid, identity)) return;
-  try { process.kill(pid!, signal); } catch {}
+/**
+ * The pid of the Chrome the agent drives, however this desktop came to be.
+ *
+ * A desktop we spawned keeps a child handle; one we adopted after a server
+ * restart only has pids on disk. Both are the same browser to a caller.
+ */
+function chromePid(s: DesktopState): number | undefined {
+  return s.adoptedPids?.chrome ?? s.chrome?.pid;
 }
 
-async function reapProcesses(pids: DesktopPids, identities: DesktopIdentities): Promise<void> {
-  for (const role of [...PROCESS_ROLES].reverse()) killPid(pids[role], identities[role]);
-  await Bun.sleep(600);
-  for (const role of [...PROCESS_ROLES].reverse()) killPid(pids[role], identities[role], "SIGKILL");
+function killPid(pid: number | undefined, signal: NodeJS.Signals = "SIGTERM"): void {
+  if (!pid) return;
+  try {
+    process.kill(pid, signal);
+  } catch {}
+}
+
+/**
+ * The Computer's children run inside systemd user scopes on computer.slice,
+ * so a runaway Chrome is capped by the slice and a stopped scope reaps the
+ * whole process group instead of stranding grandchildren.
+ */
+type ScopeKind = "xvfb" | "desktop" | "vnc" | "chrome";
+
+// The helper execs in place, so the pid we spawn is the pid that ends up in
+// the scope name (omg-computer-KIND-<pid>.scope) and the pid Xvfb, x11vnc and
+// Chrome actually run as. Every child handle, state-file pid and adopted pid
+// below therefore keeps its existing meaning.
+const SCOPE_EXEC = "/home/agent/bin/computer-scope-exec";
+
+/** How long stopDesktopScopes waits on its own systemctl client. */
+const SCOPE_STOP_TIMEOUT_MS = 5000;
+
+/**
+ * Spawn one desktop component inside its own scope.
+ *
+ * Linux is the only platform with the helper and a user manager, and there the
+ * helper is MANDATORY: without it the stack would run unscoped and unbounded,
+ * which is exactly what computer.slice exists to prevent, so the start is
+ * refused instead of quietly degraded. Anywhere else there is nothing to scope
+ * into and this stays the plain spawn the file always had.
+ */
+function spawnScoped(
+  kind: ScopeKind,
+  cmd: string,
+  args: string[],
+  opts: { stdio: "ignore"; env?: NodeJS.ProcessEnv; detached?: boolean },
+): Proc {
+  if (process.platform !== "linux") return spawn(cmd, args, opts);
+  if (!existsSync(SCOPE_EXEC)) {
+    // Sanitized on purpose: the kind and the helper path say what is wrong;
+    // no command line, arguments or environment end up in the message.
+    throw new Error(
+      `computer-scope-exec ontbreekt op ${SCOPE_EXEC}; weiger ${kind} zonder scope te starten`,
+    );
+  }
+  return spawn(SCOPE_EXEC, [kind, "--", cmd, ...args], opts);
+}
+
+/**
+ * Stop exactly the derived scopes of one desktop, and nothing else.
+ *
+ * Scope names embed the child pid, so the only units we may name are the ones
+ * built from pids this desktop actually recorded. No patterns: a glob like
+ * omg-computer-* would also stop the scopes of a stack another server
+ * instance owns. A missing scope (an unscoped, pre-fork desktop) makes
+ * systemctl exit non-zero, which is fine: the pid kills around every call
+ * site remain the behavior that handles those.
+ */
+async function stopDesktopScopes(
+  pids: { xvfb?: number; wm?: number; vnc?: number; chrome?: number },
+): Promise<void> {
+  if (process.platform !== "linux") return;
+  const kindPid: [ScopeKind, number | undefined][] = [
+    ["xvfb", pids.xvfb],
+    ["desktop", pids.wm],
+    ["vnc", pids.vnc],
+    ["chrome", pids.chrome],
+  ];
+  // Pids come from a JSON state file, so 0, -1, 3.5 and 2**63 are all inputs a
+  // corrupt or hand-edited record can produce; scope names built from those
+  // would be nonsense at best.
+  const names: string[] = [];
+  for (const [kind, pid] of kindPid) {
+    if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) continue;
+    names.push(`omg-computer-${kind}-${pid}.scope`);
+  }
+  if (names.length === 0) return;
+  let proc: ReturnType<typeof Bun.spawn>;
+  try {
+    proc = Bun.spawn(["systemctl", "--user", "stop", "--quiet", ...names], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+  } catch {
+    // No systemctl on PATH (stripped or non-systemd box): the pid kills at
+    // every call site remain the behavior that handles the children.
+    return;
+  }
+  // Bounded wait: a systemctl that never returns -- hung D-Bus, a scope stuck
+  // in D-state -- must not wedge stopDesktop forever. On timeout ONLY the
+  // client dies; the stop job it already handed to the user manager remains
+  // responsible for the scope, and nothing here kills by name or pattern.
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      reject(new Error("systemctl stop timeout"));
+    }, SCOPE_STOP_TIMEOUT_MS);
+  });
+  try {
+    await Promise.race([proc.exited, bound]);
+  } catch {
+    // Only the bound rejects; systemctl's own exit resolves through .exited.
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+  if (timedOut) {
+    try {
+      proc.kill();
+    } catch {}
+  }
 }
 
 /**
@@ -322,18 +368,23 @@ async function adoptOrReap(): Promise<boolean> {
   const record = readStateFile();
   if (!record) return false;
 
-  const identities = verifiedIdentities(record);
-  // An interrupted start can leave a record with cdpPort=0. It is not ready
-  // for adoption until Chrome's assigned endpoint has been persisted.
+  const { xvfb, vnc, chrome } = record.pids;
+  // A screen nobody can drive is not a Computer. Chrome belongs in this test:
+  // adopting a stack whose browser died is what made `running: true` lie while
+  // the CDP port answered nothing.
   const healthy =
-    !!identities.xvfb && !!identities.vnc && !!identities.chrome &&
-    PROCESS_ROLES.every(role => record.pids?.[role] === undefined || !!identities[role]) && record.config.cdpPort > 0 &&
-    (await waitForPort(record.config.rfbPort, 1500)) && (await waitForPort(record.config.cdpPort, 1500)) &&
-    // The probes await I/O. Recheck every role immediately before adoption.
-    PROCESS_ROLES.every(role => record.pids[role] === undefined || sameProcess(record.pids[role], identities[role]));
+    alive(xvfb) &&
+    alive(vnc) &&
+    alive(chrome) &&
+    (await waitForPort(record.config.rfbPort, 1500)) &&
+    (await waitForPort(record.config.cdpPort, 1500));
 
   if (!healthy) {
-    await reapProcesses(record.pids ?? {}, identities);
+    await stopDesktopScopes(record.pids);
+    await stopIsolationScopes(record.pids);
+    for (const pid of Object.values(record.pids)) killPid(pid);
+    await Bun.sleep(500);
+    for (const pid of Object.values(record.pids)) killPid(pid, "SIGKILL");
     clearStateFile();
     // kill() returns before the kernel finishes tearing the process down, and
     // a listening socket keeps accepting until it does. startDesktop() checks
@@ -351,10 +402,7 @@ async function adoptOrReap(): Promise<boolean> {
     config: record.config,
     startedAt: record.startedAt,
     adoptedPids: record.pids,
-    identities,
   };
-  // Upgrade a verified legacy record so later restarts also detect PID reuse.
-  if (record.identities === undefined) writeStateFile(state);
   return true;
 }
 
@@ -441,14 +489,15 @@ export interface DesktopStatus {
   width: number;
   height: number;
   startedAt: number | null;
-  /** False when the desktop is up but its Chrome has exited. Start relaunches it. */
-  browserRunning: boolean;
   deps: DepReport;
 }
 
 export function desktopStatus(): DesktopStatus {
   const deps = ensureDeps();
-  if (!state) {
+  // `state` proves we started something once, not that it is still up. Report
+  // on the browser, so a caller that reads `running` gets an answer it can act
+  // on instead of one it has to verify with a curl.
+  if (!state || !alive(chromePid(state))) {
     return {
       running: false,
       display: null,
@@ -457,7 +506,6 @@ export function desktopStatus(): DesktopStatus {
       width: DEFAULT_DESKTOP.width,
       height: DEFAULT_DESKTOP.height,
       startedAt: null,
-      browserRunning: false,
       deps,
     };
   }
@@ -469,7 +517,6 @@ export function desktopStatus(): DesktopStatus {
     width: state.config.width,
     height: state.config.height,
     startedAt: state.startedAt ?? null,
-    browserRunning: roleAlive(state, "chrome"),
     deps,
   };
 }
@@ -546,7 +593,6 @@ async function waitForPortsFree(ports: number[], timeoutMs: number): Promise<boo
  */
 export async function busyPort(config: DesktopConfig): Promise<number | null> {
   for (const port of [config.rfbPort, config.cdpPort]) {
-    if (port === 0) continue;
     if (await waitForPort(port, 0)) return port;
   }
   return null;
@@ -561,9 +607,30 @@ export async function busyPort(config: DesktopConfig): Promise<number | null> {
  * press Start on something already started.
  */
 export async function ensureDesktopAdopted(): Promise<void> {
-  await desktopOperation(async () => {
-    if (!state) await adoptOrReap();
-  });
+  if (state) return;
+  await adoptOrReap();
+}
+
+/**
+ * Chrome flags for a proxied browser: the proxy carries the traffic, and
+ * nothing else does.
+ *
+ * A SOCKS proxy only handles TCP, so three paths around it each get their own
+ * flag. QUIC is HTTP/3 over UDP and bypasses the tunnel entirely -- switched
+ * off rather than proxied. WebRTC can share the real address over a
+ * non-proxied UDP path -- the handling policy forbids exactly that. And DNS:
+ * left alone, Chrome resolves hostnames with the local resolver, so the
+ * resolver rules answer NOTFOUND for everything except loopback; names then
+ * travel to the proxy unresolved (SOCKS5 forwards hostnames), and the
+ * EXCLUDEs keep a proxy bound to 127.0.0.1 and localhost pages reachable.
+ */
+export function chromeProxyFlags(proxy: string): string[] {
+  return [
+    `--proxy-server=${proxy}`,
+    "--disable-quic",
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost",
+  ];
 }
 
 /**
@@ -572,20 +639,11 @@ export async function ensureDesktopAdopted(): Promise<void> {
  * cannot start two stacks.
  */
 export async function startDesktop(partial: Partial<DesktopConfig> = {}): Promise<DesktopStatus> {
-  return desktopOperation(() => startDesktopOwned(partial));
-}
-
-async function startDesktopOwned(partial: Partial<DesktopConfig>): Promise<DesktopStatus> {
-  if (state) {
-    const screenUp = roleAlive(state, "xvfb") && roleAlive(state, "vnc");
-    if (screenUp && roleAlive(state, "chrome")) return desktopStatus();
-    if (screenUp) {
-      await relaunchBrowser(state);
-      return desktopStatus();
-    }
-    // The display or the stream is gone, so nothing on it can be reused.
-    await stopDesktopOwned();
-  }
+  if (state && alive(chromePid(state))) return desktopStatus();
+  // Chrome died under a live server. Drop the stale handle and fall through to
+  // adoptOrReap(), which reads the pids off disk and reaps the whole stack --
+  // otherwise Xvfb and x11vnc stay behind and the new Xvfb cannot take :99.
+  state = null;
 
   // A desktop this box left running survives a server restart. Reattach to it
   // rather than starting a second stack on the same display and ports.
@@ -601,30 +659,24 @@ async function startDesktopOwned(partial: Partial<DesktopConfig>): Promise<Deskt
   // that cannot work and cannot report that it does not work.
   const busy = await busyPort(config);
   if (busy !== null) {
-    console.warn(`[computer] configured port ${busy} is in use`);
-    throw new Error("The Computer cannot open its browser. Try again or contact support.");
+    // busyPort checks rfbPort first, so attribute a tie to rfb rather than
+    // naming the CDP knob for a port the RFB check matched.
+    const knob = busy === config.rfbPort ? "OMG_COMPUTER_RFB_PORT" : "OMG_COMPUTER_CDP_PORT";
+    throw new Error(
+      `port ${busy} is already in use by another process, so the Computer cannot claim it. ` +
+        `Stop whatever holds it, or set ${knob} to a free port and restart the server.`,
+    );
   }
-  const next: DesktopState = { config, identities: {} };
-  state = next;
-  try {
-    return await launchDesktop(next);
-  } catch (error) {
-    if (state === next) await stopDesktopOwned();
-    throw error;
-  }
-}
-
-async function launchDesktop(next: DesktopState): Promise<DesktopStatus> {
-  const config = next.config;
   const display = `:${config.display}`;
   const env = { ...process.env, DISPLAY: display };
+  const next: DesktopState = { config };
+
   // Xvfb first: everything below needs a display to attach to.
-  next.xvfb = spawn(
+  next.xvfb = spawnScoped("xvfb",
     "Xvfb",
     [display, "-screen", "0", `${config.width}x${config.height}x24`, "-nolisten", "tcp"],
     { stdio: "ignore", detached: false },
   );
-  next.identities.xvfb = processIdentity(next.xvfb.pid);
   await Bun.sleep(1200);
 
   // The desktop session: wallpaper, panel, file manager, a terminal, and a
@@ -632,9 +684,7 @@ async function launchDesktop(next: DesktopState): Promise<DesktopStatus> {
   // streaming a computer.
   const session = desktopSessionCommand();
   if (!session) throw new Error("no desktop session found (install xfce4 or openbox)");
-  disableScreenLock(process.env.XDG_CONFIG_HOME || join(process.env.HOME ?? "/tmp", ".config"));
-  next.wm = spawn(session.cmd, session.args, { stdio: "ignore", env, detached: false });
-  next.identities.wm = processIdentity(next.wm.pid);
+  next.wm = spawnScoped("desktop", session.cmd, session.args, { stdio: "ignore", env, detached: false });
   // xfce4 has a panel, a settings daemon and a desktop to bring up, so it needs
   // longer than a bare window manager before anything else should appear.
   await Bun.sleep(3500);
@@ -642,7 +692,7 @@ async function launchDesktop(next: DesktopState): Promise<DesktopStatus> {
   // -localhost is the security boundary: the RFB port never leaves this box.
   // The browser reaches it through our own websocket bridge in serve.ts, which
   // is already authenticated, so x11vnc itself needs no password of its own.
-  next.vnc = spawn(
+  next.vnc = spawnScoped("vnc",
     "x11vnc",
     [
       "-display", display,
@@ -657,48 +707,18 @@ async function launchDesktop(next: DesktopState): Promise<DesktopStatus> {
     { stdio: "ignore", env, detached: false },
   );
 
-  next.identities.vnc = processIdentity(next.vnc.pid);
-
-  spawnBrowser(next);
-  // Publish the state BEFORE waiting on ports. If a wait fails or throws, the
-  // processes we just spawned must still be reachable by stopDesktop -- an
-  // early return here used to orphan Xvfb, openbox, x11vnc and Chrome.
-  next.startedAt = Date.now();
-  state = next;
-  writeStateFile(next);
-
-  const [rfbUp, cdpUp] = await Promise.all([
-    waitForPort(config.rfbPort, 10_000),
-    waitForBrowser(next),
-  ]);
-  if (!rfbUp || !cdpUp) throw new Error("The Computer could not start its browser. Try again.");
-  // The Chrome-assigned port is the runtime endpoint. Persist it for adoption
-  // and use it for every browser/kiosk consumer, without changing the profile.
-  writeStateFile(next);
-  return desktopStatus();
-}
-
-/** Spawn the desktop's Chrome on its display. Does not wait for it. */
-function spawnBrowser(next: DesktopState): void {
-  const config = next.config;
-  const env = { ...process.env, DISPLAY: `:${config.display}` };
   const chrome = chromePath();
   if (!chrome) throw new Error("no Chrome binary found");
   disablePasswordSaving(config.profileDir);
-  // Chrome writes this file only with --remote-debugging-port=0. Remove an
-  // old endpoint before launching, so a failed start cannot attach elsewhere.
-  if (config.cdpPort === 0) rmSync(join(config.profileDir, "DevToolsActivePort"), { force: true });
   const chromeArgs = [
     `--remote-debugging-port=${config.cdpPort}`,
-    "--remote-debugging-address=127.0.0.1",
     `--user-data-dir=${config.profileDir}`,
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-gpu",
-    // Firecracker guests booted from an older rootfs have no /dev/shm. Chrome
-    // aborts at start without it ("Unable to access /dev/shm"), which reads as
-    // "rfb=up cdp=down". Keep Chrome's shared memory in /tmp instead.
-    "--disable-dev-shm-usage",
+    // 06-09-2026: WebUI omnibox-popups uit (Puppeteer-upstreamles #15278).
+    // De AI-popup is via CDP niet blijvend te sluiten en vervuilt /json/list.
+    "--disable-features=WebUIOmniboxPopup,WebUIOmniboxAimPopup",
     // Deliberately NOT full screen. A maximised Chrome hides the desktop and
     // makes the stream look like a browser again; leaving the edges visible is
     // what makes it read as a computer you could open something else on.
@@ -706,85 +726,92 @@ function spawnBrowser(next: DesktopState): void {
     `--window-size=${Math.round(config.width * 0.82)},${Math.round(config.height * 0.78)}`,
   ];
   // Guus's setup runs each browser behind a webshare proxy; this is that knob.
-  if (config.proxy) chromeArgs.push(`--proxy-server=${config.proxy}`);
-  next.chrome = spawn(chrome, chromeArgs, { stdio: "ignore", env, detached: false });
-  next.identities.chrome = processIdentity(next.chrome.pid);
-  browserLaunches++;
-}
+  // Issue 692: with a proxy set, Chrome must not leak around the tunnel
+  // (QUIC over UDP, WebRTC, local DNS) -- see chromeProxyFlags above.
+  if (config.proxy) chromeArgs.push(...chromeProxyFlags(config.proxy));
+  next.chrome = spawnScoped("chrome", chrome, chromeArgs, { stdio: "ignore", env, detached: false });
 
-function waitForBrowser(next: DesktopState): Promise<boolean> {
-  return next.config.cdpPort === 0 ? waitForChromePort(next, 20_000) : waitForPort(next.config.cdpPort, 20_000);
-}
+  // Publish the state BEFORE waiting on ports. If a wait fails or throws, the
+  // processes we just spawned must still be reachable by stopDesktop -- an
+  // early return here used to orphan Xvfb, openbox, x11vnc and Chrome.
+  next.startedAt = Date.now();
+  state = next;
+  writeStateFile(next);
 
-/**
- * Bring back a Chrome that exited under a desktop that is still up.
- *
- * Chrome can die on its own while Xvfb, the session and x11vnc keep running.
- * On 2026-10-04 its browser process took a SIGSEGV right after a raw CDP
- * Emulation call. Start used to see the desktop and report it running, so
- * every browser tool failed with "cannot reach the desktop browser's DevTools
- * endpoint" until someone stopped the whole desktop by hand. Relaunch only
- * Chrome: the screen, the stream and the person watching it stay put. The
- * profile keeps its sign-ins.
- */
-async function relaunchBrowser(s: DesktopState): Promise<void> {
-  // A Chrome-assigned port died with the old browser. Ask for a new one.
-  // Keep only a fixed port that the installation configured.
-  if (DEFAULT_DESKTOP.cdpPort === 0 || s.config.cdpPort !== DEFAULT_DESKTOP.cdpPort) s.config.cdpPort = 0;
-  else if (await waitForPort(s.config.cdpPort, 0)) {
-    console.warn(`[computer] configured port ${s.config.cdpPort} is in use`);
-    throw new Error("The Computer cannot open its browser. Try again or contact support.");
+  let rfbUp = false;
+  let cdpUp = false;
+  try {
+    [rfbUp, cdpUp] = await Promise.all([
+      waitForPort(config.rfbPort, 10_000),
+      waitForPort(config.cdpPort, 20_000),
+    ]);
+  } catch {
+    await stopDesktop();
+    throw new Error("the computer failed to start");
   }
-  spawnBrowser(s);
-  // An adopted desktop is stopped through its recorded pids.
-  if (s.adoptedPids) s.adoptedPids.chrome = s.chrome?.pid;
-  writeStateFile(s);
-  if (!(await waitForBrowser(s))) {
-    killPid(s.chrome?.pid, s.identities.chrome, "SIGKILL");
-    throw new Error("The Computer could not start its browser. Try again.");
-  }
-  writeStateFile(s);
-}
 
-async function waitForChromePort(next: DesktopState, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (next.chrome?.exitCode !== null) return false;
-    try {
-      const [portText, path] = readFileSync(join(next.config.profileDir, "DevToolsActivePort"), "utf8").trim().split("\n");
-      const port = Number(portText);
-      if (Number.isInteger(port) && port > 0 && port < 65536 && path?.startsWith("/devtools/browser/")) {
-        const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(1000) });
-        const body = await response.json() as { webSocketDebuggerUrl?: string };
-        if (response.ok && body.webSocketDebuggerUrl === `ws://127.0.0.1:${port}${path}`) {
-          next.config.cdpPort = port;
-          return true;
-        }
-      }
-    } catch { /* Chrome has not published its endpoint yet. */ }
-    await Bun.sleep(100);
+  if (!rfbUp || !cdpUp) {
+    await stopDesktop();
+    throw new Error(
+      `computer failed to start (rfb=${rfbUp ? "up" : "down"} cdp=${cdpUp ? "up" : "down"})`,
+    );
   }
-  return false;
+  return desktopStatus();
 }
 
 /** Stop the whole stack, top down. Safe to call when nothing is running. */
 export async function stopDesktop(): Promise<void> {
-  await desktopOperation(stopDesktopOwned);
-}
-
-async function stopDesktopOwned(): Promise<void> {
   const s = state;
-  const record = s ? null : readStateFile();
+  // Read the persisted pids BEFORE clearStateFile(): with s null that record
+  // is the only handle on a desktop a previous process left running, and
+  // clearing first made readStateFile() return null every time -- the orphan
+  // cleanup below could never run.
+  const orphan = s ? null : readStateFile();
+  await stopIsolationScopes(s?.adoptedPids ?? (s ? {
+    xvfb: s.xvfb?.pid, wm: s.wm?.pid, vnc: s.vnc?.pid, chrome: s.chrome?.pid,
+  } : orphan?.pids ?? {}));
   state = null;
   clearStateFile();
   if (!s) {
-    // Only verified processes from a previous owner may be stopped.
-    if (record) await reapProcesses(record.pids ?? {}, verifiedIdentities(record));
+    // Nothing in memory, but a previous process may have left a desktop
+    // running. Reap it so "stop" means stopped regardless of who started it.
+    const record = orphan;
+    if (record) {
+      await stopDesktopScopes(record.pids);
+      for (const pid of Object.values(record.pids)) killPid(pid);
+      await Bun.sleep(500);
+      for (const pid of Object.values(record.pids)) killPid(pid, "SIGKILL");
+    }
     return;
   }
 
-  const pids = s.adoptedPids ?? Object.fromEntries(PROCESS_ROLES.map(role => [role, s[role]?.pid]));
-  await reapProcesses(pids, s.identities);
+  // An adopted desktop has pids but no child handles.
+  if (s.adoptedPids) {
+    const pids = Object.values(s.adoptedPids);
+    await stopDesktopScopes(s.adoptedPids);
+    for (const pid of pids) killPid(pid);
+    await Bun.sleep(600);
+    for (const pid of pids) killPid(pid, "SIGKILL");
+    return;
+  }
+
+  await stopDesktopScopes({
+    xvfb: s.xvfb?.pid,
+    wm: s.wm?.pid,
+    vnc: s.vnc?.pid,
+    chrome: s.chrome?.pid,
+  });
+  for (const p of [s.chrome, s.vnc, s.wm, s.xvfb]) {
+    try {
+      p?.kill("SIGTERM");
+    } catch {}
+  }
+  await Bun.sleep(600);
+  for (const p of [s.chrome, s.vnc, s.wm, s.xvfb]) {
+    try {
+      if (p && p.exitCode == null) p.kill("SIGKILL");
+    } catch {}
+  }
 }
 
 /** The DevTools websocket URL Bun.WebView attaches to, or null when down. */
@@ -822,49 +849,6 @@ export function disablePasswordSaving(profileDir: string): void {
     writeFileSync(file, JSON.stringify(prefs));
   } catch {
     // A profile Chrome cannot use would fail the start anyway, with a clearer error.
-  }
-}
-
-/**
- * xfce4-screensaver settings with the saver and the lock off. Written as the
- * xfconf channel file because the screensaver also starts through D-Bus
- * activation (org.xfce.ScreenSaver), so turning off its autostart entry is
- * not enough. Every launch path reads this channel.
- */
-export const SCREEN_LOCK_OFF_XML = `<?xml version="1.0" encoding="UTF-8"?>
-<channel name="xfce4-screensaver" version="1.0">
-  <property name="saver" type="empty">
-    <property name="enabled" type="bool" value="false"/>
-    <property name="idle-activation" type="empty">
-      <property name="enabled" type="bool" value="false"/>
-    </property>
-  </property>
-  <property name="lock" type="empty">
-    <property name="enabled" type="bool" value="false"/>
-    <property name="saver-activation" type="empty">
-      <property name="enabled" type="bool" value="false"/>
-    </property>
-  </property>
-</channel>
-`;
-
-/**
- * Keep the desktop session from locking the screen.
- *
- * xfce4-screensaver locks the screen after a few idle minutes and asks for the
- * Linux user's password. Nobody who watches the Computer has that password,
- * and the screen is already behind omg sign-in, so the lock only shuts the
- * person out. xfconfd reads the channel file at start, so this runs before
- * the session does.
- * @internal exported for tests.
- */
-export function disableScreenLock(configHome: string): void {
-  const dir = join(configHome, "xfce4", "xfconf", "xfce-perchannel-xml");
-  try {
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "xfce4-screensaver.xml"), SCREEN_LOCK_OFF_XML);
-  } catch {
-    // A read-only config directory leaves the session as it was. It still starts.
   }
 }
 

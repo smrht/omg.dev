@@ -204,6 +204,8 @@ describe("usage providers", () => {
       "opencode",
       "omg",
       "muse",
+      "devin",
+      "zcode",
     ]);
   });
 

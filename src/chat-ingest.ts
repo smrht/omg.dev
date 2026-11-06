@@ -1,8 +1,9 @@
 import { statSync } from "node:fs";
 import { isCursorTurnEndedLine, normalizeLineMessages, type Session, type SessionMsg } from "./sessions.ts";
 import {
-  deleteTranscriptIndexForPath,
-  indexTranscriptMessages,
+  deleteTranscriptIndexForPathAsync,
+  indexTranscriptMessagesAsync,
+  initTranscriptIndexAsync,
   isSessionIndexKey,
   transcriptCursorFor,
   transcriptIndexCurrent,
@@ -95,6 +96,10 @@ class ChatTranscriptTailer {
 
   private async catchUpOnce(reason: string): Promise<ChatIngestResult> {
     const started = performance.now();
+    // Schema readiness through the worker BEFORE any synchronous database
+    // call below: on first contact with a fresh (or contended) database this
+    // keeps schema creation and its write lock off the event loop.
+    await initTranscriptIndexAsync();
     // A transcript can disappear under a live tailer: the worktree sweeper
     // reclaims a directory, or an agent's own session file is rotated away.
     // This runs on the live-socket poll path, where an uncaught ENOENT took
@@ -128,7 +133,7 @@ class ChatTranscriptTailer {
       this.offset = cursor.offset;
     }
     if (cursor && st.size < cursor.offset) {
-      deleteTranscriptIndexForPath(this.path);
+      await deleteTranscriptIndexForPathAsync(this.path);
       cursor = null;
       this.offset = 0;
       this.partial = "";
@@ -196,7 +201,11 @@ class ChatTranscriptTailer {
       const emit = hold < complete.length ? complete.slice(0, hold) : complete;
       committed = hold < complete.length ? complete[hold].offset : lineOffset;
 
-      indexed += indexTranscriptMessages(this.path, this.sessionId, emit, {
+      // Worker-backed insert: lock waits happen off serve's event loop, so a
+      // held writer lock delays this await (and this tick) instead of every
+      // request. Ordering and subscriber events are unchanged — publish still
+      // happens per chunk after the rows commit.
+      indexed += await indexTranscriptMessagesAsync(this.path, this.sessionId, emit, {
         size: st.size,
         offset: committed,
         mtimeMs: st.mtimeMs,
@@ -214,7 +223,7 @@ class ChatTranscriptTailer {
     }
 
     if (!this.partial && committed === st.size) {
-      indexTranscriptMessages(this.path, this.sessionId, [], {
+      await indexTranscriptMessagesAsync(this.path, this.sessionId, [], {
         size: st.size,
         offset: committed,
         mtimeMs: st.mtimeMs,

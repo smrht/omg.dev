@@ -1,3 +1,4 @@
+import { subsessionCreationKey } from "../subsession-policy.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -17,6 +18,7 @@ import {
 } from "../omg-capabilities.ts";
 import { BOT_COLORWAYS, BOT_SHAPES } from "../bots/store.ts";
 import { BOT_PEER_MESSAGE_MAX_CHARS } from "../bots/messaging.ts";
+import { registerSamTools } from "../sam-tools.ts";
 
 type Repo = { name: string; cwd: string; project?: string };
 type SessionRow = {
@@ -123,6 +125,24 @@ function result(data: unknown) {
   };
 }
 
+/**
+ * An update that copies fields back from omg_list_auto_agents carries the
+ * truncated list preview as `prompt`, and the store persists `input.prompt`
+ * verbatim — so saving that preview would cut a long prompt to 200 chars
+ * (measured 03-11-2026 on this box: 1732 → 200 during an enabled toggle).
+ * The stored text wins unless the caller sends something that is not a
+ * prefix of it, i.e. genuinely different text.
+ */
+export function resolveEditPrompt(
+  stored: string,
+  incoming: string | undefined,
+): { prompt: string; keptStored: boolean } {
+  if (incoming === undefined) return { prompt: stored, keptStored: true };
+  if (incoming.length < stored.length && stored.startsWith(incoming))
+    return { prompt: stored, keptStored: true };
+  return { prompt: incoming, keptStored: false };
+}
+
 // ---- Short session ids ----------------------------------------------------
 // Session ids are 36-char UUIDs minted by the underlying harnesses (claude,
 // codex, ...) and are load-bearing on disk: transcript filenames, tmux command
@@ -202,15 +222,6 @@ async function resolveSid(input: string): Promise<string> {
   if (matches.size > 1) {
     throw new Error(
       `session id "${id}" is ambiguous (matches ${matches.size} sessions); pass more characters`,
-    );
-  }
-  // A thread id handed over as a session (an `omg:session_` link written by an
-  // older app): say what it is, so the agent reaches for the thread tools.
-  const threads = await api<{ threads?: { id: string; title: string }[] }>("/api/threads").catch(() => ({ threads: [] as { id: string; title: string }[] }));
-  const thread = (threads.threads ?? []).find((row) => row.id.toLowerCase().startsWith(lower));
-  if (thread) {
-    throw new Error(
-      `"${id}" is not a session: it is the thread "${thread.title}" (${thread.id}). Use omg_read_thread or omg_send_thread_message with that id.`,
     );
   }
   throw new Error(`no session matches id "${id}"`);
@@ -498,7 +509,8 @@ async function createSubagent({
   }
   const model = rawModel?.trim() || MODEL_OPTIONS[agent as keyof typeof MODEL_OPTIONS].defaultModel;
   const parentInput = parentSessionId?.trim() || callerSessionId();
-  const parent = parentInput ? await resolveSid(parentInput) : undefined;
+  if (!parentInput) throw new Error("Subagent vereist een hoofdchat; parentSessionId ontbreekt.");
+  const parent = await resolveSid(parentInput);
   // Tag the child to the same user as the calling session. OMG_USER is injected
   // at spawn (see tmux.ts addSessionEnv); without this, subagents created from
   // sessions whose parent chain has no live assigned ancestor (headless/cron
@@ -507,7 +519,7 @@ async function createSubagent({
   const assignedUser = user?.trim() || envValue("USER") || undefined;
   const created = await api<SessionCreateResponse>("/api/sessions/new", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "Idempotency-Key": subsessionCreationKey(parent, { prompt, cwd, agent, model, thinkingLevel }) },
     body: JSON.stringify({
       prompt,
       cwd,
@@ -536,6 +548,9 @@ async function createSubagent({
  * ../commands/serve.ts, where one in-process instance answers every agent over
  * HTTP instead of each agent spawning its own copy.
  */
+const AGENTBOX_SHIP_DISABLED = true;
+const AGENTBOX_SHIP_DISABLED_MESSAGE = "omg_ship staat uit op deze box (Sam, 06-10-2026). Er is niets gepost en dat is goed zo. Klaar = geverifieerd, gecommit en gepusht in de projectrepo en geregistreerd in de eigen administratie (memory/docs/sprintrecord). Meld resultaat, repo/SHA en bewijs gewoon in de chat. Roep omg_ship niet opnieuw aan.";
+
 export function buildOmgMcpServer(): McpServer {
   const server = new McpServer({
     name: "omg",
@@ -656,7 +671,18 @@ export function buildOmgMcpServer(): McpServer {
           // transcriptPath is always "lfg://session/<sessionId>" — a second
           // copy of the id we just returned.
           const { transcriptPath: _drop, ...rest } = session;
-          return { ...rest, sessionId: shortSid(session.sessionId) };
+          // Week-retro 05-10-2026 (I-18): one oversized historical field (first
+          // prompt, title, summary) used to push the whole list past the MCP
+          // output cap and into a spill file. Clip long strings and say which.
+          const clippedFields: string[] = [];
+          const bounded = Object.fromEntries(Object.entries(rest).map(([key, value]) => {
+            if (typeof value === "string" && value.length > 2000) {
+              clippedFields.push(key);
+              return [key, value.slice(0, 2000)];
+            }
+            return [key, value];
+          }));
+          return { ...bounded, ...(clippedFields.length ? { clippedFields } : {}), sessionId: shortSid(session.sessionId) };
         }),
       });
     },
@@ -738,101 +764,6 @@ export function buildOmgMcpServer(): McpServer {
         }),
       });
       return result(data);
-    },
-  );
-
-  // ---- Threads: people-first team chat (src/threads.ts) ----
-  type ThreadRow = { id: string; title: string; updatedAt: number; project?: { name: string } | null; lastMessage?: { author: { kind: string; name?: string }; text: string } | null };
-  const resolveThread = async (ref: string): Promise<string> => {
-    const id = ref.trim().replace(/^omg:thread_/, "").toLowerCase();
-    const threads = (await api<{ threads?: ThreadRow[] }>("/api/threads")).threads ?? [];
-    const matches = threads.filter((row) => row.id.toLowerCase().startsWith(id));
-    if (!id || matches.length === 0) throw new Error(`no thread matches "${ref}"; list them with omg_list_threads`);
-    if (matches.length > 1) throw new Error(`"${ref}" matches ${matches.length} threads; use more of the id`);
-    return matches[0].id;
-  };
-  const short = (id: string | null | undefined) => (id ? id.slice(0, 8) : null);
-
-  server.registerTool(
-    "omg_list_threads",
-    {
-      title: "List omg.dev Threads",
-      description:
-        "List the team chat threads on this machine, newest first: id, title, project and the last message. A person references one as [#Title](omg:thread_<id>).",
-      inputSchema: {},
-    },
-    async () => {
-      const threads = (await api<{ threads?: ThreadRow[] }>("/api/threads")).threads ?? [];
-      return result({
-        threads: threads.map((row) => ({
-          id: row.id,
-          title: row.title,
-          project: row.project?.name ?? null,
-          updatedAt: new Date(row.updatedAt).toISOString(),
-          last: row.lastMessage
-            ? `${row.lastMessage.author.kind === "omg" ? "omg" : row.lastMessage.author.name}: ${row.lastMessage.text.slice(0, 200)}`
-            : null,
-        })),
-      });
-    },
-  );
-
-  server.registerTool(
-    "omg_read_thread",
-    {
-      title: "Read an omg.dev Thread",
-      description:
-        "Read a team chat thread: its people and its messages, oldest first. A reply carries replyTo, the id of the message it answers.",
-      inputSchema: {
-        threadId: z.string().min(1).describe("Thread id, an unambiguous prefix, or an omg:thread_<id> link."),
-        limit: z.number().int().min(1).max(500).optional().describe("How many recent messages. Default 100."),
-      },
-    },
-    async ({ threadId, limit }) => {
-      const id = await resolveThread(threadId);
-      const data = await api<{
-        thread: ThreadRow;
-        participants?: { id: string; kind: string; display: { name?: string | null; fallback: string } }[];
-        messages?: { id: string; ts: number; author: { kind: string; name?: string }; text: string; replyTo?: string | null; media?: { kind: string; name?: string | null }[]; task?: { sessionId: string; event: string } }[];
-      }>(`/api/threads/${id}?limit=${limit ?? 100}`);
-      return result({
-        id,
-        title: data.thread.title,
-        people: (data.participants ?? []).filter((row) => row.kind === "human").map((row) => row.display.name || row.display.fallback),
-        messages: (data.messages ?? []).map((row) => ({
-          id: short(row.id),
-          at: new Date(row.ts).toISOString(),
-          from: row.author.kind === "omg" ? "omg" : row.author.name,
-          text: row.text,
-          ...(row.replyTo ? { replyTo: short(row.replyTo) } : {}),
-          ...(row.media?.length ? { media: row.media.map((m) => `${m.kind}${m.name ? `: ${m.name}` : ""}`) } : {}),
-          ...(row.task ? { task: `${row.task.event} ${short(row.task.sessionId)}` } : {}),
-        })),
-      });
-    },
-  );
-
-  server.registerTool(
-    "omg_send_thread_message",
-    {
-      title: "Send a Message to an omg.dev Thread",
-      description:
-        "Post a message to a team chat thread as omg: in the thread, or in the replies of one message (replyTo). Everyone in the thread is notified. Attach local pictures, videos or files with mediaPaths. Write like a teammate in a chat: short and plain.",
-      inputSchema: {
-        threadId: z.string().min(1).describe("Thread id, an unambiguous prefix, or an omg:thread_<id> link."),
-        text: z.string().optional().describe("The message, markdown allowed."),
-        replyTo: z.string().optional().describe("Id (or its 8-char prefix from omg_read_thread) of a top-level message, to post in its replies."),
-        mediaPaths: z.array(z.string()).max(10).optional().describe("Absolute paths of pictures, videos or files to attach."),
-      },
-    },
-    async ({ threadId, text, replyTo, mediaPaths }) => {
-      const id = await resolveThread(threadId);
-      const data = await api<{ message: { id: string; replyTo?: string | null } }>(`/api/threads/${id}/messages`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: text ?? "", ...(replyTo ? { replyTo } : {}), ...(mediaPaths?.length ? { mediaPaths } : {}) }),
-      });
-      return result({ ok: true, threadId: id, messageId: short(data.message.id), replyTo: short(data.message.replyTo) });
     },
   );
 
@@ -1256,11 +1187,12 @@ export function buildOmgMcpServer(): McpServer {
   server.registerTool(
     "omg_ship",
     {
-      title: "Post To The omg.dev Shipped Channel",
+      title: "Disabled: omg.dev Shipped Channel",
       description:
-        "Post a verified result in the omg.dev Shipped feed. Publishing is not a lifecycle event: the source session stays live for chat or follow-up. A Shipped post does not itself prove production deployment; when deployment was requested, verify it before you claim it. Never use this for planning, partial, blocked, or still-unverified work. Write it like a launch tweet: a punchy headline + at most 1-2 short sentences on the outcome and why it matters. To update an earlier post, pass its id.",
+        "DISABLED on this box (Sam, 2026-10-06): never call this tool; it posts nothing. Finish work by committing, pushing and reporting in chat. Former behaviour: post a verified result in the omg.dev Shipped feed. Publishing is not a lifecycle event: the source session stays live for chat or follow-up. A Shipped post does not itself prove production deployment; when deployment was requested, verify it before you claim it. Never use this for planning, partial, blocked, or still-unverified work. Write it like a launch tweet: a punchy headline + at most 1-2 short sentences on the outcome and why it matters. To update an earlier post, pass its id.",
       inputSchema: {
         title: z.string().min(1).describe("Short headline for what shipped (e.g. 'WhatsApp reconnect loop fixed')."),
+        commitRefs: z.array(z.string().regex(/^[a-f0-9]{7,40}$/i)).min(1).max(100).optional().describe("All commits backing this result. In shared checkouts, verifies these reached main and checks their files for unfinished edits; unrelated workspace changes do not block."),
         id: z.string().optional().describe("Existing ship post id to update in place (returned when the post was created)."),
         summary: z
           .string()
@@ -1277,7 +1209,13 @@ export function buildOmgMcpServer(): McpServer {
         sessionId: z.string().optional().describe("Source omg.dev session id. Defaults to OMG_SESSION_ID."),
       },
     },
-    async ({ title, id, summary, mediaPaths, artifactIds, project, sessionId }) => {
+    async ({ title, id, summary, mediaPaths, artifactIds, project, sessionId, commitRefs }) => {
+      // Agentbox (Sam, 2026-10-06): the Shipped feed is switched off. Answer without
+      // posting; not an error, so agents do not retry. Anchors above stay intact
+      // for ship_shared_apply.py.
+      if (AGENTBOX_SHIP_DISABLED) {
+        return result({ shipped: false, disabled: true, message: AGENTBOX_SHIP_DISABLED_MESSAGE });
+      }
       const sid = await activeSessionId(sessionId);
       const data = await api<{
         ok: boolean;
@@ -1292,6 +1230,7 @@ export function buildOmgMcpServer(): McpServer {
           mediaPaths,
           artifactIds,
           project,
+          commitRefs,
           sessionId: sid,
         }),
       });
@@ -1880,7 +1819,7 @@ export function buildOmgMcpServer(): McpServer {
     {
       title: "Create Or Update An Auto Agent",
       description:
-        "Create a scheduled auto agent, or update an existing one by passing its id. Saving is an upsert: omit id to create, pass the id from omg_list_auto_agents to edit in place. The agent runs headless on its cron schedule and reports at most one finding per run.",
+        "Create a scheduled auto agent, or update an existing one by passing its id. Saving is an upsert: omit id to create, pass the id from omg_list_auto_agents to edit in place. On an update, omit `prompt` to keep the stored text — the list from omg_list_auto_agents truncates prompts, and saving that preview back would silently cut the real prompt. The agent runs headless on its cron schedule and reports at most one finding per run.",
       inputSchema: {
         id: z
           .string()
@@ -1890,7 +1829,8 @@ export function buildOmgMcpServer(): McpServer {
         prompt: z
           .string()
           .min(1)
-          .describe("The entire agent: what to inspect and what is worth reporting. Runs with read-only tools unless `tools` grants more."),
+          .optional()
+          .describe("The entire agent: what to inspect and what is worth reporting. Runs with read-only tools unless `tools` grants more. Required when creating; omit on an update to keep the stored prompt — never copy one from omg_list_auto_agents, whose list truncates prompts."),
         schedule: z
           .string()
           .min(1)
@@ -1913,12 +1853,42 @@ export function buildOmgMcpServer(): McpServer {
       },
     },
     async (input) => {
+      const { cwd, ...rest } = input;
+      let previewKeptOut: string | undefined;
+      if (input.id) {
+        let storedPrompt: string | undefined;
+        try {
+          const row = await api<{ agent?: { prompt?: string } }>(
+            `/api/auto/agents/${encodeURIComponent(input.id)}`,
+          );
+          storedPrompt = row.agent?.prompt;
+        } catch {
+          // Unknown or unreachable id: the POST below answers with its own 404.
+        }
+        if (storedPrompt) {
+          const resolved = resolveEditPrompt(storedPrompt, rest.prompt);
+          rest.prompt = resolved.prompt;
+          if (resolved.keptStored && input.prompt !== undefined) previewKeptOut = storedPrompt;
+        }
+      } else if (!input.prompt) {
+        throw new Error(
+          "prompt is required when creating a new auto agent (on an update, omit it to keep the stored prompt)",
+        );
+      }
       const data = await api<{ agent: { id?: string } }>("/api/auto/agents", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(input),
+        // Browser cwd is the logical Repo picker. Preserve the MCP contract:
+        // cwd here remains the directory the run executes in.
+        body: JSON.stringify({ ...rest, executionCwd: cwd }),
       });
-      return result({ agent: data.agent, updated: !!input.id });
+      return result({
+        agent: data.agent,
+        updated: !!input.id,
+        ...(previewKeptOut
+          ? { note: "prompt kept as stored: the text you sent was the truncated list preview of it" }
+          : {}),
+      });
     },
   );
 
@@ -2086,6 +2056,10 @@ export function buildOmgMcpServer(): McpServer {
       return result({ finding: data.finding });
     },
   );
+
+  // Sam's own portfolio tools live in their own module so upstream merges of
+  // this file stay clean.
+  registerSamTools(server);
 
   return server;
 }

@@ -1,6 +1,27 @@
 import { mkdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
+import { TranscriptWriteQueue } from "./transcript-write-queue.ts";
+import {
+  adoptTranscriptSession,
+  ensureTranscriptSchemaCurrent,
+  insertTranscriptRows,
+  nextTranscriptOrderSeq,
+  resetTranscriptPathRows,
+  upsertTranscriptArtifactRow,
+  type TranscriptCursorInput,
+  type TranscriptRowInput,
+} from "./transcript-database-core.ts";
+import {
+  isTranscriptDatabaseWorkerRunning,
+  runTranscriptDatabaseOp,
+  stopTranscriptDatabaseWorker,
+  TranscriptWorkerUnavailableError,
+  type TranscriptDatabaseAdoptResult,
+  type TranscriptDatabaseCheckpointResult,
+  type TranscriptDatabaseInsertResult,
+  type TranscriptDatabaseSchemaResult,
+} from "./transcript-database.ts";
 import { PATHS } from "./config.ts";
 import {
   isCursorTurnEndedLine,
@@ -135,52 +156,6 @@ const ARTIFACT_MESSAGE_SELECT = `
   a.refresh_json AS artifact_refresh_json
 `;
 
-function upsertArtifactRow(d: Database, artifact: ImageArtifact): void {
-  d.query(`
-    INSERT INTO artifacts (
-      id, session_id, media, created_at, updated_at, file_path, name, mime_type,
-      size, width, height, caption, alt, title, version, source_path, source_mtime_ms, refresh_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      session_id = excluded.session_id,
-      media = excluded.media,
-      created_at = excluded.created_at,
-      updated_at = excluded.updated_at,
-      file_path = excluded.file_path,
-      name = excluded.name,
-      mime_type = excluded.mime_type,
-      size = excluded.size,
-      width = excluded.width,
-      height = excluded.height,
-      caption = excluded.caption,
-      alt = excluded.alt,
-      title = excluded.title,
-      version = excluded.version,
-      source_path = excluded.source_path,
-      source_mtime_ms = excluded.source_mtime_ms,
-      refresh_json = excluded.refresh_json
-  `).run(
-    artifact.id,
-    artifact.sessionId,
-    artifact.media ?? "image",
-    artifact.createdAt,
-    artifact.updatedAt ?? null,
-    artifact.filePath,
-    artifact.name,
-    artifact.mimeType,
-    artifact.size,
-    artifact.width ?? null,
-    artifact.height ?? null,
-    artifact.caption ?? null,
-    artifact.alt ?? null,
-    artifact.title ?? null,
-    artifact.version ?? null,
-    artifact.sourcePath,
-    artifact.sourceMtimeMs ?? null,
-    artifact.refresh ? JSON.stringify(artifact.refresh) : null,
-  );
-}
-
 function deleteArtifactRow(d: Database, artifactId: string): void {
   d.query("DELETE FROM artifacts WHERE id = ?").run(artifactId);
   d.query("DELETE FROM transcript_messages WHERE message_id = ?").run(`artifact-${artifactId}`);
@@ -204,14 +179,14 @@ export function indexArtifactMessage(path: string, sessionId: string, artifact: 
     .get(messageId);
 
   const inserted = d.transaction(() => {
-    upsertArtifactRow(d, artifact);
+    upsertTranscriptArtifactRow(d, artifact);
     if (existing) {
       // Stable HTML cards re-publish under the same message id. Update the
       // existing ordered row in place so live clients refresh without a second
       // stream inventing a new position.
       if (existing.path !== path || existing.session_id !== sessionId) {
         const offset = nextDirectOffset(d, path);
-        const orderSeq = nextOrderSeq(d, path);
+        const orderSeq = nextTranscriptOrderSeq(d, path);
         d.query(`
           UPDATE transcript_messages
              SET session_id = ?, path = ?, byte_offset = ?, order_seq = ?,
@@ -232,7 +207,7 @@ export function indexArtifactMessage(path: string, sessionId: string, artifact: 
     }
 
     const offset = nextDirectOffset(d, path);
-    const orderSeq = nextOrderSeq(d, path);
+    const orderSeq = nextTranscriptOrderSeq(d, path);
     directNextOffset.set(path, offset + 1);
     const result = d.query(`
       INSERT OR IGNORE INTO transcript_messages
@@ -334,23 +309,38 @@ function startWalCheckpointTimer(): void {
   walCheckpointStarted = true;
   const tick = () => {
     if (walCheckpointRunning) return;
-    walCheckpointRunning = true;
-    try {
-      const row = database()
-        .query<{ busy: number; log: number; checkpointed: number }, []>("PRAGMA wal_checkpoint(TRUNCATE)")
-        .get();
-      if (row && !row.busy && (row.log || row.checkpointed)) {
-        traceLog("transcript_index_wal_checkpoint", {
-          log: row.log,
-          checkpointed: row.checkpointed,
-        });
-      }
-    } catch {
-      // Best-effort WAL maintenance only. Busy databases will be retried on the
-      // next unref'd timer tick.
-    } finally {
-      walCheckpointRunning = false;
+    if (!isTranscriptDatabaseWorkerRunning()) {
+      // Never SPAWN a worker just to checkpoint: database() runs in every
+      // process that touches the index (serve plus each managed harness), so
+      // an eager dispatch would pin a permanent worker thread in every idle
+      // agent. An actively-writing process keeps its worker alive and
+      // checkpoints there; an idle one needs none — wal_autocheckpoint (1000
+      // pages) already bounds WAL growth on whichever connection commits.
+      return;
     }
+    walCheckpointRunning = true;
+    // PASSIVE checkpoints run on the already-running worker: the checkpoint
+    // can wait on the same writer lock harnesses hold for seconds, and running
+    // it here was a periodic multi-second stall of serve's event loop. Never
+    // fall back to a synchronous checkpoint on failure — the next tick retries.
+    runTranscriptDatabaseOp<TranscriptDatabaseCheckpointResult>(
+      { kind: "checkpoint", dbPath: dbPath() },
+      { key: `checkpoint:${dbPath()}` },
+    )
+      .then((row) => {
+        if (row && !row.busy && (row.log || row.checkpointed)) {
+          traceLog("transcript_index_wal_checkpoint", {
+            log: row.log,
+            checkpointed: row.checkpointed,
+          });
+        }
+      })
+      .catch(() => {
+        // Best-effort WAL maintenance only (worker unavailable or contention).
+      })
+      .finally(() => {
+        walCheckpointRunning = false;
+      });
   };
   const loop = () => {
     tick();
@@ -374,10 +364,16 @@ function database(busyTimeoutMs = TRANSCRIPT_BUSY_TIMEOUT_MS): Database {
     initialized = false;
   }
   mkdirSync(dirname(path), { recursive: true });
-  db = new Database(path, { create: true });
+  // Configure before publishing the connection; failed setup must be retried.
+  const candidate = new Database(path, { create: true });
+  try {
+    candidate.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
+    candidate.exec("PRAGMA journal_mode = WAL");
+    candidate.exec("PRAGMA synchronous = NORMAL");
+  } catch (error) { candidate.close(); throw error; }
+  db = candidate;
   dbOpenedPath = path;
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA synchronous = NORMAL");
+  transcriptQueue().start();
   // The index has multiple process writers (serve plus managed harnesses).
   // Resuming a long thread can legitimately hold SQLite's single WAL writer
   // for several seconds, so short writes should wait rather than surface a
@@ -388,8 +384,59 @@ function database(busyTimeoutMs = TRANSCRIPT_BUSY_TIMEOUT_MS): Database {
   return db;
 }
 
+// dbPaths already verified current by the worker this process. Cleared on
+// rebind/reset; a PATHS.data move re-verifies through the worker.
+const asyncSchemaCurrent = new Set<string>();
+
+/**
+ * A deleted sqlite file with a surviving artifacts index must re-seed the
+ * joined artifacts table exactly like the legacy v5 migration did. stat, not
+ * open: deciding this must not take a database lock.
+ */
+function schemaSeedArtifacts() {
+  try {
+    const st = statSync(dbPath());
+    return st.size === 0 ? listAllArtifacts() : [];
+  } catch {
+    return listAllArtifacts();
+  }
+}
+
+/**
+ * Explicit async schema readiness for async ingest/read paths: the worker
+ * checks (and, on a fresh file, creates) the current schema off the event
+ * loop. Pre-v12 legacy databases fall back to the synchronous full migration
+ * once — the same cost today's first access already pays — and a worker that
+ * is disabled or unavailable does the same. This does NOT make reads or the
+ * legacy synchronous exports async.
+ */
+export async function initTranscriptIndexAsync(): Promise<void> {
+  const file = dbPath();
+  if (asyncSchemaCurrent.has(file)) return;
+  try {
+    const result = await runTranscriptDatabaseOp<TranscriptDatabaseSchemaResult>(
+      { kind: "schema-init", dbPath: file, seedArtifacts: schemaSeedArtifacts() },
+      { key: `schema-init:${file}` },
+    );
+    if (result.status === "legacy") {
+      init();
+      return;
+    }
+    asyncSchemaCurrent.add(file);
+  } catch (error) {
+    if (!(error instanceof TranscriptWorkerUnavailableError)) throw error;
+    init();
+  }
+}
+
 /** Test helper: drop the open connection so the next call rebinds to PATHS.data. */
 export function resetTranscriptIndexConnectionForTests(): void {
+  directQueue?.stop();
+  directQueue = undefined;
+  // The worker binds to a dbPath captured per request; drop it with the
+  // connection so a rebinding test starts from a clean worker too.
+  stopTranscriptDatabaseWorker();
+  asyncSchemaCurrent.clear();
   if (db) {
     try {
       db.close();
@@ -412,9 +459,20 @@ function init(busyTimeoutMs = TRANSCRIPT_BUSY_TIMEOUT_MS) {
   // early on a stale `true`, and the caller would then go on to query a
   // freshly-opened, EMPTY database -- "no such table: transcript_messages".
   // Cheap when already bound: database() returns immediately in that case.
+  // Read-only fast path below: a database already at the current schema must
+  // not open a writer transaction on every first access. Only a fresh file
+  // (created without the legacy migration dance) or a pre-v12 legacy database
+  // takes a write lock past this point.
   const d = database(busyTimeoutMs);
   if (initialized) return;
+  const status = ensureTranscriptSchemaCurrent(d, () => listAllArtifacts());
+  if (status !== "legacy") {
+    initialized = true;
+    return;
+  }
+  d.transaction(() => {
   d.exec(`
+    CREATE TABLE IF NOT EXISTS transcript_seed_state (path TEXT PRIMARY KEY, complete INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS transcript_index_cursors (
       path TEXT PRIMARY KEY,
       session_id TEXT NOT NULL,
@@ -508,7 +566,7 @@ function init(busyTimeoutMs = TRANSCRIPT_BUSY_TIMEOUT_MS) {
     // Seed from the durable JSON index so existing sessions JOIN correctly
     // without waiting for the next publish.
     for (const artifact of listAllArtifacts()) {
-      upsertArtifactRow(d, artifact);
+      upsertTranscriptArtifactRow(d, artifact);
     }
   } else {
     d.exec(`
@@ -628,7 +686,7 @@ function init(busyTimeoutMs = TRANSCRIPT_BUSY_TIMEOUT_MS) {
     // Final one-time import from the legacy blob catalog. From v9 onward the
     // catalog is not a transcript input: only an explicit display commit may
     // create a media placement. This keeps Shipped/gallery assets out of chat.
-    for (const artifact of listAllArtifacts()) upsertArtifactRow(d, artifact);
+    for (const artifact of listAllArtifacts()) upsertTranscriptArtifactRow(d, artifact);
     d.transaction(() => {
       // `lfg_ship` optimizes uploaded screenshots to this private temp naming
       // shape. The old manifest bridge incorrectly promoted those gallery-only
@@ -658,7 +716,7 @@ function init(busyTimeoutMs = TRANSCRIPT_BUSY_TIMEOUT_MS) {
   if (version < 11) {
     // Seed dimensions already present in the durable artifact manifest. Older
     // image records remain nullable and render with the legacy placeholder.
-    for (const artifact of listAllArtifacts()) upsertArtifactRow(d, artifact);
+    for (const artifact of listAllArtifacts()) upsertTranscriptArtifactRow(d, artifact);
     d.exec("PRAGMA user_version = 11");
   }
   if (version < 12) {
@@ -683,6 +741,7 @@ function init(busyTimeoutMs = TRANSCRIPT_BUSY_TIMEOUT_MS) {
   d.exec(`CREATE UNIQUE INDEX IF NOT EXISTS transcript_artifact_message_unique
     ON transcript_messages(message_id)
     WHERE message_id LIKE 'artifact-%'`);
+  }).immediate();
   initialized = true;
 }
 
@@ -793,26 +852,6 @@ function rowMessage(row: IndexedMessageRow): SessionMsg | ImageArtifactMessage {
   return base;
 }
 
-function updateCursorInDb(
-  d: Database,
-  path: string,
-  sessionId: string,
-  cursor: { size: number; offset: number; mtimeMs: number },
-): void {
-  d.query(`
-      INSERT INTO transcript_index_cursors (path, session_id, size, offset, mtime_ms, indexed_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(path) DO UPDATE SET
-        session_id = excluded.session_id,
-        size = excluded.size,
-        offset = excluded.offset,
-        mtime_ms = excluded.mtime_ms,
-        indexed_at = excluded.indexed_at
-      WHERE excluded.offset >= transcript_index_cursors.offset
-    `)
-    .run(path, sessionId, cursor.size, cursor.offset, cursor.mtimeMs, Date.now());
-}
-
 export function transcriptCursorFor(path: string): TranscriptIndexCursor | null {
   init();
   if (isSessionIndexKey(path)) return null;
@@ -856,24 +895,37 @@ export function deleteTranscriptIndexForPath(path: string): void {
   init();
   pageTotalCache.delete(path);
   directNextOffset.delete(path);
-  const d = database();
-  d.transaction(() => {
-    d.query("DELETE FROM transcript_messages WHERE path = ?").run(path);
-    d.query("DELETE FROM transcript_index_cursors WHERE path = ?").run(path);
-  }).immediate();
+  resetTranscriptPathRows(database(), path);
 }
 
-export function indexTranscriptMessages(
+/**
+ * Worker-backed variant of deleteTranscriptIndexForPath for async paths.
+ * Destructive: if the worker failed AFTER dispatch (ack lost, outcome
+ * uncertain) the error is surfaced and NO synchronous replay happens — the
+ * caller re-derives authoritative state from the file and cursor instead.
+ */
+export async function deleteTranscriptIndexForPathAsync(path: string): Promise<void> {
+  await initTranscriptIndexAsync();
+  try {
+    await runTranscriptDatabaseOp({ kind: "reset-path", dbPath: dbPath(), path });
+  } catch (error) {
+    if (!(error instanceof TranscriptWorkerUnavailableError)) throw error;
+    if (error.dispatched) throw error;
+    deleteTranscriptIndexForPath(path);
+    return;
+  }
+  pageTotalCache.delete(path);
+  directNextOffset.delete(path);
+}
+
+type ParsedTranscriptRow = { id: string; msg: SessionMsg; text: string; offset: number };
+
+/** Deterministic file-path row ids, shared by the sync and worker ingest paths. */
+function buildFileTranscriptRows(
   path: string,
-  sessionId: string,
   lines: Array<{ offset: number; messages: SessionMsg[] }>,
-  cursor?: { size: number; offset: number; mtimeMs: number },
-): number {
-  init();
-  // Same direct-ownership guard as indexTranscript — callers like the chat
-  // tailer reach this entrypoint directly.
-  if (!isSessionIndexKey(path) && sessionHasIndexedMessages(sessionId)) return 0;
-  const rows: Array<{ id: string; msg: SessionMsg; text: string; offset: number }> = [];
+): ParsedTranscriptRow[] {
+  const rows: ParsedTranscriptRow[] = [];
   for (const line of lines) {
     line.messages
       .filter((message) => !!message.text.trim())
@@ -886,39 +938,107 @@ export function indexTranscriptMessages(
         });
       });
   }
+  return rows;
+}
+
+/** Author resolution happens on the calling thread; the worker only executes SQL. */
+function toTranscriptRowInputs(sessionId: string, rows: ParsedTranscriptRow[]): TranscriptRowInput[] {
+  return rows.map((row) => ({
+    id: row.id,
+    message_id: row.msg.id ?? null,
+    byte_offset: row.offset,
+    ts: row.msg.ts ?? null,
+    role: row.msg.role,
+    kind: row.msg.kind,
+    text: row.text,
+    author_json: JSON.stringify(messageAuthorForSession(sessionId, row.msg)),
+  }));
+}
+
+function insertFileTranscriptRowsSync(
+  path: string,
+  sessionId: string,
+  inputs: TranscriptRowInput[],
+  cursor?: TranscriptCursorInput,
+): number {
+  const d = database();
+  let inserted = 0;
+  d.transaction(() => {
+    inserted = insertTranscriptRows(d, path, sessionId, inputs, cursor);
+  }).immediate();
+  return inserted;
+}
+
+export function indexTranscriptMessages(
+  path: string,
+  sessionId: string,
+  lines: Array<{ offset: number; messages: SessionMsg[] }>,
+  cursor?: { size: number; offset: number; mtimeMs: number },
+): number {
+  init();
+  // Same direct-ownership guard as indexTranscript — callers like the chat
+  // tailer reach this entrypoint directly.
+  if (!isSessionIndexKey(path) && sessionHasIndexedMessages(sessionId)) return 0;
+  const rows = buildFileTranscriptRows(path, lines);
   if (!rows.length && !cursor) return 0;
   const started = performance.now();
-  const d = database();
-  const inserted = d.transaction((pending: typeof rows) => {
-    let orderSeq = nextOrderSeq(d, path);
-    const msgStmt = d.query(`
-      INSERT OR IGNORE INTO transcript_messages
-        (id, session_id, path, message_id, byte_offset, order_seq, ts, role, kind, text)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    const authorStmt = d.query("UPDATE transcript_messages SET author_json = ? WHERE id = ?");
-    let insertedRows = 0;
-    for (const row of pending) {
-      const result = msgStmt.run(
-        row.id,
-        sessionId,
-        path,
-        row.msg.id,
-        row.offset,
-        orderSeq++,
-        row.msg.ts,
-        row.msg.role,
-        row.msg.kind,
-        row.text,
-      );
-      insertedRows += Number(result.changes ?? 0);
-      if (Number(result.changes ?? 0)) {
-        authorStmt.run(JSON.stringify(messageAuthorForSession(sessionId, row.msg)), row.id);
-      }
-    }
-    if (cursor) updateCursorInDb(d, path, sessionId, cursor);
-    return insertedRows;
-  }).immediate(rows);
+  const inserted = insertFileTranscriptRowsSync(path, sessionId, toTranscriptRowInputs(sessionId, rows), cursor);
+  traceLog("transcript_index_live", {
+    sessionId,
+    path,
+    lines: lines.length,
+    indexed: rows.length,
+    inserted,
+    offset: cursor?.offset,
+    size: cursor?.size,
+    durationMs: Math.round((performance.now() - started) * 1000) / 1000,
+  });
+  return inserted;
+}
+
+/**
+ * Worker-backed ingest for async web paths (the live tailer and lazy file
+ * import). Identical rows, ids, ordering and cursor semantics as the
+ * synchronous export above — SQLite lock waits happen on the worker thread,
+ * so a held writer lock delays this promise instead of serve's event loop.
+ *
+ * Durability never depends on the worker: if it is unavailable the write
+ * falls back to the synchronous path exactly as before. Delivery is
+ * at-least-once with deterministic-id dedup (INSERT OR IGNORE + monotonic
+ * cursor), so retries after any failure leave rows exactly-once. A worker-side
+ * SQLITE_BUSY rejection is re-thrown: the cursor has not advanced, so the next
+ * poll re-parses and retries — the file remains the source of truth.
+ */
+export async function indexTranscriptMessagesAsync(
+  path: string,
+  sessionId: string,
+  lines: Array<{ offset: number; messages: SessionMsg[] }>,
+  cursor?: { size: number; offset: number; mtimeMs: number },
+): Promise<number> {
+  // Schema readiness first, via the worker: on first contact this creates the
+  // schema off the event loop, and the synchronous guard below then takes the
+  // read-only fast path instead of a blocking writer transaction.
+  await initTranscriptIndexAsync();
+  if (!isSessionIndexKey(path) && sessionHasIndexedMessages(sessionId)) return 0;
+  const rows = buildFileTranscriptRows(path, lines);
+  if (!rows.length && !cursor) return 0;
+  const started = performance.now();
+  let inserted: number;
+  try {
+    const result = await runTranscriptDatabaseOp<TranscriptDatabaseInsertResult>({
+      kind: "insert-messages",
+      dbPath: dbPath(),
+      path,
+      sessionId,
+      rows: toTranscriptRowInputs(sessionId, rows),
+      cursor,
+    });
+    inserted = result.inserted;
+  } catch (error) {
+    if (!(error instanceof TranscriptWorkerUnavailableError)) throw error;
+    return indexTranscriptMessages(path, sessionId, lines, cursor);
+  }
+  if (inserted) pageTotalCache.delete(path);
   traceLog("transcript_index_live", {
     sessionId,
     path,
@@ -946,21 +1066,33 @@ function nextDirectOffset(d: Database, path: string): number {
   return next;
 }
 
-function nextOrderSeq(d: Database, path: string): number {
-  const max = d
-    .query<{ max_seq: number | null }, [string]>(
-      "SELECT max(order_seq) AS max_seq FROM transcript_messages WHERE path = ?",
-    )
-    .get(path)?.max_seq;
-  return (max ?? -1) + 1;
+let directQueue: TranscriptWriteQueue | undefined;
+function transcriptQueue(): TranscriptWriteQueue {
+  const directory = join(PATHS.data, "transcript-write-queue");
+  if (directQueue?.directory !== directory) { directQueue?.stop(); directQueue = undefined; }
+  return directQueue ??= new TranscriptWriteQueue(directory, (sessionId, messages) => {
+    // Bounded synchronous wait: the disk queue, not the SDK event loop, retries.
+    const d = database(100);
+    d.exec("PRAGMA busy_timeout = 100");
+    try { return indexSessionMessagesDirectRaw(sessionId, messages); }
+    finally { d.exec(`PRAGMA busy_timeout = ${TRANSCRIPT_BUSY_TIMEOUT_MS}`); }
+  });
 }
-
+export function flushTranscriptWrites(): number { return transcriptQueue().drain(); }
 export function indexSessionMessagesDirect(sessionId: string, messages: SessionMsg[]): number {
+  try { return transcriptQueue().enqueue(sessionId, messages); }
+  catch (cause) {
+    const error = new Error("Local storage error: transcript-index.sqlite could not retain or index a message. Check server storage; changing models will not repair this.", {cause});
+    error.name = "TranscriptPersistenceError";
+    throw error;
+  }
+}
+function indexSessionMessagesDirectRaw(sessionId: string, messages: SessionMsg[]): number {
   init();
   const key = sessionIndexKey(sessionId);
   const d = database();
   let seq = nextDirectOffset(d, key);
-  const rows: Array<{ id: string; msg: SessionMsg; text: string; offset: number }> = [];
+  const rows: Array<{ id: string; msg: SessionMsg; text: string; offset: number; author: string }> = [];
   messages
     .filter((message) => !!message.text.trim() && !!message.id)
     .forEach((msg, blockIndex) => {
@@ -969,13 +1101,14 @@ export function indexSessionMessagesDirect(sessionId: string, messages: SessionM
         msg,
         text: clippedText(msg),
         offset: seq++,
+        author: JSON.stringify(messageAuthorForSession(sessionId, msg)),
       });
     });
   directNextOffset.set(key, seq);
   if (!rows.length) return 0;
   const started = performance.now();
   const inserted = d.transaction((pending: typeof rows) => {
-    let orderSeq = nextOrderSeq(d, key);
+    let orderSeq = nextTranscriptOrderSeq(d, key);
     const msgStmt = d.query(`
       INSERT OR IGNORE INTO transcript_messages
         (id, session_id, path, message_id, byte_offset, order_seq, ts, role, kind, text)
@@ -998,7 +1131,7 @@ export function indexSessionMessagesDirect(sessionId: string, messages: SessionM
       );
       insertedRows += Number(result.changes ?? 0);
       if (Number(result.changes ?? 0)) {
-        authorStmt.run(JSON.stringify(messageAuthorForSession(sessionId, row.msg)), row.id);
+        authorStmt.run(row.author, row.id);
       }
     }
     return insertedRows;
@@ -1149,7 +1282,10 @@ export function reindexFileHistoryUnderSessionKey(
   init();
   const key = sessionIndexKey(sessionId);
   const d = database();
-  if (d.query("SELECT 1 FROM transcript_messages WHERE path = ? LIMIT 1").get(key)) return 0;
+  const seed = d.query<{complete:number},[string]>("SELECT complete FROM transcript_seed_state WHERE path=?").get(key);
+  if (seed?.complete) return 0;
+  // Preserve already seeded legacy/live keys; only our incomplete marker may resume.
+  if (!seed && d.query("SELECT 1 FROM transcript_messages WHERE path=? LIMIT 1").get(key)) return 0;
   const src = d
     .query<
       { message_id: string | null; role: string; kind: string; ts: number; text: string; author_json: string },
@@ -1162,8 +1298,9 @@ export function reindexFileHistoryUnderSessionKey(
     )
     .all(sourceSessionId);
   if (!src.length) return 0;
+  d.query("INSERT OR IGNORE INTO transcript_seed_state(path,complete) VALUES (?,0)").run(key);
   let seq = 0;
-  const inserted = d.transaction((rows: typeof src) => {
+  const insertChunk = d.transaction((rows: typeof src) => {
     const msgStmt = d.query(`
       INSERT OR IGNORE INTO transcript_messages
         (id, session_id, path, message_id, byte_offset, order_seq, ts, role, kind, text, author_json)
@@ -1177,8 +1314,11 @@ export function reindexFileHistoryUnderSessionKey(
       seq++;
     }
     return n;
-  }).immediate(src);
-  directNextOffset.set(key, seq);
+  });
+  let inserted = 0;
+  for (let i = 0; i < src.length; i += 250) inserted += insertChunk.immediate(src.slice(i, i + 250));
+  directNextOffset.set(key, Math.max(seq, nextDirectOffset(d, key)));
+  d.query("UPDATE transcript_seed_state SET complete=1 WHERE path=?").run(key);
   pageTotalCache.delete(key);
   return inserted;
 }
@@ -1212,27 +1352,83 @@ async function indexTranscriptOnce(path: string, sessionId: string): Promise<{
 }> {
   if (isSessionIndexKey(path)) return { indexed: 0, offset: 0, size: 0 };
   const started = performance.now();
-  init();
-  const d = database();
   const st = statSync(path);
-  const existingCursor = d
-    .query<{ offset: number; session_id: string }, [string]>(
-      "SELECT offset, session_id FROM transcript_index_cursors WHERE path = ?",
-    )
-    .get(path);
-  let cursor = existingCursor?.offset ?? 0;
-  if (existingCursor && existingCursor.session_id !== sessionId) {
-    d.transaction(() => {
-      d.query("UPDATE transcript_messages SET session_id = ? WHERE path = ?").run(sessionId, path);
-      d.query("UPDATE transcript_index_cursors SET session_id = ? WHERE path = ?").run(sessionId, path);
-    }).immediate();
+  await initTranscriptIndexAsync();
+
+  // Database IO goes through the worker (lock waits off the event loop) with a
+  // synchronous fallback if the worker is unavailable. Both paths execute the
+  // same statements from transcript-database-core.ts, so rows, ids and cursors
+  // are indistinguishable between backends. Insert ops are at-least-once with
+  // deterministic-id dedup, so replaying them after ANY failure keeps rows
+  // exactly-once. Destructive ops (adopt/reset) are only replayed when the
+  // failed request provably never left this thread (`dispatched === false`);
+  // after a lost ack the caller re-derives authoritative state from the
+  // transcript file and cursor on its next pass instead.
+  let useWorker = true;
+  const fallbackSync = (error: unknown): boolean => {
+    if (!(error instanceof TranscriptWorkerUnavailableError)) throw error;
+    if (error.dispatched) throw error;
+    useWorker = false;
+    return true;
+  };
+  const insertRows = async (inputs: TranscriptRowInput[], cursorInput: TranscriptCursorInput): Promise<number> => {
+    if (useWorker) {
+      try {
+        const result = await runTranscriptDatabaseOp<TranscriptDatabaseInsertResult>({
+          kind: "insert-messages",
+          dbPath: dbPath(),
+          path,
+          sessionId,
+          rows: inputs,
+          cursor: cursorInput,
+        });
+        if (result.inserted) pageTotalCache.delete(path);
+        return result.inserted;
+      } catch (error) {
+        if (!(error instanceof TranscriptWorkerUnavailableError)) throw error;
+        useWorker = false;
+        // Insert replay is safe even after a lost ack: deterministic ids and a
+        // monotonic cursor dedup whatever the dead worker may have committed.
+      }
+    }
+    const inserted = insertFileTranscriptRowsSync(path, sessionId, inputs, cursorInput);
+    if (inserted) pageTotalCache.delete(path);
+    return inserted;
+  };
+
+  let cursor = 0;
+  if (useWorker) {
+    try {
+      const adopted = await runTranscriptDatabaseOp<TranscriptDatabaseAdoptResult>({
+        kind: "adopt-session",
+        dbPath: dbPath(),
+        path,
+        sessionId,
+      });
+      cursor = adopted.cursor?.offset ?? 0;
+    } catch (error) {
+      fallbackSync(error);
+    }
+  }
+  if (!useWorker) {
+    init();
+    const adopted = adoptTranscriptSession(database(), path, sessionId);
+    cursor = adopted.cursor?.offset ?? 0;
   }
 
   if (st.size < cursor) {
-    d.transaction(() => {
-      d.query("DELETE FROM transcript_messages WHERE path = ?").run(path);
-      d.query("DELETE FROM transcript_index_cursors WHERE path = ?").run(path);
-    }).immediate();
+    if (useWorker) {
+      try {
+        await runTranscriptDatabaseOp({ kind: "reset-path", dbPath: dbPath(), path });
+      } catch (error) {
+        fallbackSync(error);
+      }
+    }
+    if (!useWorker) {
+      init();
+      resetTranscriptPathRows(database(), path);
+    }
+    pageTotalCache.delete(path);
     cursor = 0;
   }
 
@@ -1240,34 +1436,6 @@ async function indexTranscriptOnce(path: string, sessionId: string): Promise<{
   const decoder = new TextDecoder();
   let indexed = 0;
   let committed = cursor;
-
-  const insert = d.transaction((rows: Array<{ id: string; msg: SessionMsg; text: string; offset: number }>) => {
-    let orderSeq = nextOrderSeq(d, path);
-    const msgStmt = d.query(`
-      INSERT OR IGNORE INTO transcript_messages
-        (id, session_id, path, message_id, byte_offset, order_seq, ts, role, kind, text)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    const authorStmt = d.query("UPDATE transcript_messages SET author_json = ? WHERE id = ?");
-    for (const row of rows) {
-      const result = msgStmt.run(
-        row.id,
-        sessionId,
-        path,
-        row.msg.id,
-        row.offset,
-        orderSeq++,
-        row.msg.ts,
-        row.msg.role,
-        row.msg.kind,
-        row.text,
-      );
-      if (Number(result.changes ?? 0)) {
-        authorStmt.run(JSON.stringify(messageAuthorForSession(sessionId, row.msg)), row.id);
-      }
-    }
-    updateCursorInDb(d, path, sessionId, { size: st.size, offset: committed, mtimeMs: st.mtimeMs });
-  });
 
   while (committed < st.size) {
     let end = Math.min(st.size, committed + INDEX_CHUNK_BYTES);
@@ -1284,7 +1452,7 @@ async function indexTranscriptOnce(path: string, sessionId: string): Promise<{
     if (scanEnd < 0) break;
     scanEnd += 1;
 
-    const rows: Array<{ id: string; msg: SessionMsg; text: string; offset: number }> = [];
+    const rows: ParsedTranscriptRow[] = [];
     // Start of a trailing run of volatile cursor `turn_ended` markers within this
     // chunk. A real (message-bearing) line resets it — only a file-trailing run holds.
     let holdStart = scanEnd;
@@ -1299,14 +1467,7 @@ async function indexTranscriptOnce(path: string, sessionId: string): Promise<{
           if (holdStart === scanEnd) holdStart = lineStart;
         } else {
           holdStart = scanEnd;
-          messages.forEach((msg, index) => {
-            rows.push({
-              id: `${path}\0${lineOffset}\0${index}`,
-              msg,
-              text: clippedText(msg),
-              offset: lineOffset,
-            });
-          });
+          rows.push(...buildFileTranscriptRows(path, [{ offset: lineOffset, messages }]));
         }
       }
       lineStart = lineEnd + 1;
@@ -1319,11 +1480,17 @@ async function indexTranscriptOnce(path: string, sessionId: string): Promise<{
     const advance = atEof && holdStart < scanEnd ? holdStart : scanEnd;
     committed += advance;
     indexed += rows.length;
-    insert.immediate(rows);
+    await insertRows(toTranscriptRowInputs(sessionId, rows), {
+      size: st.size,
+      offset: committed,
+      mtimeMs: st.mtimeMs,
+    });
     if (advance < scanEnd || scanEnd === 0) break;
   }
 
-  if (committed === st.size) insert.immediate([]);
+  if (committed === st.size) {
+    await insertRows([], { size: st.size, offset: committed, mtimeMs: st.mtimeMs });
+  }
   traceLog("transcript_index", {
     sessionId,
     path,
@@ -1341,6 +1508,10 @@ export async function indexTranscript(path: string, sessionId: string): Promise<
   size: number;
 }> {
   if (isSessionIndexKey(path)) return { indexed: 0, offset: 0, size: 0 };
+  // Worker-side schema readiness BEFORE the direct-ownership guard: the guard
+  // opens the main connection, and without this a first contact would create
+  // the schema synchronously (a writer transaction) on the event loop.
+  await initTranscriptIndexAsync();
   // A direct-indexed session owns its transcript: its harness streams rows in
   // under the lfg:// key. File-ingesting a native transcript (e.g. the codex
   // rollout JSONL that shares the session id via thread mapping) would insert

@@ -1,3 +1,8 @@
+// Agentbox isolation v1 (issue 1003)
+import { isolatedAutoBackend } from "../omg-isolation-runtime.ts";
+function generate(prompt: string, cwd: string | undefined, onLog: (s: string) => void): Promise<string> {
+  return isolatedAutoBackend({ cwd }, prompt, cwd ?? process.cwd(), onLog, "enhance");
+}
 // Prompt enhancer for the "new auto agent" form. The user types a rough idea of
 // what they want watched; this rewrites it into a crisp, well-structured watch
 // agent instruction that matches what the runner expects (gather your own
@@ -17,7 +22,7 @@ const INSPECT_TOOLS = ["Read", "Grep", "Glob"];
 // we grant read-only tools and scope the process cwd to it (serialized via the
 // shared lock) so the model can actually look at the codebase; otherwise it's a
 // pure tool-less rewrite.
-async function generate(
+export async function generateUncontained(
   prompt: string,
   cwd: string | undefined,
   onLog: (s: string) => void,
@@ -179,6 +184,14 @@ export async function refineAutoPrompt(
   const out = await generate(buildRefinePrompt({ ...input, feedback, cwd }), cwd, onLog);
   const cleaned = stripFence(out).trim();
   if (!cleaned) throw new Error("refiner produced no output");
+  // A rewrite is the WHOLE instruction, so it cannot legitimately shrink to a
+  // fragment. When the feedback reads like a chat message ("just answer ok")
+  // the model answers it instead of editing, and saving that reply would wipe
+  // the agent (measured 16-09-2026: a 6018-char instruction became "ok").
+  const floor = Math.min(200, Math.floor(input.prompt.trim().length / 2));
+  if (cleaned.length < floor) {
+    throw new Error(`refiner returned a fragment (${cleaned.length} chars), instruction left unchanged`);
+  }
   return cleaned;
 }
 

@@ -117,11 +117,14 @@ describe("auto agents over MCP", () => {
     expect(out.isError).toBe(false);
     expect(calls[0]?.url).toBe("http://127.0.0.1:9876/api/auto/agents");
     expect(calls[0]?.method).toBe("POST");
+    // omg-fork project/cwd split: an MCP caller that names a directory means
+    // the runner cwd, so the tool posts it as executionCwd and leaves the
+    // logical Repo assignment to the UI.
     expect(calls[0]?.body).toMatchObject({
       name: "Backup restore",
       prompt: "Verify last night's backup actually restored.",
       schedule: "0 7 * * *",
-      cwd: "/home/dev/repos/omg",
+      executionCwd: "/home/dev/repos/omg",
     });
     // No id supplied → a create, and the reply says so rather than leaving the
     // agent to guess whether it just overwrote something.

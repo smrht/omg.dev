@@ -11,8 +11,10 @@ describe("normal Fast mode", () => {
   test("supports eligible Codex models only", () => {
     expect(composerSupportsFastMode({ agent: "codex-aisdk", model: "gpt-5.6-luna" })).toBe(true);
     expect(composerSupportsFastMode({ agent: "codex-aisdk", model: "gpt-5.3-codex-spark" })).toBe(false);
-    expect(composerSupportsFastMode({ agent: "aisdk", model: "opus" })).toBe(false);
-    expect(composerSupportsFastMode({ agent: "claude", model: "opus" })).toBe(false);
+    // Agentbox keeps the Claude fast pill it had on 0.6.150 (upstream 0.6.176
+    // hid it); the Claude choice is deliberate, so it stays available.
+    expect(composerSupportsFastMode({ agent: "aisdk", model: "opus" })).toBe(true);
+    expect(composerSupportsFastMode({ agent: "claude", model: "opus" })).toBe(true);
     expect(composerSupportsFastMode({ agent: "opencode", model: "glm" })).toBe(false);
   });
 

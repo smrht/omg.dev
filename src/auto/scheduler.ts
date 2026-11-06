@@ -12,6 +12,7 @@ import { listAutoAgents, setLastRun, type AutoAgent } from "./store.ts";
 import { runAutoAgent } from "./runner.ts";
 import { reconcileFixLandings } from "./fix-landing.ts";
 import { getGlobalSettingsSync } from "../settings.ts";
+import { ResourceCapacityDeferred, sharedWorkerCapacityReason } from "../omg-isolation-runtime.ts";
 
 // Bot-owned routines are delivered as a chat nudge, not run headless — and
 // that delivery lives in serve.ts (bot session machinery), which this module
@@ -143,12 +144,16 @@ export async function autoSchedulerTickNow(
       const due = mostRecentDue(a.schedule, now, tz);
       if (due === null) continue;
       if (a.lastRunAt && a.lastRunAt >= due) continue; // already ran for this instant
-      // Stamp first so a crash mid-run doesn't loop-retry the same instant.
-      // This must also cover the bot-delivery branch below (missing bot,
-      // disabled bot, cold-start gate refusal) or an orphaned routine retries
-      // every tick for the ~25h catch-up lookback window.
-      await setLastRun(a.id, now.getTime()).catch(() => {});
+      const capacityReason = sharedWorkerCapacityReason();
+      if (capacityReason) {
+        onLog(`[auto-sched] ${a.id} pending: ${capacityReason}`);
+        continue; // no dispatch and no lastRunAt: retry the same due instant
+      }
+      // Bot delivery is fire-and-forget and therefore stamps before dispatch.
+      // Headless runs stamp only after completion: if serve is stopped mid-run,
+      // the unchanged lastRunAt lets the startup catch-up retry that due instant.
       if (a.owner.kind === "bot") {
+        await setLastRun(a.id, now.getTime()).catch(() => {});
         // Fire-and-forget, deliberately NOT awaited in this sequential loop.
         // ensureBotSession may cold-start a session (multi-second, through
         // activationGate), and serializing that behind it would delay every
@@ -162,11 +167,17 @@ export async function autoSchedulerTickNow(
         continue;
       }
       onLog(`[auto-sched] firing ${a.id} (due ${new Date(due).toISOString()})`);
+      let capacityDeferred = false;
       try {
         const filed = await runAutoAgent(a, onLog); // sequential — chdir is process-global
         if (filed.length > 1) onLog(`[auto-sched] ${a.id} filed ${filed.length} findings`);
       } catch (e) {
+        capacityDeferred = e instanceof ResourceCapacityDeferred;
         onLog(`[auto-sched] ${a.id} failed: ${e}`);
+      } finally {
+        // Normal success and handled failures count as one completed attempt.
+        // A process stop never reaches this block, so startup catch-up retries.
+        if (!capacityDeferred) await setLastRun(a.id, Date.now()).catch(() => {});
       }
     }
     return true;

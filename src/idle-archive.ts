@@ -20,6 +20,7 @@
 // The selection is a pure function so the policy can be tested without
 // spawning or killing anything.
 import { usesCommandFileRuntime, type CodingAgentTransport } from "./coding-agent-adapters.ts";
+import { isScheduleSpawned } from "./agent-admission.ts";
 
 export type MemoryReclaimCandidate = {
   sessionId: string | null;
@@ -31,6 +32,9 @@ export type MemoryReclaimCandidate = {
   runtime?: CodingAgentTransport | null;
   lastActivityAt?: number | null;
   startedAt?: number | null;
+  // Issue 521: cap-reclaim needs the session's origin to keep the
+  // schedule pool out of an interactive trade.
+  spawnedBy?: string | null;
 };
 
 /**
@@ -69,4 +73,22 @@ export function memoryReclaimCandidates<T extends MemoryReclaimCandidate>(
       (a, b) =>
         (a.lastActivityAt ?? a.startedAt ?? 0) - (b.lastActivityAt ?? b.startedAt ?? 0),
     );
+}
+
+/**
+ * The ONE session a self-hosted interactive launch at its live cap may
+ * trade for a slot (issue 521): the oldest safe idle durable ordinary
+ * session. Safety is exactly memoryReclaimCandidates (never busy,
+ * launching, persistent, unmanaged or non-resumable work); the single
+ * addition is origin: schedule-spawned residents belong to the separate
+ * schedule pool and must stay traceable, not become fuel for an
+ * interactive launch. Returns null when nothing qualifies.
+ */
+export function capReclaimCandidate<T extends MemoryReclaimCandidate>(
+  sessions: readonly T[],
+): T | null {
+  const candidates = memoryReclaimCandidates(sessions).filter(
+    (session) => !isScheduleSpawned(session.spawnedBy),
+  );
+  return candidates.length ? candidates[0]! : null;
 }

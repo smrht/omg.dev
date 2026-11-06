@@ -34,7 +34,23 @@ export function agentIconSrc(agent?: string): string {
   if (agent === "jcode") return omgAssetUrl(`/agent-jcode.svg${v}`);
   if (agent === "pi") return omgAssetUrl(`/agent-pi.svg${v}`);
   if (agent === "copilot") return omgAssetUrl(`/agent-copilot.svg${v}`);
+  if (agent === "zcode") return omgAssetUrl(`/agent-zcode.svg${v}`);
   return omgAssetUrl(`/agent-claude.svg${v}`);
+}
+
+/**
+ * Muse Spark runs on the Codex harness (agent "codex", model "muse-spark-*").
+ * The harness mark alone would show OpenAI while Meta is answering; resolve
+ * the icon from the model so the roster and header say what is really running.
+ */
+export function sessionIconAgent(agent?: string, model?: string | null): string | undefined {
+  if ((agent === "codex" || agent === "codex-aisdk") && /^muse/i.test(model ?? "")) return "muse";
+  return agent;
+}
+
+export function sessionIconAlt(agent?: string, model?: string | null): string {
+  if (sessionIconAgent(agent, model) === "muse" && agent !== "muse") return "Codex · Muse Spark";
+  return agentIconAlt(agent);
 }
 
 export function agentIconAlt(agent?: string): string {
@@ -51,6 +67,7 @@ export function agentIconAlt(agent?: string): string {
   if (agent === "jcode") return "Jcode";
   if (agent === "pi") return "pi";
   if (agent === "copilot") return "Copilot";
+  if (agent === "zcode") return "ZCode";
   return "Claude";
 }
 
@@ -239,7 +256,7 @@ export function SessionAgentIcon({
   wrapperClassName,
   showAccountNumber = true,
 }: {
-  session: Pick<Session, "agent" | "agentLabel" | "claudeAccountId">;
+  session: Pick<Session, "agent" | "agentLabel" | "claudeAccountId" | "model">;
   className?: string;
   size?: "sm" | "md";
   wrapperClassName?: string;
@@ -248,10 +265,10 @@ export function SessionAgentIcon({
 }) {
   const accountNumber = useClaudeAccountNumber(session.agent, session.claudeAccountId);
   const number = showAccountNumber ? accountNumber : null;
-  const label = session.agentLabel || agentIconAlt(session.agent);
+  const label = session.agentLabel || sessionIconAlt(session.agent, session.model);
   const img = (
     <img
-      src={agentIconSrc(session.agent)}
+      src={agentIconSrc(sessionIconAgent(session.agent, session.model))}
       alt={number == null ? label : `${label} ${number}`}
       title={session.agentLabel || undefined}
       className={className}

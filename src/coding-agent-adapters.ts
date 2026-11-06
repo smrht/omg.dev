@@ -15,7 +15,8 @@ export type CodingAgentProduct =
   | "deepseek"
   | "devin"
   | "pi"
-  | "copilot";
+  | "copilot"
+  | "zcode";
 
 export type CodingAgentDriver = "sdk" | "rpc" | "cli-tui";
 
@@ -126,6 +127,13 @@ export const CODING_AGENT_ADAPTERS = {
     recovery: "durable",
     capabilities: { interrupt: "immediate", questions: false, modelChange: "live", thinkingChange: "live", scheduled: false, toolAccess: "mcp" },
   },
+  zcode: {
+    // One headless `zcode --prompt` process per turn, continued with
+    // `--resume <sess_...>`; sessions persist in ~/.zcode, so recovery is durable.
+    product: "zcode", driver: "sdk", transport: "command-file", managedLaunch: true,
+    recovery: "durable",
+    capabilities: { interrupt: "immediate", questions: false, modelChange: "live", thinkingChange: "live", scheduled: false, toolAccess: "mcp" },
+  },
   pi: {
     product: "pi", driver: "rpc", transport: "command-file", managedLaunch: true,
     recovery: "durable",
@@ -153,6 +161,7 @@ export const ACTIVE_SESSION_AGENT_KINDS = [
   "devin",
   "pi",
   "copilot",
+  "zcode",
 ] as const satisfies readonly CodingAgentKind[];
 
 export type ActiveSessionAgentKind = (typeof ACTIVE_SESSION_AGENT_KINDS)[number];
@@ -253,6 +262,7 @@ export const SESSION_AGENT_KINDS = [
   "devin",
   "pi",
   "copilot",
+  "zcode",
 ] as const satisfies readonly CodingAgentKind[];
 
 export const TMUX_AGENT_KINDS = [
@@ -274,6 +284,7 @@ export const COMMAND_FILE_AGENT_KINDS = [
   "devin",
   "copilot",
   "jcode",
+  "zcode",
 ] as const satisfies readonly CodingAgentKind[];
 
 export const DURABLE_RECOVERY_AGENT_KINDS = SESSION_AGENT_KINDS.filter(

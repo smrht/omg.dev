@@ -63,23 +63,52 @@ describe("codex rollout head cache", () => {
     expect(Array.isArray(sessions)).toBe(true);
   });
 
-  test("the cache file is written atomically, never in place", async () => {
-    // A half-written cache read by the next boot would be worse than no cache,
-    // and this file is written while the server is serving.
-    const source = await Bun.file("src/sessions.ts").text();
-    const flush = source.slice(source.indexOf("function scheduleCodexHeadFlush"));
+  test("v3 writes are batched, appended atomically and compacted via rename", async () => {
+    // The file is written while the server is serving: every batch is a
+    // single append of complete lines under the flock, debounce batches a
+    // cold start's worth of parses, and compaction publishes via tmp+rename
+    // so a reader never sees a half-written state.
+    const source = await Bun.file("src/codex-head-cache.ts").text();
+    expect(source).toContain("void this.flushNow();");
+    expect(source.match(/await appendFile\(/g)?.length).toBe(1); // one append site, one batch
+    expect(source).toContain("FLUSH_DELAY_MS");
+    expect(source).toContain("await rename(tmp, v3)");
+    // sessions.ts still owns only the wiring: the debounce lives in the store.
+    const sessions = await Bun.file("src/sessions.ts").text();
+    const flush = sessions.slice(sessions.indexOf("function scheduleCodexHeadFlush"));
     const body = flush.slice(0, flush.indexOf("\n}\n"));
-    expect(body).toContain(".tmp");
-    expect(body).toContain("renameSync");
-    // And it must not be written on every parse — that is the whole point of
-    // batching a cold start's worth of work.
-    expect(body).toContain("setTimeout");
+    expect(body).toContain("codexHeads.scheduleFlush()");
   });
 
-  test("a failed write leaves the entries marked dirty for the next attempt", async () => {
-    const source = await Bun.file("src/sessions.ts").text();
-    const flush = source.slice(source.indexOf("function scheduleCodexHeadFlush"));
-    const body = flush.slice(0, flush.indexOf("\n}\n"));
-    expect(body).toContain("codexHeadCacheDirty = pending");
+  test("a failed write leaves the records dirty for the next attempt", async () => {
+    useTempData();
+    const { CodexHeadStore } = (await import(`./codex-head-cache.ts?cache-${Math.random()}`)) as typeof import("./codex-head-cache.ts");
+    const store = new CodexHeadStore({
+      v3Path: () => join(PATHS.data, "codex-heads-v3.jsonl"),
+      v2Path: () => join(PATHS.data, "codex-heads.json"),
+    });
+    await store.ready();
+    store.set("/p", {
+      id: "p",
+      cwd: null,
+      createdAt: null,
+      originator: null,
+      sourceKind: null,
+      prompt: {
+        promptHash: null,
+        titlePreview: "",
+        titleLen: 0,
+        titleHash: null,
+        displayPreview: "",
+        displayTruncated: false,
+      },
+    });
+    // Obstruct the lock: writes must fail closed, records stay pending.
+    mkdirSync(join(PATHS.data, "codex-heads-v3.jsonl.lock"));
+    expect(await store.flushNow()).toBe(false);
+    expect(store.stats().dirty).toBe(1);
+    rmSync(join(PATHS.data, "codex-heads-v3.jsonl.lock"), { recursive: true, force: true });
+    expect(await store.flushNow()).toBe(true);
+    expect(store.stats().dirty).toBe(0);
   });
 });

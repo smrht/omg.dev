@@ -53,6 +53,43 @@ import {
   type ClaudeContextUsageSnapshot,
 } from "../../session-token-usage.ts";
 import { extractAttachments, isImageMime, readAsBase64 } from "../../attachment-images.ts";
+import { contextPreambleText, toWireContextDetailed, validatedCentralContext } from "../../mac-chat/context.ts";
+import { macClaudeSpawnFactory } from "../../mac-chat/claude-transport.ts";
+import { macBridgeMcpServers } from "../../mac-chat/mcp.ts";
+import { macSshSpawn } from "../../mac-chat/stream.ts";
+import { recordMacStartRequest, updateMacStart } from "../../mac-chat/pending.ts";
+
+/**
+ * Inert executable selector for the MAC route.
+ *
+ * `query()` resolves its native CLI binary BEFORE it ever calls
+ * `spawnClaudeCodeProcess`: without this option the SDK looks up its
+ * platform-specific optional dependency, and a host without the matching one
+ * (the linux-x64 attest run) dies with "Native CLI binary for linux-x64 not
+ * found" before a single ssh byte — even though the remote route needs no
+ * local CLI at all. Verified against @anthropic-ai/claude-agent-sdk 0.3.206:
+ * an explicit `pathToClaudeCodeExecutable` skips that resolution entirely;
+ * with `spawnClaudeCodeProcess` set the SDK hands {command, args, cwd, env,
+ * signal} to the callback and never spawns or validates the path locally.
+ *
+ * The VALUE must not end in .js/.mjs/.ts/.tsx/.jsx — the SDK then treats it
+ * as a script and puts it ON ARGV, where the Mac transport's allowlist
+ * refuses non-flag tokens. A URI-shaped sentinel can never resolve or
+ * execute as a local file; the Mac supervisor pins the real CLI.
+ * attest.ts (Mac attestation turns) shares this exact value.
+ */
+export const MAC_CLAUDE_REMOTE_EXECUTABLE = "mac-stream://claude";
+
+function parseExecutionHost(argv: string[]): "agentbox" | "mac" {
+  // tmux sends `--execution-host <host>` as TWO argv tokens; matching the
+  // single joined token silently launched LOCALLY on a requested Mac session
+  // (WIRE-RECONCILIATION defect 11). Strict two-token parse, strict values.
+  const value = arg(argv, "--execution-host");
+  if (value === undefined) return "agentbox";
+  if (value === "mac" || value === "agentbox") return value;
+  console.error(`aisdk-session: unknown --execution-host "${value}"`);
+  process.exit(1);
+}
 
 function arg(argv: string[], name: string): string | undefined {
   const i = argv.indexOf(name);
@@ -383,6 +420,11 @@ export async function cmdAisdkSession(argv: string[]): Promise<void> {
   const tmuxName = arg(argv, "--managed-name") ?? arg(argv, "--tmux") ?? "";
   const recoveredAt = Number(arg(argv, "--recovered-at")) || null;
   const claudeAccountId = arg(argv, "--claude-account");
+  // Mac execution host (integration revision 2): this harness stays local,
+  // but the native claude subprocess streams to the MacBook M1 over ssh
+  // (src/mac-chat/**). Auth is the Mac's OWN login — a local claude account
+  // binding would be an account copy and is refused before the spawn.
+  const executionHost = parseExecutionHost(argv);
   // Everything after `--` is the initial prompt (mirrors how spawnManagedSession
   // passes the first message to the claude CLI).
   const dashI = argv.indexOf("--");
@@ -393,6 +435,10 @@ export async function cmdAisdkSession(argv: string[]): Promise<void> {
     process.exit(1);
   }
   const sessionId: string = sessionIdArg;
+  if (executionHost === "mac" && claudeAccountId) {
+    console.error("aisdk-session: claude-accountbinding is lokaal; een mac-sessie draait op de eigen Mac-login (geen accountkopie)");
+    process.exit(1);
+  }
 
   try {
     process.chdir(cwd);
@@ -400,14 +446,105 @@ export async function cmdAisdkSession(argv: string[]): Promise<void> {
 
   const claudePath = resolveClaudePath();
   console.error(`aisdk-session ${sessionId}: claude binary ${describeClaudeBinary(claudePath)}`);
-  const account = resolveClaudeAccount(claudeAccountId);
+  const account = executionHost === "mac" ? null : resolveClaudeAccount(claudeAccountId);
   const accountConfigDir = account ? claudeAccountConfigDir(account.id) : null;
-  const accountEnv = claudeAccountEnv(
-    process.env,
-    !!account,
-    accountConfigDir ?? undefined,
-  );
+  const accountEnv = executionHost === "mac"
+    ? null
+    : claudeAccountEnv(
+        process.env,
+        !!account,
+        accountConfigDir ?? undefined,
+      );
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
+
+  // Mac transport configuration (env from the launcher; never argv secrets).
+  const macTarget = executionHost === "mac" ? (process.env.LFG_MAC_SSH_TARGET ?? "").trim() : "";
+  const macBridgeUrl = executionHost === "mac" ? (process.env.LFG_MAC_BRIDGE_URL ?? "").replace(/\/+$/, "") : "";
+  const macBridgeToken = executionHost === "mac" ? (process.env.LFG_MAC_BRIDGE_TOKEN ?? "") : "";
+  const macNamespaces = executionHost === "mac"
+    ? (process.env.LFG_MAC_NAMESPACES ?? "").split(",").map((s) => s.trim()).filter(Boolean)
+    : [];
+  const macFirstRequestId = executionHost === "mac" ? (process.env.LFG_MAC_REQUEST_ID ?? "").trim() : "";
+  if (executionHost === "mac" && (!macTarget || !macBridgeUrl || !macBridgeToken || macNamespaces.length === 0)) {
+    console.error("aisdk-session: mac-transport mist LFG_MAC_SSH_TARGET/LFG_MAC_BRIDGE_URL/LFG_MAC_BRIDGE_TOKEN/LFG_MAC_NAMESPACES; refusing to start");
+    process.exit(1);
+  }
+  // Bridge MCP entries per namespace (frozen wire shape: url + bearer). The
+  // URL must NAME the session lease (?session=mac-<sessionId>) or the bridge
+  // answers 401 session_required — bearer alone is not a session. The one
+  // shared builder (mac-chat/mcp.ts) derives it from this harness's central
+  // sessionId, which is the id the launcher minted the lease for.
+  const macMcpServers = (): Record<string, { type: "http"; url: string; bearerToken: string; headerName: string }> =>
+    macBridgeMcpServers({
+      bridgeUrl: macBridgeUrl,
+      bridgeToken: macBridgeToken,
+      sessionId,
+      namespaces: macNamespaces,
+    });
+  let macRequestUsed = false;
+  const macNextRequestId = (): string => {
+    const id = macFirstRequestId && !macRequestUsed ? macFirstRequestId : crypto.randomUUID();
+    macRequestUsed = true;
+    // EVERY stream id is journaled before it touches the network, so an
+    // unknown outcome always reconciles by the id that is live on the Mac.
+    recordMacStartRequest(sessionId, id);
+    return id;
+  };
+  const macSpawnDeps = { spawn: macSshSpawn };
+  let macRemoteInitReported = false;
+  const macReportInit = (state: "ready" | "failed" | "unknown", detail: { requestId?: string | null; pid?: number; cwd?: string; reason?: string }): void => {
+    patchEntry(sessionId, {
+      executionHost: "mac",
+      remoteInit: {
+        state,
+        ...(detail.requestId !== undefined ? { requestId: detail.requestId ?? null } : {}),
+        ...(detail.pid !== undefined ? { remotePid: detail.pid } : {}),
+        ...(detail.cwd !== undefined ? { scratch: detail.cwd } : {}),
+        ...(detail.reason !== undefined ? { reason: detail.reason } : {}),
+        updatedAt: Date.now(),
+      },
+    });
+    if (!macRemoteInitReported && (state === "ready" || state === "failed")) {
+      macRemoteInitReported = true;
+      updateMacStart(sessionId, {
+        state,
+        ...(detail.pid !== undefined ? { remotePid: detail.pid } : {}),
+        ...(detail.reason ? { reason: detail.reason } : {}),
+      });
+    }
+  };
+  /**
+   * Per-turn central context: re-read at every send; rides the turn text.
+   * Item 35: REQUIRED instruction failures THROW here (unreadable/over-size
+   * central sources) — the send path catches that and refuses the turn
+   * BEFORE any provider input. Optional skill/memory omissions stay
+   * non-fatal inside the preamble.
+   */
+  const macPreamble = (): string => {
+    const validated = validatedCentralContext("claude", cwd);
+    if (!validated.ok) throw new Error(validated.error);
+    return contextPreambleText(validated.context, "claude");
+  };
+  /**
+   * Full central context for the stream metadata, re-read per launch.
+   * Item 35: an incomplete REQUIRED context refuses the stream launch by
+   * throwing BEFORE any ssh spawn (no provider contact, fail closed).
+   * Skill/memory wire-transport omissions remain logged, non-fatal.
+   */
+  const macWireContext = () => {
+    const validated = validatedCentralContext("claude", cwd);
+    if (!validated.ok) {
+      console.error(`aisdk-session ${sessionId}: stream-launch GEWEIGERD — ${validated.error}`);
+      throw new Error(validated.error);
+    }
+    const { wire, omitted } = toWireContextDetailed(validated.context);
+    for (const omission of omitted) {
+      console.error(`aisdk-session ${sessionId}: contextbron niet wire-transportabel: ${omission.path} (${omission.reason})`);
+    }
+    return wire;
+  };
+  /** Settings extracted off the native argv (--settings) → re-applied natively. */
+  let macPendingFlagSettings: Record<string, unknown> | null = null;
 
   // Control-plane registry entry — the moment this exists (and our pid is alive),
   // serve will surface the session in the live view.
@@ -428,6 +565,20 @@ export async function cmdAisdkSession(argv: string[]): Promise<void> {
     busy: false,
     title: sessionTitleFromPrompt(initialPrompt),
     createdAt: Date.now(),
+    // Mac-hosted: durable local registration with a PENDING remote init —
+    // the remote provider start is visible (remoteInit flips on handshake).
+    ...(executionHost === "mac"
+      ? {
+          executionHost: "mac" as const,
+          remoteInit: {
+            state: "pending" as const,
+            requestId: macFirstRequestId || null,
+            remotePid: null,
+            scratch: null,
+            updatedAt: Date.now(),
+          },
+        }
+      : {}),
   });
 
   // Direct-indexed rows for this id mean we're a relaunched harness continuing
@@ -535,31 +686,71 @@ export async function cmdAisdkSession(argv: string[]): Promise<void> {
       cwd,
       ...(resumeRuntime ? { resume: sessionId } : { sessionId }),
       // Full capability + no permission prompts, mirroring the tmux claude's
-      // --dangerously-skip-permissions. settingSources honors ~/.claude config
-      // (and loads filesystem skills).
+      // --dangerously-skip-permissions.
       permissionMode: "bypassPermissions",
       // This headless/paneless harness can't render or answer an interactive
       // question, and bypassPermissions does NOT auto-resolve AskUserQuestion —
       // the CLI's permission resolver returns behavior:"ask" for it BEFORE the
       // bypass auto-allow branch, so without this a turn would hang busy
       // forever. Disallowing the tool forces the agent to decide for itself.
-      // (The Agent SDK's canUseTool callback is the future path to answering
-      // these from the dashboard instead.)
       disallowedTools: ["AskUserQuestion"],
-      settingSources: ["user", "project"],
-      // Re-register the omg.dev MCP endpoint under this session's own URL. The
-      // user-scope registration settingSources loads is session-agnostic — one
-      // config serves every session — so without this the shared serve process
-      // cannot tell who is calling, and every session-scoped tool
-      // (lfg_display_image, lfg_input, lfg_publish_artifact, …) fails.
-      ...omgMcpServers(sessionId),
+      // MAC ROUTE (item 33): settingSources: [] is hermetic per chat — the
+      // SDK emits `--setting-sources=` (empty), which loads NO Mac-local
+      // user/project settings and NO CLAUDE.md from any source (official
+      // docs; live-proven on the M1 install with explicit strict MCP and
+      // OAuth untouched). The transport also enforces this form and refuses
+      // non-empty client values as standing-context collisions.
+      ...(executionHost === "mac" ? { settingSources: [] as never[] } : {}),
+      // MAC ROUTE: the native argv must stay inside the Mac transport's
+      // allowlist. NO mcpServers (the SDK would emit a LOCAL temp
+      // --mcp-config path that cannot exist on the Mac — MCP is provisioned
+      // in the session lease), NO settings:{fastMode} (the SDK would emit
+      // `--settings {...}` on argv, which the transport refuses) — Fast and
+      // other flag settings ride q.applyFlagSettings natively instead, and
+      // the fresh central context rides each TURN's text (a resumed claude
+      // keeps its first stored system prompt, so argv/system-prompt
+      // channels cannot refresh it).
+      ...(executionHost === "mac"
+        ? {
+            spawnClaudeCodeProcess: macClaudeSpawnFactory(macSpawnDeps, {
+              sessionId,
+              target: macTarget,
+              context: macWireContext(),
+              mcpServers: macMcpServers(),
+              settings: {
+                model,
+                ...(effort ? { thinkingLevel: effort } : {}),
+                fastMode,
+              },
+              nextRequestId: macNextRequestId,
+              onArgvExtraction: (notes, extractedSettings) => {
+                for (const note of notes) console.error(`aisdk-session ${sessionId}: ${note}`);
+                if (extractedSettings && Object.keys(extractedSettings).length) {
+                  macPendingFlagSettings = extractedSettings;
+                }
+              },
+              onHandshake: (handshake) => {
+                if (handshake.status === "ready") {
+                  macReportInit("ready", { requestId: handshake.requestId, pid: handshake.pid, cwd: handshake.cwd });
+                } else {
+                  macReportInit("failed", {
+                    requestId: handshake.requestId,
+                    reason: [handshake.reason, handshake.detail].filter(Boolean).join(": ") || `remote weigerde (${handshake.status})`,
+                  });
+                }
+              },
+            }),
+          }
+        : {
+            // Local route unchanged: settingSources honors ~/.claude config
+            // (and loads filesystem skills); the omg MCP endpoint is
+            // re-registered under this session's own URL.
+            settingSources: ["user", "project"] as never[],
+            ...omgMcpServers(sessionId),
+          }),
       // stream_event partial messages drive the live draft in the web UI.
       includePartialMessages: true,
       ...(effort ? { effort } : {}),
-      // Fast is provider-native and independent from effort. Put it in the
-      // flag layer so this session has deterministic on/off state without
-      // rewriting the user's Claude settings file.
-      settings: { fastMode },
       // env is a FULL replacement for the subprocess environment when set —
       // without a connected account, inherit process.env so the platform proxy
       // remains available. With a connected account, keep the full environment
@@ -567,7 +758,15 @@ export async function cmdAisdkSession(argv: string[]): Promise<void> {
       // ~/.claude/.credentials.json. (The old Vercel provider's sanitizing
       // allowlist dropped LFG_* and orphaned every lfg_create_subagent child.)
       ...(accountEnv ? { env: accountEnv } : {}),
-      ...(claudePath ? { pathToClaudeCodeExecutable: claudePath } : {}),
+      // MAC ROUTE: the explicit remote selector keeps the SDK from resolving
+      // (and requiring) a LOCAL native claude binary before the custom spawn
+      // runs — see MAC_CLAUDE_REMOTE_EXECUTABLE. Local/agentbox stays exactly
+      // as it was: the resolved local claudePath when one exists.
+      ...(executionHost === "mac"
+        ? { pathToClaudeCodeExecutable: MAC_CLAUDE_REMOTE_EXECUTABLE }
+        : executionHost === "agentbox" && claudePath
+          ? { pathToClaudeCodeExecutable: claudePath }
+          : {}),
     },
   });
 
@@ -658,7 +857,29 @@ export async function cmdAisdkSession(argv: string[]): Promise<void> {
     publishDraft("", true);
     setBusy(true);
     userRows.send(text, afterInterrupt);
-    input.push(text);
+    // MAC ROUTE: the fresh central context rides EVERY provider-facing turn
+    // (a resumed claude keeps its first stored system prompt, and prompt text
+    // may never ride argv — WIRE-RECONCILIATION defect 2/3). The central
+    // transcript keeps the CLEAN user text; only the provider sees the
+    // wrapper, rebuilt from disk at every send. Item 35: a REQUIRED
+    // instruction failure REFUSES this turn before any provider input — the
+    // session stays alive for later turns (a fixed source unblocks the next
+    // send) and the refusal carries the failing path+reason, never content.
+    if (executionHost !== "mac") {
+      input.push(text);
+      return;
+    }
+    let preamble: string;
+    try {
+      preamble = macPreamble();
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error(`aisdk-session ${sessionId}: beurt GEWEIGERD — ${reason}`);
+      publishDraft(`Mac-route geweigerd: ${reason}`, true);
+      setBusy(false);
+      return;
+    }
+    input.push(`${preamble}\n\n${text}`);
   }
 
   function shutdown(): void {
@@ -779,6 +1000,20 @@ export async function cmdAisdkSession(argv: string[]): Promise<void> {
       // showed thinking dots forever because nothing was ever told otherwise.
       try {
         q = startQuery(resuming || runtimeGeneration > 0);
+        // MAC ROUTE: fastMode (and any settings extracted off the native
+        // argv) are applied through the SDK's native live flag channel — the
+        // transport schema refuses `--settings` on argv, so this is the only
+        // faithful way the setting reaches the remote provider.
+        if (executionHost === "mac") {
+          const flags: Record<string, unknown> = { ...(macPendingFlagSettings ?? {}) };
+          if (fastMode !== undefined) flags.fastMode = fastMode;
+          if (Object.keys(flags).length) {
+            void q.applyFlagSettings(flags as never).catch((error) => {
+              console.error(`aisdk-session ${sessionId}: applyFlagSettings faalde: ${error instanceof Error ? error.message : String(error)}`);
+            });
+          }
+          macPendingFlagSettings = null;
+        }
       } catch (error) {
         exitExplanation = describeAisdkStreamEnd({
           turns: sdkMessagesSeen,
@@ -799,18 +1034,35 @@ export async function cmdAisdkSession(argv: string[]): Promise<void> {
         if (closing) break;
         if (!restartRequested) {
           console.error(`aisdk-session: query loop failed: ${error instanceof Error ? error.message : error}`);
+          if (error instanceof Error) console.error(error.stack?.split("\n").filter(line => /^\s*at /.test(line)).slice(0, 12).join("\n"));
           exitExplanation = describeAisdkStreamEnd({
             turns: sdkMessagesSeen,
             error,
             claudePath,
             accountConnected: !!account,
           });
+          if (error instanceof Error && error.name === "TranscriptPersistenceError") exitExplanation = error.message;
           unexpectedExit = true;
           break;
         }
       }
       if (closing) break;
       if (restartRequested) {
+        runtimeGeneration++;
+        lastSdkEventAt = Date.now();
+        continue;
+      }
+      // MAC ROUTE: an idle provider may be closed by the Mac supervisor
+      // (power/idle policy). A stream that ends while NOT busy and with no
+      // turns in flight is that cleanup, not a failure: silently re-open
+      // with NATIVE RESUME (`resume: sessionId` — the conversation lives on
+      // the Mac) and keep serving. No user message is replayed; only the
+      // locally buffered queue moves to the new query.
+      if (executionHost === "mac" && !busy && sdkMessagesSeen > 0) {
+        console.error(`aisdk-session ${sessionId}: mac-stream eindigde in rust; heropen met native resume`);
+        // Bounded backoff: a supervisor that keeps closing idle streams must
+        // not produce a hot reconnect loop.
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
         runtimeGeneration++;
         lastSdkEventAt = Date.now();
         continue;

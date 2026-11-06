@@ -31,6 +31,11 @@ export type SessionContainmentRecord = {
   tmuxName: string | null;
   recordedAt: number;
   exitReason: SessionExitReason | null;
+  /**
+   * Execution host of the last launch (src/execution-host.ts). Null on rows
+   * recorded before the host dimension existed; null means legacy agentbox.
+   */
+  executionHost: "agentbox" | "mac" | null;
 };
 
 type Row = {
@@ -43,6 +48,7 @@ type Row = {
   tmux_name: string | null;
   recorded_at: number;
   exit_reason: string | null;
+  execution_host: string | null;
 };
 
 let db: Database | null = null;
@@ -70,9 +76,15 @@ function database(): Database {
       spawned_by TEXT,
       tmux_name TEXT,
       recorded_at INTEGER NOT NULL,
-      exit_reason TEXT
+      exit_reason TEXT,
+      execution_host TEXT
     );
   `);
+  // Stores created before the host dimension carry no execution_host column.
+  // Add it in place; a fresh store already has it from CREATE above.
+  try {
+    next.exec("ALTER TABLE session_containment ADD COLUMN execution_host TEXT");
+  } catch {}
   db = next;
   dbPath = path;
   return next;
@@ -88,6 +100,7 @@ function toRecord(row: Row): SessionContainmentRecord {
     tmuxName: row.tmux_name,
     recordedAt: row.recorded_at,
     exitReason: row.exit_reason === "out_of_memory" ? "out_of_memory" : null,
+    executionHost: row.execution_host === "mac" ? "mac" : row.execution_host === "agentbox" ? "agentbox" : null,
   };
 }
 
@@ -102,23 +115,24 @@ function ids(values: Array<string | null | undefined>): string[] {
  */
 export function recordSessionContainment(
   sessionIds: Array<string | null | undefined>,
-  record: Omit<SessionContainmentRecord, "recordedAt" | "exitReason">,
+  record: Omit<SessionContainmentRecord, "recordedAt" | "exitReason"> & { executionHost?: "agentbox" | "mac" | null },
   opts: { onlyIfMissing?: boolean; now?: number } = {},
 ): void {
   const keys = ids(sessionIds);
   if (!keys.length) return;
   const now = opts.now ?? Date.now();
   const d = database();
+  const executionHost = record.executionHost ?? null;
   const stmt = opts.onlyIfMissing
     ? d.query(`
     INSERT OR IGNORE INTO session_containment
-      (session_id, agent_slice, sandbox, egress_proxy, role, spawned_by, tmux_name, recorded_at, exit_reason)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+      (session_id, agent_slice, sandbox, egress_proxy, role, spawned_by, tmux_name, recorded_at, exit_reason, execution_host)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
   `)
     : d.query(`
     INSERT INTO session_containment
-      (session_id, agent_slice, sandbox, egress_proxy, role, spawned_by, tmux_name, recorded_at, exit_reason)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+      (session_id, agent_slice, sandbox, egress_proxy, role, spawned_by, tmux_name, recorded_at, exit_reason, execution_host)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
     ON CONFLICT(session_id) DO UPDATE SET
       agent_slice = excluded.agent_slice,
       sandbox = excluded.sandbox,
@@ -127,7 +141,8 @@ export function recordSessionContainment(
       spawned_by = excluded.spawned_by,
       tmux_name = excluded.tmux_name,
       recorded_at = excluded.recorded_at,
-      exit_reason = NULL
+      exit_reason = NULL,
+      execution_host = excluded.execution_host
   `);
   d.transaction(() => {
     for (const key of keys) {
@@ -140,6 +155,7 @@ export function recordSessionContainment(
         record.spawnedBy,
         record.tmuxName,
         now,
+        executionHost,
       );
     }
   })();

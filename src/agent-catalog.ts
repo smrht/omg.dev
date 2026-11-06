@@ -4,7 +4,9 @@ export { OMG_MODELS } from "./omg-models.ts";
 import type { Agent } from "./agents/registry.ts";
 import type { AutoAgent } from "./auto/store.ts";
 import type { CodingAgentInfo, CodingAgentKind } from "./coding-agents.ts";
-import { readModelDiscoveryCacheSync } from "./model-discovery.ts";
+import { readModelDiscoveryCacheSync, DEVIN_FUSION_UID_RE, type CodexModelCapabilities } from "./model-discovery.ts";
+export type { CodexModelCapabilities, CyberAccessProgram } from "./model-discovery.ts";
+import { CODEX_MUSE_MODELS, museSubscriptionKey } from "./agents/backends/codex-muse.ts";
 import { PI_AUTH_PROVIDER_IDS } from "./pi-auth.ts";
 import type { Session } from "./sessions.ts";
 
@@ -39,6 +41,8 @@ export type SkillCatalogItem = {
 // 2026-09-24. They only order the picker, newest first. Add a row when a new
 // pinned id joins the list; an alias takes the newest date in its family.
 const CLAUDE_RELEASES: Record<string, string> = {
+  "claude-haiku-5-5": "2026-10-07",
+  "claude-sonnet-5-5": "2026-09-28",
   "claude-opus-5-5": "2026-09-21",
   "claude-fable-5-1": "2026-08-28",
   "claude-opus-5": "2026-07-24",
@@ -48,9 +52,24 @@ const CLAUDE_RELEASES: Record<string, string> = {
   "claude-haiku-4-5-20251001": "2025-10-15",
 };
 
+// What each bare alias resolves to today (measured 2026-10-07 on claude
+// 2.1.293 with `claude -p --model <alias>`: sonnet -> claude-sonnet-5-5,
+// haiku -> claude-haiku-5-5). An alias sorts on the release it
+// actually lands on, not on the newest pin in its family: `sonnet` still lands
+// on Sonnet 5 while the Sonnet 5.5 rollout runs, so it must not jump above
+// Opus 5.5 just because claude-sonnet-5-5 is pinned.
+const CLAUDE_ALIAS_TARGETS: Record<string, string> = {
+  opus: "claude-opus-5-5",
+  fable: "claude-fable-5-1",
+  sonnet: "claude-sonnet-5-5",
+  haiku: "claude-haiku-5-5",
+};
+
 function claudeReleaseDate(model: string): string | null {
   if (CLAUDE_RELEASES[model]) return CLAUDE_RELEASES[model];
   if (!/^(opus|fable|sonnet|haiku)$/.test(model)) return null;
+  const target = CLAUDE_ALIAS_TARGETS[model];
+  if (target && CLAUDE_RELEASES[target]) return CLAUDE_RELEASES[target];
   const family = Object.keys(CLAUDE_RELEASES).filter((id) => id.startsWith(`claude-${model}-`));
   return family.map((id) => CLAUDE_RELEASES[id]!).sort().at(-1) ?? null;
 }
@@ -67,13 +86,24 @@ export function sortClaudeModelsByRelease(models: readonly string[]): string[] {
     .map((item) => item.model);
 }
 
+// Agentbox: one row per family alias, plus `claude-sonnet-5-5` (28-09-2026).
+// Claude Code 2.1.284 knows Sonnet 5.5, but Anthropic's server-side model
+// config still resolves `sonnet` to Sonnet 5, so the pin is the only way to
+// reach 5.5 from the picker. When `claude -p --model sonnet` reports
+// claude-sonnet-5-5, drop the pin and bump CLAUDE_ALIAS_LABELS.sonnet instead.
+// The picker shows the release via CLAUDE_ALIAS_LABELS / claudeModelLabel.
+//
+// 07-10-2026 (Sam): Haiku 5.5 is out and the picker shows only the current
+// releases. Sonnet 5 and Haiku 4.5 are gone; Sonnet 5.5 and Haiku 5.5 are
+// pinned ids because the web bundle labels the bare `sonnet`/`haiku` aliases
+// "Sonnet 5"/"Haiku 4.5" (CLAUDE_ALIAS_LABELS in packages/protocol), and a
+// pinned id gets its label from the id itself without a web rebuild.
+// `opus` and `fable` stay aliases: favourites are stored per model id.
 export const CLAUDE_MODELS: string[] = sortClaudeModelsByRelease([
-  "claude-opus-5-5",
+  "claude-sonnet-5-5",
   "opus",
-  "claude-fable-5-1",
   "fable",
-  "sonnet",
-  "haiku",
+  "claude-haiku-5-5",
 ]);
 export const CODEX_MODELS: string[] = [
   "gpt-6.1-sol",
@@ -256,7 +286,14 @@ const MODEL_CATALOG_KEYS: CodingAgentKind[] = [
   "jcode",
   "pi",
   "copilot",
+  "zcode",
 ];
+
+// ZCode on the agentbox runs Sam's Z.ai Coding Plan through the personal
+// provider "zaiplan" (~/.zcode/v2/provider_config.json); the harness selects
+// the model per session. Levels map to ZCode's reasoningLevel option.
+export const ZCODE_MODELS = ["zaiplan/glm-5.3-flash", "zaiplan/glm-5.3"] as const;
+export const ZCODE_THINKING_LEVELS = ["low", "high", "max"] as const;
 
 export const CODEX_THINKING_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh"] as const;
 export const CLAUDE_THINKING_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
@@ -292,6 +329,13 @@ export type ModelCatalogItem = {
   thinkingLevels: string[];
   /** Model-specific levels for providers whose variants differ per model. */
   thinkingLevelsByModel?: Record<string, string[]>;
+  /**
+   * Discovered per-model capability metadata (reasoning efforts, cyber
+   * access programs) for the codex-family providers. Absent when discovery
+   * carried none — never statically seeded, so the picker advertises only
+   * what the connected account's live catalog offered.
+   */
+  modelCapabilities?: Record<string, CodexModelCapabilities>;
   session: boolean;
   auto: boolean;
   visible?: boolean;
@@ -315,10 +359,11 @@ const LABELS: Record<CodingAgentKind, string> = {
   hermes: "hermes",
   pi: "pi",
   copilot: "copilot",
+  zcode: "zcode",
 };
 
 export const MODEL_OPTIONS: Record<CodingAgentKind, { defaultModel: string; models: readonly string[] }> = {
-  claude: { defaultModel: "sonnet", models: CLAUDE_MODELS },
+  claude: { defaultModel: "claude-sonnet-5-5", models: CLAUDE_MODELS },
   aisdk: { defaultModel: "opus", models: AISDK_MODELS },
   codex: { defaultModel: "gpt-5.6-sol", models: CODEX_MODELS },
   "codex-aisdk": { defaultModel: "gpt-5.6-sol", models: CODEX_AISDK_MODELS },
@@ -334,6 +379,7 @@ export const MODEL_OPTIONS: Record<CodingAgentKind, { defaultModel: string; mode
   jcode: { defaultModel: "auto", models: JCODE_MODELS },
   pi: { defaultModel: "sonnet", models: PI_MODELS },
   copilot: { defaultModel: "claude-sonnet-4.5", models: COPILOT_MODELS },
+  zcode: { defaultModel: "zaiplan/glm-5.3-flash", models: ZCODE_MODELS },
 };
 
 function mergeModels(...sets: Array<readonly string[] | undefined>): string[] {
@@ -356,6 +402,96 @@ export function discoveredModelsOrFallback(
   return mergeModels(provider?.ok && provider.models.length ? provider.models : fallback);
 }
 
+const DEVIN_LEVEL_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/**
+ * Fast varianten heten per familie anders: Claude plakt `-fast` achter het
+ * niveau (claude-opus-5-high-fast), GPT gebruikt `-priority`
+ * (gpt-5-6-sol-high-priority). Discovery kent de raw uids, dus hier exact
+ * resolvren; zonder discovery blind de documenterde conventie.
+ */
+export function devinModelSupportsFast(model?: string | null): boolean {
+  if (!model || model === "adaptive") return false;
+  const variants = readModelDiscoveryCacheSync()?.providers?.devin?.variants?.[model];
+  if (!variants?.length) return /^(claude-opus-5|claude-opus-4\.8|gpt-6-astra|gpt-5\.6-|gpt-5\.5|gpt-5\.4|gpt-5\.3-codex)/.test(model);
+  return variants.some((uid) => /-(fast|priority)$/.test(uid));
+}
+
+/**
+ * Picker id of one Fusion combo: "fusion:<lead>+<sidekick>" (short form from
+ * discovery) or the older "fusion-<lead>-sidekick-<sidekick>"; neither carries a level.
+ */
+const DEVIN_FUSION_COMBO_RE = /^fusion-(.+)-sidekick-(.+)$/;
+const DEVIN_FUSION_SHORT_RE = /^fusion:.+\+.+$/;
+
+/** A Fusion uid that already carries its level (and maybe fast) is complete. */
+export function isDevinFusionUid(model?: string | null): boolean {
+  return !!model && DEVIN_FUSION_UID_RE.test(model);
+}
+
+export function isDevinFusionCombo(model?: string | null): boolean {
+  if (!model) return false;
+  if (DEVIN_FUSION_SHORT_RE.test(model)) return true;
+  return DEVIN_FUSION_COMBO_RE.test(model) && !DEVIN_FUSION_UID_RE.test(model);
+}
+
+/** Lead + sidekick of a combo id: from its discovered variants, else from the long id. */
+function devinFusionParts(model: string, variants: string[]): { lead: string; sidekick: string } | null {
+  for (const uid of variants) {
+    const match = uid.match(DEVIN_FUSION_UID_RE);
+    if (match) return { lead: match[1]!, sidekick: match[4]!.replace(/-priority$/, "") };
+  }
+  const match = model.match(DEVIN_FUSION_COMBO_RE);
+  return match ? { lead: match[1]!, sidekick: match[2]! } : null;
+}
+
+/**
+ * Fusion uids carry the level in the middle (fusion-<lead>-<level>[-fast]-
+ * sidekick-<sidekick>[-priority]), so the plain suffix rule does not apply.
+ * Without an explicit level Devin's own default (medium) is used; fast picks
+ * the discovered uid whose lead carries -fast/-priority.
+ */
+export function composeDevinFusionModel(
+  model: string,
+  thinkingLevel?: string,
+  fastMode?: boolean,
+): string {
+  const devin = readModelDiscoveryCacheSync()?.providers?.devin;
+  const variants = devin?.variants?.[model] ?? [];
+  const parts = devinFusionParts(model, variants);
+  if (!parts) return model;
+  const { lead, sidekick } = parts;
+  const levels = devin?.thinkingLevelsByModel?.[model] ?? [];
+  const level = thinkingLevel ?? (levels.includes("medium") || !levels.length ? "medium" : levels[0]!);
+  const plain = `fusion-${lead}-${level}-sidekick-${sidekick}`;
+  if (!fastMode) return plain;
+  const fastPrefix = new RegExp(`^fusion-${lead}-${level}-(fast|priority)-sidekick-`);
+  return variants.find((uid) => fastPrefix.test(uid)) ?? `fusion-${lead}-${level}-fast-sidekick-${sidekick}`;
+}
+
+export function composeDevinModel(
+  model: string,
+  thinkingLevel?: string,
+  fastMode?: boolean,
+): string {
+  if (model === "adaptive") return model;
+  if (isDevinFusionCombo(model)) return composeDevinFusionModel(model, thinkingLevel, fastMode);
+  // Already a complete Fusion uid (a resumed session, or the harness re-entering
+  // with the composed model): never stack a second level on it.
+  if (isDevinFusionUid(model)) return model;
+  const norm = model.replace(/\./g, "-");
+  if (!thinkingLevel && !fastMode) return model;
+  const variants = readModelDiscoveryCacheSync()?.providers?.devin?.variants?.[model] ?? [];
+  const level = thinkingLevel ? `${norm}-${thinkingLevel}` : norm;
+  if (fastMode) {
+    return (
+      variants.find((uid) => uid === `${level}-fast`) ??
+      variants.find((uid) => uid === `${level}-priority`) ??
+      `${level}-fast`
+    );
+  }
+  return variants.includes(level) ? level : `${model}-${thinkingLevel}`;
+}
 const CURSOR_THINKING_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 const CURSOR_LEVEL_ALIASES: Record<string, string> = {
   "extra-high": "xhigh",
@@ -544,12 +680,48 @@ export function curateOpenCodeModels(
   return out.length ? out : models.slice(0, 16);
 }
 
-function curateCodexModels(models: string[]): string[] {
-  // `codex debug models` lists the models in Codex's own priority order, which
-  // is newest first, and the parser already drops hidden ones. Keep that
-  // order. Pinning CODEX_MODELS in front used to push a newly shipped model
-  // (gpt-6-sol) below every older pinned one and drop its siblings entirely.
-  return models.length ? models : [...CODEX_MODELS];
+export function curateCodexModels(models: string[]): string[] {
+  const out: string[] = [];
+  const add = (model: string) => {
+    if (models.includes(model) && !out.includes(model)) out.push(model);
+  };
+
+  // Codex' remote catalog can lag an account rollout: this box could launch
+  // Astra while `codex debug models` still omitted it. Keep only entitlement-
+  // proven local overrides ahead of discovery; removed legacy models remain
+  // governed by the authoritative remote list.
+  for (const model of CODEX_MODELS) {
+    if (model === "gpt-6-astra") out.push(model);
+    else add(model);
+  }
+  addLatest(out, models.filter((m) => /^gpt-\d/.test(m) && !m.includes("codex") && !m.includes("mini")));
+  addLatest(out, models.filter((m) => /^gpt-\d/.test(m) && m.includes("mini")));
+  addLatest(out, models.filter((m) => /^gpt-\d/.test(m) && m.includes("codex") && !m.includes("spark")));
+  addLatest(out, models.filter((m) => m.includes("spark")));
+  for (const fallback of CODEX_MODELS) if (!out.includes(fallback) && models.includes(fallback)) out.push(fallback);
+  // Discovery is authoritative for what the account can run, and the parser
+  // has already dropped `visibility: "hide"` entries — what reaches this point
+  // is exactly what Codex' own picker shows. Two real drops came from relying
+  // on the family filters above alone: `gpt-daybreak-blue-latest` carries no
+  // version digits, so /^gpt-\d/ never matched it; and a release that ships
+  // two families at one version (gpt-6.1-sol + gpt-6.1-luna) lost all but the
+  // localeCompare winner of addLatest. Keep the remaining discovered slugs in
+  // discovery order instead of deleting them.
+  for (const model of models) if (!out.includes(model)) out.push(model);
+  return out.length ? out : models;
+}
+
+/**
+ * Muse Spark on the Codex harness (codex-muse.ts). `codex debug models` never
+ * lists Meta's models, so they are appended after the OpenAI catalog — and only
+ * while a Muse subscription credential is on the box, so the picker never
+ * offers a model that would fail at launch.
+ */
+export function withCodexMuseModels(models: string[], museAvailable: boolean): string[] {
+  if (!museAvailable) return models;
+  const out = [...models];
+  for (const model of CODEX_MUSE_MODELS) if (!out.includes(model)) out.push(model);
+  return out;
 }
 
 function curateGrokModels(models: string[]): string[] {
@@ -597,7 +769,8 @@ function curateModels(
 ): string[] {
   if (agent === "cursor") return curateCursorModels(models);
   if (agent === "opencode") return curateOpenCodeModels(models, connectedProviderIds);
-  if (agent === "codex" || agent === "codex-aisdk") return curateCodexModels(models);
+  if (agent === "codex") return curateCodexModels(models);
+  if (agent === "codex-aisdk") return withCodexMuseModels(curateCodexModels(models), Boolean(museSubscriptionKey()));
   if (agent === "grok") return curateGrokModels(models);
   if (agent === "fx") return curateFxModels(models);
   if (agent === "muse") return curateMuseModels(models);
@@ -662,6 +835,27 @@ export function thinkingLevelsForAgent(
     const levels = [...new Set(Object.values(variants).flat())];
     return levels.length ? levels : null;
   }
+  // Devin expresses thinking level as a variant suffix on the family slug, so
+  // the allowed vocabulary is the selected family's own variant set (from
+  // discovery). Without a model, the union across discovered families.
+  if (agent === "devin") {
+    const levelsByModel =
+      readModelDiscoveryCacheSync()?.providers?.devin?.thinkingLevelsByModel ?? {};
+    if (model) {
+      const levels = levelsByModel[model];
+      if (levels?.length) return levels;
+      // Unknown model (adaptive, private slugs): the router/CLI picks its own
+      // level, so no vocabulary to validate against.
+      return null;
+    }
+    const levels = [...new Set(Object.values(levelsByModel).flat())];
+    return levels.length
+      ? [...levels].sort(
+          (a, b) =>
+            DEVIN_LEVEL_ORDER.indexOf(a) - DEVIN_LEVEL_ORDER.indexOf(b),
+        )
+      : null;
+  }
   // Hosted models differ per model: OpenRouter honours reasoning_effort for
   // some and has no control for others. See OMG_THINKING_LEVELS_BY_MODEL.
   if (agent === "omg") {
@@ -680,6 +874,7 @@ export function thinkingLevelsForAgent(
   }
   if (agent === "pi") return PI_THINKING_LEVELS;
   if (agent === "jcode") return JCODE_THINKING_LEVELS;
+  if (agent === "zcode") return ZCODE_THINKING_LEVELS;
   if (agent === "codex" || agent === "codex-aisdk") return CODEX_THINKING_LEVELS;
   if (agent === "cursor") return CURSOR_THINKING_LEVELS;
   if (agent === "muse") return MUSE_THINKING_LEVELS;
@@ -855,6 +1050,19 @@ export function listModelCatalog(codingAgents: CodingAgentInfo[] = []): ModelCat
       piProviders,
       openCodeConnected,
     );
+    // Codex-family capability metadata rides along verbatim from discovery
+    // (codex-aisdk is mirrored from codex at refresh time). No entry when the
+    // cache carries none: the picker then advertises no cyber program.
+    const modelCapabilities =
+      key === "codex" || key === "codex-aisdk"
+        ? readModelDiscoveryCacheSync()?.providers?.[key]?.modelCapabilities
+        : undefined;
+    // Devin's levels come from discovery (the family's variant suffixes),
+    // keyed by the exact model id the picker shows.
+    const devinLevels = key === "devin"
+      ? readModelDiscoveryCacheSync()?.providers?.devin?.thinkingLevelsByModel
+      : undefined;
+    // Hosted omg models carry their own per-model vocabulary (0.6.82).
     const perModelLevels = key === "opencode" || key === "omg" || key === "grok";
     const thinkingLevelsByModel = perModelLevels
       ? Object.fromEntries(
@@ -863,10 +1071,14 @@ export function listModelCatalog(codingAgents: CodingAgentInfo[] = []): ModelCat
             return levels?.length ? [[model, [...levels]]] : [];
           }),
         )
-      : undefined;
+      : key === "devin"
+        ? devinLevels
+        : undefined;
     const thinkingLevels = perModelLevels
       ? [...new Set(Object.values(thinkingLevelsByModel ?? {}).flat())]
-      : [...(thinkingLevelsForAgent(key) ?? [])];
+      : key === "devin"
+        ? ["none", "low", "medium", "high", "xhigh", "max"]
+        : [...(thinkingLevelsForAgent(key) ?? [])];
     return {
       key,
       label: LABELS[key],
@@ -875,6 +1087,9 @@ export function listModelCatalog(codingAgents: CodingAgentInfo[] = []): ModelCat
       thinkingLevels,
       ...(thinkingLevelsByModel && Object.keys(thinkingLevelsByModel).length
         ? { thinkingLevelsByModel }
+        : {}),
+      ...(modelCapabilities && Object.keys(modelCapabilities).length
+        ? { modelCapabilities }
         : {}),
       session: key !== "claude" && key !== "codex",
       auto: (AUTO_AGENT_BACKENDS as readonly string[]).includes(key),

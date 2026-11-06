@@ -6,6 +6,7 @@ import {
   spawnManagedFxAcpSession,
   spawnManagedGrokAcpSession,
   spawnManagedJcodeSdkSession,
+  spawnManagedZcodeSdkSession,
   spawnManagedMuseMspSession,
   spawnManagedOpencodeAisdkSession,
   spawnManagedPiSession,
@@ -90,6 +91,12 @@ const result = await (agent === "claude" || agent === "aisdk"
                 })
               : agent === "jcode"
                 ? spawnManagedJcodeSdkSession({
+                    ...common,
+                    key: `key-${resume}`,
+                    resume,
+                  })
+              : agent === "zcode"
+                ? spawnManagedZcodeSdkSession({
                     ...common,
                     key: `key-${resume}`,
                     resume,

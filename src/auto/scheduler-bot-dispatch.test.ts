@@ -13,7 +13,7 @@
 // truncateAutoAgentPrompt/withAutoAgentListMeta wiring guards in
 // test/auto-agent-list-payload.test.ts.
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PATHS } from "../config.ts";
@@ -170,4 +170,28 @@ describe("wiring guard: a bot-owned row can never fall through to the headless r
     // bot-owned row.
     expect(continueAt).toBeLessThan(runAt);
   });
+});
+
+test("resource deferral leaves a due bot routine unstamped and retries once capacity returns", async () => {
+  await seedBotRoutine("resource-pending", "bot_a");
+  const file = join(testData, "resource-policy.json");
+  const slice = { path: "/sys/fs/cgroup/test.slice", memoryCurrent: 1, memoryHigh: null, memoryMax: null, psiFullAvg10: 0 };
+  await writeFile(file, JSON.stringify({ version: 1, measuredAtEpochMs: Date.now(), host: { totalBytes: 32 * 1024 ** 3, availableBytes: 12 * 1024 ** 3, psiFullAvg10: 50 }, slices: { computer: slice, agents: slice, control: slice } }));
+  const previous = process.env.AGENTBOX_RESOURCE_STATE;
+  let calls = 0;
+  scheduler.setBotRoutineDelivery(async () => { calls++; });
+  try {
+    process.env.AGENTBOX_RESOURCE_STATE = file;
+    await scheduler.autoSchedulerTickNow();
+    expect(calls).toBe(0);
+    expect((await store.getAutoAgent("resource-pending"))?.lastRunAt ?? 0).toBe(0);
+    delete process.env.AGENTBOX_RESOURCE_STATE;
+    await scheduler.autoSchedulerTickNow();
+    await scheduler.autoSchedulerTickNow();
+    expect(calls).toBe(1);
+    expect((await store.getAutoAgent("resource-pending"))?.lastRunAt).toBeGreaterThan(0);
+  } finally {
+    if (previous === undefined) delete process.env.AGENTBOX_RESOURCE_STATE;
+    else process.env.AGENTBOX_RESOURCE_STATE = previous;
+  }
 });

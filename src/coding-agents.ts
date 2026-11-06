@@ -57,7 +57,8 @@ export type CodingAgentKind =
   | "devin"
   | "hermes"
   | "pi"
-  | "copilot";
+  | "copilot"
+  | "zcode";
 
 export type CodingAgentSetting = {
   visible: boolean;
@@ -233,6 +234,7 @@ export const CODING_AGENT_KINDS: Exclude<CodingAgentKind, "claude" | "hermes">[]
   "omg",
   "jcode",
   "copilot",
+  "zcode",
   "pi",
 ];
 
@@ -253,6 +255,7 @@ export const CODING_AGENT_LABELS: Record<CodingAgentKind, string> = {
   hermes: "hermes",
   pi: "pi",
   copilot: "copilot",
+  zcode: "zcode",
 };
 
 const configPath = () => join(PATHS.data, "coding-agents.json");
@@ -594,6 +597,28 @@ function copilotPath(): string | null {
   ]);
 }
 
+function zcodePath(): string | null {
+  const home = userHome();
+  return which("zcode", [
+    process.env.LFG_ZCODE_PATH ?? "",
+    `${home}/.local/bin/zcode`,
+    "/usr/local/bin/zcode",
+  ]);
+}
+
+// ZCode on the agentbox authenticates with a Z.ai Coding Plan key held in its
+// personal provider file (or a `zcode login` credential). The file holds the
+// key, so only its presence and a provider rule are checked, never printed.
+function hasZcodeAuth(): boolean {
+  const home = userHome();
+  try {
+    const raw = readFileSync(`${home}/.zcode/v2/provider_config.json`, "utf8");
+    const doc = JSON.parse(raw) as { config?: { providerConfigRules?: { providerRules?: unknown[] } } };
+    if ((doc.config?.providerConfigRules?.providerRules?.length ?? 0) > 0) return true;
+  } catch {}
+  return existsSync(`${home}/.zcode/v2/credentials.json`);
+}
+
 async function hasCodexAccountAuth(): Promise<boolean> {
   const home = userHome();
   if (existsSync(`${home}/.codex/auth.json`)) return true;
@@ -887,6 +912,7 @@ function installCommandFor(kind: CodingAgentKind): string | null {
   if (kind === "deepseek") return "bun add -g @deepseek-ai/dsh@0.1.1-rc.2 pnpm && dsh plugin --profile omg add @deepseek-ai/dsh-acp@0.1.1-rc.2";
   if (kind === "devin") return "curl -fsSL https://cli.devin.ai/install.sh | bash";
   if (kind === "copilot") return "npm install -g @github/copilot";
+  if (kind === "zcode") return null;
   // pi is no longer bundled. Its provider layer (@earendil-works/pi-ai) pulls
   // in eleven SDKs — Anthropic, OpenAI, Google GenAI, Mistral, Bedrock — which
   // came to 115MB of a 244MB install, for one optional agent among eight.
@@ -914,6 +940,7 @@ function loginCommandPartsFor(kind: CodingAgentKind): string[] | null {
   if (kind === "deepseek") return null;
   if (kind === "devin") return [devinPath() ?? "devin", "auth", "login"];
   if (kind === "copilot") return [copilotPath() ?? "copilot"];
+  if (kind === "zcode") return null;
   // pi has no login subcommand — auth is file-based (~/.pi/agent/auth.json) or
   // ANTHROPIC_API_KEY, so there is no terminal login to offer.
   if (kind === "pi") return null;
@@ -1596,6 +1623,13 @@ async function statusFor(kind: CodingAgentKind): Promise<CodingAgentStatus> {
     addBinary("GitHub Copilot CLI", copilotPath());
     addAuth("Copilot auth", hasCopilotAuth(), "run 'copilot' and /login, or set COPILOT_GITHUB_TOKEN / GH_TOKEN with the Copilot Requests scope");
     instructions.push("Install Copilot CLI (npm install -g @github/copilot; requires Node 22+), then run 'copilot' once and /login, or set COPILOT_GITHUB_TOKEN (or GH_TOKEN) with the Copilot Requests scope.");
+  } else if (kind === "zcode") {
+    accountConnected = hasZcodeAuth();
+    addBinary("ZCode CLI", zcodePath());
+    addAuth("Z.ai Coding Plan", accountConnected, "configure ~/.zcode/v2/provider_config.json with the Coding Plan key");
+    instructions.push("Install the ZCode CLI (~/.local/bin/zcode, from the Z.ai ZCode Linux build) and configure the Z.ai Coding Plan provider in ~/.zcode/v2/provider_config.json.");
+    canAutoSetup = false;
+    canLoginInTerminal = false;
   } else {
     accountConnected = hasGrokAccountAuth();
     profile = agentAccountProfile(kind);

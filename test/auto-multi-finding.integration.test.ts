@@ -15,6 +15,13 @@ import type { AutoAgent } from "../src/auto/store.ts";
 
 let reply = "";
 
+// The private runtime runs the model in a separate systemd worker. Mock that
+// boundary, so the real findings store stays under test without starting a job.
+mock.module("../src/omg-isolation-runtime.ts", () => ({
+  isolatedAutoBackend: async () => reply,
+}));
+
+
 mock.module("../src/agents/backends/claude-ai-sdk.ts", () => ({
   pipeToClaudeAiSdk: async () => reply,
 }));
@@ -168,4 +175,16 @@ describe("a single run filing multiple findings", () => {
     expect(filed).toHaveLength(1);
     expect(filed[0].occurrences).toBe(2);
   });
+});
+
+
+test("quiet routines discard low findings but retain actionable ones", async () => {
+  const { runAutoAgent } = await import("../src/auto/runner.ts");
+  reply = JSON.stringify({ findings: [
+    { title: "completed routine", severity: "low" },
+    { title: "real outage", severity: "high" },
+  ] });
+  const out = await runAutoAgent({ ...agent("quiet-test"), quiet: true }, () => {});
+  expect(out.map((f) => f.title)).toEqual(["real outage"]);
+  expect((await readFiled("quiet-test")).map((f) => f.title)).toEqual(["real outage"]);
 });

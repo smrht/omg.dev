@@ -30,10 +30,10 @@ export function composerSupportsFastMode(input: {
   agent: string;
   model?: string | null;
 }): boolean {
-  // Claude is excluded on purpose. Its fast mode exists only for a few Opus
-  // models, on the Claude API, at premium per-token rates (subscriptions bill
-  // it as extra usage). A pill on every Claude composer promised a speed-up
-  // most sessions cannot get. `/fast` in a running session still works.
+  if (input.agent === "claude" || input.agent === "aisdk") return true;
+  if (input.agent === "devin") {
+    return !!input.model && /^(claude-opus-5|claude-opus-4\.8|gpt-6-astra|gpt-5\.6|gpt-5\.5|gpt-5\.4|gpt-5\.3-codex)/.test(input.model);
+  }
   if (input.agent !== "codex" && input.agent !== "codex-aisdk") return false;
   return !!input.model && /^gpt-5\.(?:6(?:-|$)|5(?:-|$)|4$)/.test(input.model);
 }
