@@ -70,23 +70,23 @@ export function useOverviewPreferences() {
 export function OverviewToolbar({ prefs, count, project, onClearProject }: {
   prefs: ReturnType<typeof useOverviewPreferences>; count: number; project?: string; onClearProject?: () => void;
 }) {
-  return <section aria-label="Gesprekkenoverzicht" onKeyDown={e => { if (!e.metaKey && !e.ctrlKey && !e.altKey) e.stopPropagation(); }} className="overview-toolbar px-2 pb-2">
-    <div className="mb-2 flex items-center justify-between gap-2">
-      <h2 className="text-base font-semibold tracking-tight">{prefs.view === "taken" ? "Taken" : <>Gesprekken <span className="ml-1 text-xs font-normal text-muted-foreground">{count}</span></>}</h2>
-      <div className="flex items-center gap-1">
-        <label className={cn("flex min-h-11 cursor-pointer items-center gap-1.5 text-xs text-muted-foreground", prefs.view === "taken" && "hidden")}><input type="checkbox" checked={prefs.unreadOnly} onChange={e => prefs.setUnreadOnly(e.target.checked)} className="size-3.5 accent-primary" />Ongelezen</label>
-      <button type="button" onClick={prefs.toggleDensity} aria-label={prefs.density === "compact" ? "Ruime weergave" : "Compacte weergave"} title={prefs.density === "compact" ? "Ruime weergave" : "Compacte weergave"} className="flex min-h-11 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground hover:bg-muted focus-visible:outline-2 focus-visible:outline-primary"><SlidersHorizontal className="size-4" /><span className="sr-only">{prefs.density === "compact" ? "Compact" : "Ruim"}</span></button>
+  // agentbox: compacte werkbalk. Geen aparte kopregel meer: het aantal staat in
+  // de segmentknop staat bovenaan en verspringt niet; zoeken, Ongelezen en dichtheid zijn kleine knoppen ernaast, de vier
+  // weergaven een segmentknop. Op touch houden de knoppen 44px (index-css).
+  const taken = prefs.view === "taken";
+  return <section aria-label="Gesprekkenoverzicht" onKeyDown={e => { if (!e.metaKey && !e.ctrlKey && !e.altKey) e.stopPropagation(); }} className="overview-toolbar ab-toolbar px-1.5 pb-1.5">
+    <div role="group" aria-label="Groepeer gesprekken" className="ab-tabs grid grid-cols-4 gap-0.5 rounded-md bg-muted p-0.5">
+      {([ ["taken", "Taken"], ["attention", "Aandacht"], ["all", "Alles"], ["projects", "Projecten"] ] as const).map(([key,label]) => <button key={key} type="button" aria-pressed={prefs.view===key} onClick={() => prefs.setView(key)} className={cn("ab-tab h-7 truncate rounded-[5px] px-0 text-[12px] font-medium transition-colors focus-visible:outline-2 focus-visible:outline-primary", prefs.view===key ? "bg-background text-foreground shadow-[0_1px_2px_rgba(0,0,0,.12)]" : "text-muted-foreground hover:text-foreground")}>{label}</button>)}
+    </div>
+    <div className={cn("mt-1.5 flex items-center gap-1", taken && "hidden")}>
+      <div className="relative min-w-0 flex-1">
+        <Search aria-hidden="true" className="ab-search-icon pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+        <input type="search" aria-label="Zoek een gesprek" placeholder="Zoek" value={prefs.query} onChange={e => prefs.setQuery(e.target.value)} className="ab-search h-8 w-full rounded-md border border-transparent bg-muted pl-8 pr-8 text-[13px] outline-none placeholder:text-muted-foreground focus:border-primary/60" />
+        {prefs.query && <button type="button" aria-label="Zoekopdracht wissen" onClick={() => prefs.setQuery("")} className="ab-icon-btn absolute right-0 top-1/2 flex size-8 -translate-y-1/2 items-center justify-center text-muted-foreground"><X className="size-3.5" /></button>}
       </div>
+      <button type="button" aria-pressed={prefs.unreadOnly} onClick={() => prefs.setUnreadOnly(!prefs.unreadOnly)} title="Alleen ongelezen" className={cn("ab-icon-btn flex h-8 shrink-0 items-center rounded-md px-2 text-[12px] font-medium focus-visible:outline-2 focus-visible:outline-primary", prefs.unreadOnly ? "bg-primary/12 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground")}>Ongelezen</button>
+      <button type="button" onClick={prefs.toggleDensity} aria-label={prefs.density === "compact" ? "Ruime weergave" : "Compacte weergave"} title={prefs.density === "compact" ? "Ruime weergave" : "Compacte weergave"} className={cn("ab-icon-btn flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary")}><SlidersHorizontal className="size-3.5" /></button>
     </div>
-    <div className={cn("relative", prefs.view === "taken" && "hidden")}>
-      <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-3 size-4 text-muted-foreground" />
-      <input type="search" aria-label="Zoek een gesprek" placeholder="Zoek een gesprek…" value={prefs.query} onChange={e => prefs.setQuery(e.target.value)} className="h-11 w-full rounded-lg border border-border/60 bg-muted/40 pl-9 pr-10 text-base outline-none placeholder:text-muted-foreground focus:border-primary" />
-      {prefs.query && <button type="button" aria-label="Zoekopdracht wissen" onClick={() => prefs.setQuery("")} className="absolute right-0 top-0 flex size-11 items-center justify-center text-muted-foreground"><X className="size-4" /></button>}
-    </div>
-    <div role="group" aria-label="Groepeer gesprekken" className="mt-1 flex border-b border-border/60">
-      {([ ["taken", "Taken"], ["attention", "Aandacht"], ["all", "Alle chats"], ["projects", "Projecten"] ] as const).map(([key,label]) => <button key={key} type="button" aria-pressed={prefs.view===key} onClick={() => prefs.setView(key)} className={cn("min-h-11 flex-1 border-b-2 px-1 text-[13px] font-medium focus-visible:outline-2 focus-visible:outline-primary", prefs.view===key ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}>{label}</button>)}
-    </div>
-    {project && <button type="button" onClick={onClearProject} className="mt-1 flex min-h-11 max-w-full items-center gap-2 text-xs text-muted-foreground" aria-label="Alle projecten tonen"><span className="truncate">{project}</span><X className="size-3 shrink-0" /></button>}
-
+    {project && <button type="button" onClick={onClearProject} className="mt-1 flex min-h-8 max-w-full items-center gap-2 px-1 text-xs text-muted-foreground" aria-label="Alle projecten tonen"><span className="truncate">{project}</span><X className="size-3 shrink-0" /></button>}
   </section>;
 }

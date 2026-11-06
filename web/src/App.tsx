@@ -14322,7 +14322,8 @@ function RailStage({
         // that truncated to about two words — "operation fix om…" — which is
         // not a title, it is a prefix. The type size is the shared thing; the
         // rail is what has to make room for it.
-        style={{ width: railCollapsed ? 56 : 320, overscrollBehaviorX: "contain" }}
+        data-agentbox-rail
+        style={{ width: railCollapsed ? 56 : 288, overscrollBehaviorX: "contain" }}
       >
         {/* Everything above the footer. The menu covers exactly this, so the
             machine switcher under it stays in view either way. */}
@@ -14437,17 +14438,17 @@ function RailStage({
             // rest; each lights up only while it is hovered, pressed or (the
             // folder) open. A highlight on the row with a second one on the
             // chip inside it read as two levels of the same control.
-            <div className="mb-1 flex h-10 w-full items-stretch gap-1.5">
+            <div className="ab-newrow mb-1 flex h-8 w-full items-stretch gap-1.5">
               <button
                 type="button"
                 onClick={startNew}
                 title="New session (C)"
                 className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg pl-2.5 pr-2.5 text-left text-[13px] font-medium text-foreground outline-none transition-colors hover:bg-muted active:bg-muted focus-visible:ring-2 focus-visible:ring-primary/60"
               >
-                <span className="flex size-8 shrink-0 items-center justify-center rounded-full border border-dashed border-border">
-                  <Plus className="size-3.5" />
+                <span className="flex size-5 shrink-0 items-center justify-center rounded-[5px] bg-foreground text-background">
+                  <Plus className="size-3" />
                 </span>
-                <span className="min-w-0 flex-1 truncate">New session</span>
+                <span className="min-w-0 flex-1 truncate">Nieuwe sessie</span>
                 {showFolderMenu ? null : (
                   <kbd className="shrink-0 rounded-[5px] bg-background/70 px-1.5 py-px font-mono text-[10px] font-medium text-muted-foreground ring-1 ring-inset ring-border">
                     C
@@ -15153,7 +15154,10 @@ const RailRow = memo(function RailRow({
   onSwipeRight,
   onSwipeLeft,
   unread = false,
+  hot = false,
 }: {
+  /** agentbox: rij die op Sam wacht of bezig is; alleen die houdt in compact een tweede regel. */
+  hot?: boolean;
   /** `data-rail-sid`, for surfaces that scroll/cursor rows by id. Omit where nothing looks a row up this way. */
   railKey?: string;
   collapsed: boolean;
@@ -15275,6 +15279,8 @@ const RailRow = memo(function RailRow({
       <div
         ref={fgRef}
         data-overview-row={collapsed ? undefined : "true"}
+        data-row-hot={hot ? "true" : undefined}
+        data-row-active={active ? "true" : undefined}
         role="button"
         tabIndex={0}
         aria-label={ariaLabel}
@@ -15498,6 +15504,7 @@ const RailItem = memo(function RailItem({
       active={active}
       cursored={cursored}
       unread={unread}
+      hot={busy || questions.length > 0 || session.status === "blocked"}
       ariaLabel={sessionRosterRowAriaLabel({
         title,
         working: busy,
@@ -25487,7 +25494,7 @@ export function NewSessionDialog({
                 "flex overflow-visible transition-[border-radius,padding] duration-200 ease-out motion-reduce:transition-none",
                 inlineExpanded
                   ? variant === "stage"
-                    ? "flex-col items-stretch gap-3 rounded-[30px] px-3.5 pb-3 pt-3.5"
+                    ? "flex-col items-stretch gap-1.5 rounded-2xl px-3 pb-2 pt-2.5"
                     : "flex-col items-stretch gap-1 rounded-[26px] px-3.5 pb-1 pt-2"
                   : cn("flex-row flex-wrap gap-x-2 rounded-[26px] px-2 pb-1 pt-[7px]", promptMultiline ? "items-end" : "items-center"),
               )
@@ -25562,7 +25569,7 @@ export function NewSessionDialog({
           className={cn(
             "border-0 bg-transparent text-base leading-relaxed shadow-none focus-visible:border-0 focus-visible:ring-0",
             variant === "stage"
-              ? "min-h-24 max-h-[42dvh] px-1 py-1"
+              ? "min-h-12 max-h-[42dvh] px-1 py-1 text-[15px]"
               : variant === "inline"
               ? cn(
                   "min-h-9 min-w-0 px-1 py-1.5",
@@ -25826,7 +25833,7 @@ export function NewSessionDialog({
       <div
         // overflow-visible on purpose: see the form's stage branch. The
         // suggest menus need to escape upward past the greeting.
-        className="flex min-h-0 shrink-0 flex-col items-center justify-start overflow-visible px-4 pt-[max(2rem,calc(50vh-200px))] pb-6"
+        className="flex min-h-0 shrink-0 flex-col items-center justify-start overflow-visible px-4 pt-[max(2rem,calc(50vh-150px))] pb-4"
         data-testid="new-session-stage"
         onKeyDown={(e) => {
           if (e.key === "Escape" && !e.defaultPrevented) {
@@ -25838,10 +25845,10 @@ export function NewSessionDialog({
         {/* Flat on the stage background: no card, no border, no shadow. This
             is the page's content, not a dialog over it, so it gets no dialog
             chrome. The field's own outline is the only frame. */}
-        <section aria-label="New session" className="w-full max-w-xl">
+        <section aria-label="New session" className="w-full max-w-2xl">
           {/* A greeting, not a dialog title. No close control: Esc, or
               opening any session from the rail, leaves this surface. */}
-          <h2 className="px-3 pb-3 text-[22px] font-semibold tracking-tight">
+          <h2 className="px-1 pb-2.5 text-xl font-semibold tracking-[-0.02em]">
             {dagdeel()}, {stageGreetingName}
           </h2>
           {formBody}

@@ -114,12 +114,10 @@ function TaakRij({ taak, onOpenSession, zet, klein, smal }: {
       <div className="min-w-0 flex-1">
         <button type="button" onClick={open} disabled={!kanOpenen}
           className="block w-full min-w-0 text-left focus-visible:outline-2 focus-visible:outline-primary disabled:cursor-default">
-          <span className="flex items-baseline gap-2">
-            <span className={cn("min-w-0 flex-1 font-medium leading-snug text-foreground", klein ? "text-[13px]" : "text-sm", klaar && "text-muted-foreground", "line-clamp-2")}>{taak.titel}</span>
-            <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">{wanneer(taak.afgevinkt && taak.status === "gedaan" ? taak.afgevinkt : taak.tijd)}</span>
-          </span>
+          <span className={cn("block truncate font-medium leading-snug text-foreground", klein ? "text-[13px]" : "text-sm", klaar && "text-muted-foreground")}>{taak.titel}</span>
           <span className="mt-0.5 block truncate text-xs text-muted-foreground">
             <span className="taak-soort font-medium">{LABEL[taak.soort]}</span>
+            {" · "}<span className="tabular-nums">{wanneer(taak.afgevinkt && taak.status === "gedaan" ? taak.afgevinkt : taak.tijd)}</span>
             {taak.wie ? <> · {taak.wie}</> : null}
             {taak.detail ? <> · {taak.detail}</> : null}
             {taak.link && !taak.sessie ? <ExternalLink aria-hidden="true" className="ml-1 inline size-3 align-[-2px]" /> : null}
@@ -127,7 +125,7 @@ function TaakRij({ taak, onOpenSession, zet, klein, smal }: {
         </button>
       </div>
       {taak.soort !== "gedaan" && (
-        <div className="taak-knoppen flex shrink-0 items-center">
+        <div className={cn("taak-knoppen flex shrink-0 items-center", smal && "taak-knoppen-zweef")}>
           {taak.status === "open" ? (
             <>
               {!smal && <button type="button" onClick={() => zet(taak.id, "later")} title="Later (morgen terug)" aria-label={`Later: ${taak.titel}`}
@@ -193,7 +191,7 @@ export function TakenVandaag({ onOpenSession, onAlles }: { onOpenSession?: (sid:
   if (!data) return null;
   const top = delen.open.slice(0, 6);
   return (
-    <section aria-label="Taken vandaag" className="taken taken-vandaag mx-auto w-full max-w-xl px-4 pb-8">
+    <section aria-label="Taken vandaag" className="taken taken-vandaag mx-auto w-full max-w-2xl px-4 pb-8">
       <div className="flex items-baseline justify-between gap-3 border-b border-border pb-2">
         <h2 className="text-[15px] font-semibold tracking-tight">Voor jou <span className="ml-1 text-sm font-normal tabular-nums text-muted-foreground">{delen.open.length}</span></h2>
         {onAlles && delen.open.length > top.length ? <button type="button" onClick={onAlles} className="min-h-9 text-xs font-medium text-primary hover:underline">Alle {delen.open.length} taken</button> : null}

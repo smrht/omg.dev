@@ -109,7 +109,7 @@ return {ok:true, complete:!r.data.nextPageToken, threads:out};
 
 
 AUTOMAAT = re.compile(r"no-?reply|noreply|notificat|mailer|administratie|beheer|wordpress@|woocommerce|"
-                      r"^\[|nieuwe bestelling|factuur|invoice|receipt|backlink offline|bevestiging", re.I)
+                      r"^\[|nieuwe bestelling|factuur|invoice|receipt|backlink offline|bevestiging|ahrefs|site audit|slow page|slow server|orphan page|broken page", re.I)
 
 
 def is_melding(van: str, onderwerp: str) -> bool:

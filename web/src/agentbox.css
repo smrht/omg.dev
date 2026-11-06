@@ -1,0 +1,146 @@
+/* agentbox: eigen huisstijl bovenop upstream omg (Sam, nov 2026).
+   Compact en modern, zelfde indeling. Ongelaagd en na index.css geladen, dus
+   dit wint van zowel de tokens als de Tailwind-utilities. Referenties: Linear
+   (dichtheid, zijbalkhiërarchie) en Conductor (één regel per sessie). */
+
+/* ── Tokens ─────────────────────────────────────────────────────────── */
+:root {
+  --font-sans: "Geist Variable", -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  --font-heading: var(--font-sans);
+  --font-mono: "Geist Mono Variable", ui-monospace, "SF Mono", Menlo, monospace;
+  --radius: 0.5rem;
+}
+:root:not(.dark) {
+  --background: #f5f5f3;
+  --shell-surface: #f5f5f3;
+  --foreground: #17171a;
+  --card: #ffffff;
+  --card-foreground: #17171a;
+  --stage-surface: #ffffff;
+  --stage-field: #ffffff;
+  --lfg-field-fill: #ffffff;
+  --popover: #ffffff;
+  --popover-foreground: #17171a;
+  --primary: #c2410c;
+  --primary-foreground: #ffffff;
+  --secondary: #efefed;
+  --secondary-foreground: #17171a;
+  --muted: #efefed;
+  --muted-foreground: #66666c;
+  --accent: rgba(23, 23, 26, 0.06);
+  --accent-foreground: #17171a;
+  --destructive: #c0262d;
+  --brand: #c2410c;
+  --ring: #c2410c;
+  --info: #2f5f8a;
+  --border: rgba(23, 23, 26, 0.09);
+  --input: rgba(23, 23, 26, 0.12);
+  --border-strong: rgba(23, 23, 26, 0.2);
+  --text-2: #3b3b40;
+  --code-bg: rgba(23, 23, 26, 0.05);
+}
+.dark {
+  --background: #0d0d0f;
+  --shell-surface: #0d0d0f;
+  --foreground: #ececee;
+  --card: #18181b;
+  --card-foreground: #ececee;
+  --stage-surface: #141416;
+  --stage-field: #1b1b1e;
+  --lfg-field-fill: #1b1b1e;
+  --popover: #1b1b1e;
+  --popover-foreground: #ececee;
+  --primary: #f0884e;
+  --primary-foreground: #17171a;
+  --secondary: #1f1f22;
+  --muted: #1f1f22;
+  --muted-foreground: #9b9ba2;
+  --accent: rgba(255, 255, 255, 0.06);
+  --brand: #f0884e;
+  --ring: #f0884e;
+  --info: #7fa7cc;
+  --border: rgba(255, 255, 255, 0.08);
+  --input: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  --code-bg: rgba(255, 255, 255, 0.06);
+}
+html, body { font-family: var(--font-sans); font-feature-settings: "ss01", "cv11"; -webkit-font-smoothing: antialiased; }
+code, kbd, pre, .font-mono { font-family: var(--font-mono); }
+
+/* ── Zijbalk ────────────────────────────────────────────────────────── */
+[data-agentbox-rail] .session-list-scroll { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; padding-top: 4px; }
+[data-agentbox-rail] .ab-newrow button { font-size: 13px; }
+
+/* Groepskoppen: klein, rustig, één hoogte. */
+.session-overview[data-overview-density] > div > div > button[aria-expanded] { min-height: 26px; font-size: 11px; letter-spacing: .02em; }
+
+/* Rijen. Compact = één regel (mark, titel, tijd); een rij die op Sam wacht of
+   bezig is houdt zijn tweede regel, want daar staat de reden. */
+.session-overview[data-overview-density="compact"] [data-overview-row] {
+  height: 32px; padding: 0 6px 0 8px; gap: 8px; border-radius: 6px;
+}
+.session-overview[data-overview-density="compact"] [data-overview-row][data-row-hot] { height: 46px; }
+.session-overview[data-overview-density="compact"] [data-overview-row]:not([data-row-hot]) .rail-preview { display: none; }
+.session-overview[data-overview-density="comfortable"] [data-overview-row] { height: 50px; padding: 0 6px 0 8px; gap: 10px; border-radius: 6px; }
+.session-overview[data-overview-density] .overview-row-title { font-size: 13.5px; font-weight: 500; letter-spacing: -0.005em; }
+.session-overview[data-overview-density] .overview-row-title.font-bold { font-weight: 650; }
+.session-overview[data-overview-density] .rail-preview { font-size: 12px; height: 16px; }
+.session-overview[data-overview-density] [data-overview-mark] { width: 18px; height: 18px; }
+.session-overview[data-overview-density] [data-overview-mark] > img { width: 16px; height: 16px; }
+.session-overview[data-overview-density] [data-overview-mark] > :not(img) { max-width: 18px; max-height: 18px; }
+.session-overview[data-overview-density] [data-overview-mark] svg { width: 16px; height: 16px; }
+.session-overview[data-overview-density] [data-overview-row] .h-10.w-9 { height: 24px; width: 30px; }
+.session-overview[data-overview-density] [data-overview-row] .tabular-nums { font-size: 11px; }
+/* Open rij: vlak gemarkeerd, geen glasrand met schaduw. */
+.session-overview[data-overview-density] [data-overview-row][data-row-active] {
+  background: var(--accent) !important; box-shadow: none !important; border-color: transparent !important;
+}
+.session-overview[data-overview-density] [data-overview-row][data-row-active]::before { display: none; }
+.session-overview[data-overview-density] [data-overview-row]:hover { background: var(--accent); }
+/* "Wacht op jou"-rij: geen oranje kader meer, een streep links zegt genoeg. */
+.session-overview [data-overview-row].lfg-gborder,
+.session-overview [data-overview-row][class*="ring-amber"],
+.session-overview [data-overview-row][class*="border-amber"] { border-color: transparent !important; }
+
+/* ── Werkbalk ───────────────────────────────────────────────────────── */
+.ab-search::-webkit-search-cancel-button { display: none; }
+.bg-primary\/12 { background: color-mix(in oklab, var(--primary) 12%, transparent); }
+
+/* ── Taken ──────────────────────────────────────────────────────────── */
+.taken .taak { padding-block: 7px; gap: 10px; }
+.taken .taak .taak-stip { margin-top: 6px; width: 6px; height: 6px; }
+[data-agentbox-rail] .taken { padding-inline: 8px; }
+[data-agentbox-rail] .taken .taak { padding-block: 5px; }
+
+[data-agentbox-rail] .taken .taak .text-sm { font-size: 13px; }
+.taken .taak-knoppen button { width: 28px; height: 28px; }
+
+/* ── Chat ───────────────────────────────────────────────────────────── */
+.markdown { font-size: 14.5px; line-height: 1.6; }
+.markdown h1 { font-size: 17px; }
+.markdown h2 { font-size: 15.5px; border-bottom: 0; padding-bottom: 0; }
+.markdown h3 { font-size: 14.5px; }
+.markdown code { font-size: 0.86em; border-radius: 4px; }
+.msg-text.user-bubble { font-size: 14.5px; line-height: 1.55; }
+
+/* ── Touch: 44px blijft, alleen typografie en lucht worden strakker ── */
+@media (pointer: coarse) {
+  .session-overview[data-overview-density="compact"] [data-overview-row] { height: 44px; }
+  .session-overview[data-overview-density="compact"] [data-overview-row][data-row-hot] { height: 56px; }
+  .ab-toolbar .ab-search, .ab-toolbar .ab-icon-btn { height: 40px; min-width: 40px; }
+  .ab-toolbar .ab-tab { height: 36px; font-size: 13px; }
+  .taken .taak-knoppen button { width: 40px; height: 40px; }
+  .markdown, .msg-text.user-bubble { font-size: 15.5px; }
+}
+
+/* Toetsenbordcursor: dunne lijn, geen oranje kader. */
+[data-rail-sid].ring-2 { --tw-ring-shadow: 0 0 0 1px var(--border-strong) inset; box-shadow: inset 0 0 0 1px var(--border-strong) !important; }
+
+/* Smalle takenlijst (zijbalk): titel krijgt de hele breedte, het vinkje
+   zweeft rechts en verschijnt bij hover of focus. Op touch altijd zichtbaar. */
+.taken .taak-knoppen-zweef { position: absolute; right: 0; top: 50%; translate: 0 -50%; opacity: 0; background: var(--shell-surface, var(--background)); border-radius: 6px; }
+.taken .taak:hover .taak-knoppen-zweef, .taken .taak-knoppen-zweef:focus-within { opacity: 1; }
+@media (pointer: coarse) { .taken .taak-knoppen-zweef { position: static; translate: none; opacity: 1; } }
+/* Nieuwe sessie houdt zijn label; de mapkiezer geeft ruimte. */
+.ab-newrow > :last-child { min-width: 0; flex-shrink: 1; }
+.ab-newrow > button:first-child { flex-shrink: 0; flex-basis: auto; }
