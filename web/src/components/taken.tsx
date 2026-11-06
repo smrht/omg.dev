@@ -158,10 +158,14 @@ function Bronregel({ data }: { data: TakenData }) {
 }
 
 /** De Taken-tab in de zijbalk: alles, gegroepeerd. */
-export function TakenLijst({ onOpenSession, smal }: { onOpenSession?: (sid: string) => void; smal?: boolean }) {
+export function TakenLijst({ onOpenSession, smal, zoek = "" }: { onOpenSession?: (sid: string) => void; smal?: boolean; zoek?: string }) {
   const { data, fout, zet } = useTaken();
   const [meldingenOpen, setMeldingenOpen] = useState(false);
-  const delen = useMemo(() => deelTaken(data?.items ?? []), [data]);
+  const delen = useMemo(() => {
+    const naald = zoek.trim().toLowerCase();
+    const items = (data?.items ?? []).filter(t => !naald || [t.titel, t.wie, t.detail].some(v => (v ?? "").toLowerCase().includes(naald)));
+    return deelTaken(items);
+  }, [data, zoek]);
   if (!data) return <p role="status" className="px-3 py-6 text-sm text-muted-foreground">{fout ? "Taken niet bereikbaar." : "Taken laden…"}</p>;
   return (
     <section aria-label="Taken" className="taken px-3 pb-4">

@@ -62,22 +62,23 @@ export function UserFilterMenu({
               // it left a ring of card colour around the face, which is what
               // made it look like a card with the island already gone. The
               // icon fallbacks are line art and still need a body.
-              selected?.avatar
+              false
                 ? active
                   ? "ring-2 ring-primary/40"
                   : ""
                 : cn(
                     "border",
                     active
-                      ? "border-primary/40 text-primary"
+                      ? "border-transparent bg-muted text-foreground"
                       : "border-border bg-muted/70 text-foreground",
                   ),
             )}
           />
         }
       >
-        {selected?.avatar ? (
-          <img src={selected.avatar} alt="" className="size-full object-cover" />
+        {selected ? (
+          // agentbox: een rustige letter in plaats van de profielfoto.
+          <span className="text-[11px] font-semibold uppercase leading-none">{/^(contactexpertly|smrht)@/.test(selected.email) ? "S" : (selected.name ?? selected.email).trim().charAt(0)}</span>
         ) : active ? (
           <UserRound className={cn("shrink-0", size === "sm" ? "size-3.5" : "size-[18px]")} />
         ) : (

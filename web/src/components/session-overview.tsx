@@ -1,6 +1,7 @@
-import { useState, useSyncExternalStore } from "react";
+import { useState, useSyncExternalStore, type ReactNode } from "react";
 import { Search, X, SlidersHorizontal } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { overviewState, sessionMatchesSearch } from "@/lib/session-overview";
 import { groupNodesByProject, type ProjectGroup } from "@/lib/session-groups";
 import type { Session } from "../App";
@@ -67,25 +68,40 @@ export function useOverviewPreferences() {
     toggleDensity: () => write("density", density === "compact" ? "comfortable" : "compact"),
     query, setQuery, unreadOnly, setUnreadOnly };
 }
-export function OverviewToolbar({ prefs, count, project, onClearProject }: {
-  prefs: ReturnType<typeof useOverviewPreferences>; count: number; project?: string; onClearProject?: () => void;
+const VIEWS = [["taken", "Taken"], ["attention", "Aandacht"], ["all", "Alles"], ["projects", "Projecten"]] as const;
+
+export function OverviewToolbar({ prefs, count, project, onClearProject, folderMenu }: {
+  prefs: ReturnType<typeof useOverviewPreferences>; count: number; project?: string; onClearProject?: () => void; folderMenu?: ReactNode;
 }) {
-  // agentbox: compacte werkbalk. Geen aparte kopregel meer: het aantal staat in
-  // de segmentknop staat bovenaan en verspringt niet; zoeken, Ongelezen en dichtheid zijn kleine knoppen ernaast, de vier
-  // weergaven een segmentknop. Op touch houden de knoppen 44px (index-css).
+  // agentbox: één zoekregel met twee kleine iconen (map, filter) en daaronder
+  // vier tekst-tabs met een streep die naar de gekozen weergave schuift. Zoeken
+  // werkt ook in Taken. Op touch houden de knoppen 44px (agentbox.css).
   const taken = prefs.view === "taken";
-  return <section aria-label="Gesprekkenoverzicht" onKeyDown={e => { if (!e.metaKey && !e.ctrlKey && !e.altKey) e.stopPropagation(); }} className="overview-toolbar ab-toolbar px-1.5 pb-1.5">
-    <div role="group" aria-label="Groepeer gesprekken" className="ab-tabs grid grid-cols-4 gap-0.5 rounded-md bg-muted p-0.5">
-      {([ ["taken", "Taken"], ["attention", "Aandacht"], ["all", "Alles"], ["projects", "Projecten"] ] as const).map(([key,label]) => <button key={key} type="button" aria-pressed={prefs.view===key} onClick={() => prefs.setView(key)} className={cn("ab-tab h-7 truncate rounded-[5px] px-0 text-[12px] font-medium transition-colors focus-visible:outline-2 focus-visible:outline-primary", prefs.view===key ? "bg-background text-foreground shadow-[0_1px_2px_rgba(0,0,0,.12)]" : "text-muted-foreground hover:text-foreground")}>{label}</button>)}
-    </div>
-    <div className={cn("mt-1.5 flex items-center gap-1", taken && "hidden")}>
+  const index = Math.max(0, VIEWS.findIndex(([key]) => key === prefs.view));
+  return <section aria-label="Gesprekkenoverzicht" onKeyDown={e => { if (!e.metaKey && !e.ctrlKey && !e.altKey) e.stopPropagation(); }} className="overview-toolbar ab-toolbar px-2 pb-1">
+    <div className="flex items-center gap-0.5">
       <div className="relative min-w-0 flex-1">
         <Search aria-hidden="true" className="ab-search-icon pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-        <input type="search" aria-label="Zoek een gesprek" placeholder="Zoek" value={prefs.query} onChange={e => prefs.setQuery(e.target.value)} className="ab-search h-8 w-full rounded-md border border-transparent bg-muted pl-8 pr-8 text-[13px] outline-none placeholder:text-muted-foreground focus:border-primary/60" />
+        <input type="search" aria-label={taken ? "Zoek in taken" : "Zoek een gesprek"} placeholder={taken ? "Zoek in taken" : `Zoek in ${count} gesprekken`} value={prefs.query} onChange={e => prefs.setQuery(e.target.value)} className="ab-search h-8 w-full rounded-md border border-transparent bg-muted/70 pl-8 pr-7 text-[13px] outline-none placeholder:text-muted-foreground focus:border-border focus:bg-background" />
         {prefs.query && <button type="button" aria-label="Zoekopdracht wissen" onClick={() => prefs.setQuery("")} className="ab-icon-btn absolute right-0 top-1/2 flex size-8 -translate-y-1/2 items-center justify-center text-muted-foreground"><X className="size-3.5" /></button>}
       </div>
-      <button type="button" aria-pressed={prefs.unreadOnly} onClick={() => prefs.setUnreadOnly(!prefs.unreadOnly)} title="Alleen ongelezen" className={cn("ab-icon-btn flex h-8 shrink-0 items-center rounded-md px-2 text-[12px] font-medium focus-visible:outline-2 focus-visible:outline-primary", prefs.unreadOnly ? "bg-primary/12 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground")}>Ongelezen</button>
-      <button type="button" onClick={prefs.toggleDensity} aria-label={prefs.density === "compact" ? "Ruime weergave" : "Compacte weergave"} title={prefs.density === "compact" ? "Ruime weergave" : "Compacte weergave"} className={cn("ab-icon-btn flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary")}><SlidersHorizontal className="size-3.5" /></button>
+      <div className={cn("flex items-center", taken && "invisible")}>
+        {folderMenu}
+        <DropdownMenu>
+          <DropdownMenuTrigger render={<button type="button" aria-label="Weergave en filter" title="Weergave en filter" className={cn("ab-icon-btn relative flex size-8 shrink-0 items-center justify-center rounded-md hover:bg-muted data-[popup-open]:bg-muted focus-visible:outline-2 focus-visible:outline-primary", prefs.unreadOnly ? "text-primary" : "text-muted-foreground hover:text-foreground")} />}>
+            <SlidersHorizontal className="size-4" />
+            {prefs.unreadOnly ? <span aria-hidden="true" className="absolute right-1.5 top-1.5 size-1.5 rounded-full bg-primary" /> : null}
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-44">
+            <DropdownMenuCheckboxItem checked={prefs.unreadOnly} onCheckedChange={(v) => prefs.setUnreadOnly(!!v)}>Alleen ongelezen</DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem checked={prefs.density === "compact"} onCheckedChange={() => prefs.toggleDensity()}>Compacte rijen</DropdownMenuCheckboxItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </div>
+    <div role="group" aria-label="Weergave" className="ab-tabs relative mt-1.5 grid grid-cols-4 border-b border-border">
+      {VIEWS.map(([key, label]) => <button key={key} type="button" aria-pressed={prefs.view === key} onClick={() => prefs.setView(key)} className={cn("ab-tab h-8 truncate px-0 text-[12.5px] transition-colors focus-visible:outline-2 focus-visible:outline-primary", prefs.view === key ? "font-semibold text-foreground" : "font-medium text-muted-foreground hover:text-foreground")}>{label}</button>)}
+      <span aria-hidden="true" className="ab-tab-streep pointer-events-none absolute -bottom-px left-0 h-[2px] w-1/4 rounded-full bg-foreground" style={{ transform: `translateX(${index * 100}%)` }} />
     </div>
     {project && <button type="button" onClick={onClearProject} className="mt-1 flex min-h-8 max-w-full items-center gap-2 px-1 text-xs text-muted-foreground" aria-label="Alle projecten tonen"><span className="truncate">{project}</span><X className="size-3 shrink-0" /></button>}
   </section>;

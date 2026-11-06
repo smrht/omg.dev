@@ -493,6 +493,7 @@ import {
   Camera,
   X,
   Ellipsis,
+  SquarePen,
 } from "lucide-react";
 import { toast } from "@/lib/notify";
 import { BrowserLoginCard } from "@/components/browser-login-card";
@@ -9761,7 +9762,7 @@ export function App() {
             ) : null}
             {isMobile ? null : (
               <>
-                {embedded ? null : <UpdateNavButton />}
+                {null /* agentbox: geen updateknop */}
                 <AskNavButton
                   active={tab === "notifications"}
                   onOpen={() => setTab("notifications")}
@@ -10537,9 +10538,9 @@ function ProductBrand({
         omgBrandToneClass(hosted),
       )}
     >
-      <OmgBrandMark className="size-5" />
-      <span className="whitespace-nowrap text-[15px] font-bold leading-none tracking-[-0.045em]">
-        omg.dev
+      <OmgBrandMark className="size-[18px]" />
+      <span className="whitespace-nowrap text-[14px] font-semibold leading-none tracking-[-0.02em]">
+        agentbox
       </span>
     </span>
   );
@@ -12732,7 +12733,7 @@ function LiveView({
           could not be scanned, only read. The row is the unit now; the
           transcript lives on the session's own page. */}
       <OverviewToolbar prefs={overviewPrefs} count={overviewGroups.reduce((n,g) => n+g.count,0)} project={projectFilter !== "__all" ? shortProject(projectFilter) : undefined} onClearProject={() => onProjectChange?.("__all")} />
-      {overviewPrefs.view === "taken" ? <TakenLijst onOpenSession={openSessionPage} /> : !overviewGroups.length && <p role="status" className="px-4 py-6 text-sm text-muted-foreground">Geen gesprekken gevonden. Pas je zoekopdracht of filters aan.</p>}
+      {overviewPrefs.view === "taken" ? <TakenLijst zoek={overviewPrefs.query} onOpenSession={openSessionPage} /> : !overviewGroups.length && <p role="status" className="px-4 py-6 text-sm text-muted-foreground">Geen gesprekken gevonden. Pas je zoekopdracht of filters aan.</p>}
       <>
 
       <SessionGroups
@@ -14397,11 +14398,19 @@ function RailStage({
             )}
             <div className="ml-auto flex items-center gap-1">
               {onOpenAsk ? (
-                <>
-                  {hosted ? null : <UpdateNavButton />}
-                  <AskNavButton active={false} onOpen={() => { onHostNavigate?.(); onOpenAsk(); }} />
-                </>
+                <AskNavButton active={false} onOpen={() => { onHostNavigate?.(); onOpenAsk(); }} />
               ) : null}
+              {/* agentbox: Nieuwe sessie als pen-icoon in de kop (C werkt ook);
+                  de updateknop is weg, updates lopen via onze eigen repo. */}
+              <button
+                type="button"
+                onClick={startNew}
+                aria-label="Nieuwe sessie"
+                title="Nieuwe sessie (C)"
+                className="ab-icon-btn flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary"
+              >
+                <SquarePen className="size-4" />
+              </button>
               {onUserChange ? (
                 <UserFilterMenu
                   value={userFilter}
@@ -14430,52 +14439,22 @@ function RailStage({
               as the first row of this list. Chat only — the Bots surface has
               its own New bot. */}
 
-          {!railCollapsed ? (
-            // "New session in <folder>". The folder picker sits on this row's
-            // trailing edge, where the C shortcut hint was, instead of taking
-            // a row of its own above the list. The hint lives in the title.
-            // Two items side by side at one height. Neither has a surface at
-            // rest; each lights up only while it is hovered, pressed or (the
-            // folder) open. A highlight on the row with a second one on the
-            // chip inside it read as two levels of the same control.
-            <div className="ab-newrow mb-1 flex h-8 w-full items-stretch gap-1.5">
-              <button
-                type="button"
-                onClick={startNew}
-                title="New session (C)"
-                className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg pl-2.5 pr-2.5 text-left text-[13px] font-medium text-foreground outline-none transition-colors hover:bg-muted active:bg-muted focus-visible:ring-2 focus-visible:ring-primary/60"
-              >
-                <span className="flex size-5 shrink-0 items-center justify-center rounded-[5px] bg-foreground text-background">
-                  <Plus className="size-3" />
-                </span>
-                <span className="min-w-0 flex-1 truncate">Nieuwe sessie</span>
-                {showFolderMenu ? null : (
-                  <kbd className="shrink-0 rounded-[5px] bg-background/70 px-1.5 py-px font-mono text-[10px] font-medium text-muted-foreground ring-1 ring-inset ring-border">
-                    C
-                  </kbd>
-                )}
-              </button>
-              {showFolderMenu ? (
-                <ProjectFolderMenu
-                  trigger="chip"
-                  value={projectFilter}
-                  projects={projectOptions}
-                  labelFor={(value) => projectFilterLabel(value, shortProject)}
-                  onChange={(next) => onProjectChange?.(next)}
-                  counts={projectCounts}
-                  canRemove={(project) => repos.some((repo) => repoProject(repo) === project)}
-                  onRemove={async (project) => {
-                    const repo = repos.find((candidate) => repoProject(candidate) === project);
-                    if (repo) await unlinkRepoFromList(repo, onReposChanged);
-                  }}
-                  onAddFolder={() => openFolderBrowser(false)}
-                  onNewFolder={() => openFolderBrowser(true)}
-                />
-              ) : null}
-            </div>
-          ) : null}
-          {!railCollapsed && <OverviewToolbar prefs={overviewPrefs} count={overviewGroups.reduce((n,g) => n+g.count,0)} project={projectFilter !== "__all" ? shortProject(projectFilter) : undefined} onClearProject={() => onProjectChange?.("__all")} />}
-          {!railCollapsed && overviewPrefs.view === "taken" ? <TakenLijst smal onOpenSession={(sid) => activate(sid, false)} /> : !overviewGroups.length && !railCollapsed && <p role="status" className="px-3 py-6 text-sm text-muted-foreground">Geen gesprekken gevonden. Pas je zoekopdracht of filters aan.</p>}
+          {!railCollapsed && <OverviewToolbar folderMenu={showFolderMenu ? (      <ProjectFolderMenu
+        trigger="icon"
+        value={projectFilter}
+        projects={projectOptions}
+        labelFor={(value) => projectFilterLabel(value, shortProject)}
+        onChange={(next) => onProjectChange?.(next)}
+        counts={projectCounts}
+        canRemove={(project) => repos.some((repo) => repoProject(repo) === project)}
+        onRemove={async (project) => {
+          const repo = repos.find((candidate) => repoProject(candidate) === project);
+          if (repo) await unlinkRepoFromList(repo, onReposChanged);
+        }}
+        onAddFolder={() => openFolderBrowser(false)}
+        onNewFolder={() => openFolderBrowser(true)}
+      />) : null} prefs={overviewPrefs} count={overviewGroups.reduce((n,g) => n+g.count,0)} project={projectFilter !== "__all" ? shortProject(projectFilter) : undefined} onClearProject={() => onProjectChange?.("__all")} />}
+          {!railCollapsed && overviewPrefs.view === "taken" ? <TakenLijst smal zoek={overviewPrefs.query} onOpenSession={(sid) => activate(sid, false)} /> : !overviewGroups.length && !railCollapsed && <p role="status" className="px-3 py-6 text-sm text-muted-foreground">Geen gesprekken gevonden. Pas je zoekopdracht of filters aan.</p>}
           <SessionGroups
             groups={overviewGroups}
             pinnedNodes={[]}
@@ -15155,9 +15134,11 @@ const RailRow = memo(function RailRow({
   onSwipeLeft,
   unread = false,
   hot = false,
+  busy = false,
 }: {
   /** agentbox: rij die op Sam wacht of bezig is; alleen die houdt in compact een tweede regel. */
   hot?: boolean;
+  busy?: boolean;
   /** `data-rail-sid`, for surfaces that scroll/cursor rows by id. Omit where nothing looks a row up this way. */
   railKey?: string;
   collapsed: boolean;
@@ -15280,6 +15261,7 @@ const RailRow = memo(function RailRow({
         ref={fgRef}
         data-overview-row={collapsed ? undefined : "true"}
         data-row-hot={hot ? "true" : undefined}
+        data-row-busy={busy ? "true" : undefined}
         data-row-active={active ? "true" : undefined}
         role="button"
         tabIndex={0}
@@ -15505,6 +15487,7 @@ const RailItem = memo(function RailItem({
       cursored={cursored}
       unread={unread}
       hot={busy || questions.length > 0 || session.status === "blocked"}
+      busy={busy}
       ariaLabel={sessionRosterRowAriaLabel({
         title,
         working: busy,

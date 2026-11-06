@@ -63,7 +63,7 @@ export type ProjectFolderMenuProps = {
    * and capped, for the trailing edge of the rail's New session row, where
    * it reads as "new session in this folder".
    */
-  trigger?: "bar" | "chip";
+  trigger?: "bar" | "chip" | "icon";
 };
 
 const ROW = "flex h-9 w-full min-w-0 items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] outline-none transition-colors";
@@ -124,7 +124,9 @@ export function ProjectFolderMenu({
             title={label}
             className={cn(
               "flex min-w-0 items-center text-left text-foreground outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/60",
-              trigger === "chip"
+              trigger === "icon"
+                ? "ab-icon-btn size-8 shrink-0 justify-center rounded-md hover:bg-muted data-[popup-open]:bg-muted"
+                : trigger === "chip"
                 ? // Capped so a long folder name cannot push New session
                   // out of its own row; the full name is in the title.
                   "h-10 max-w-[10rem] shrink-0 gap-1.5 rounded-lg px-3 text-[13px] font-medium hover:bg-muted active:bg-muted data-[popup-open]:bg-muted"
@@ -133,16 +135,22 @@ export function ProjectFolderMenu({
           >
             {/* No project is a selection, not an action, and not a folder:
                 it gets no icon. Only real folders show the folder icon. */}
-            {value === NO_PROJECT_FILTER ? null : (
-              <Folder className={cn("shrink-0 text-muted-foreground", "size-3.5")} />
+            {trigger === "icon" ? (
+              <Folder className={cn("size-4 shrink-0", value === "__all" ? "text-muted-foreground" : "text-primary")} />
+            ) : (
+              <>
+                {value === NO_PROJECT_FILTER ? null : (
+                  <Folder className={cn("shrink-0 text-muted-foreground", "size-3.5")} />
+                )}
+                <span className="min-w-0 flex-1 truncate">{label}</span>
+                <ChevronDown className={cn("shrink-0 text-muted-foreground/70", "size-3.5")} />
+              </>
             )}
-            <span className="min-w-0 flex-1 truncate">{label}</span>
-            <ChevronDown className={cn("shrink-0 text-muted-foreground/70", "size-3.5")} />
           </button>
         }
       />
       <Popover.Portal>
-        <Popover.Positioner side="bottom" align={trigger === "chip" ? "end" : "start"} sideOffset={6} className="isolate z-[170] outline-none">
+        <Popover.Positioner side="bottom" align={trigger === "bar" ? "start" : "end"} sideOffset={6} className="isolate z-[170] outline-none">
           <Popover.Popup
             initialFocus={page === "pick" && searchable ? inputRef : true}
             data-testid="project-folder-menu"

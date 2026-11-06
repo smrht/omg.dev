@@ -1,5 +1,3 @@
-import { useId } from "react";
-
 import { cn } from "@/lib/utils";
 
 /**
@@ -13,24 +11,12 @@ import { cn } from "@/lib/utils";
  * entirely — that is what the old LFG mark was doing here.
  */
 export function OmgBrandMark({ className }: { className?: string }) {
-  const maskId = useId();
+  // agentbox: een doos met een agent erin. De doos volgt de tekstkleur, de
+  // stip is het accent, zodat het merk in licht en donker hetzelfde zegt.
   return (
-    <svg
-      viewBox="0 0 100 100"
-      className={cn("size-6 shrink-0", className)}
-      aria-hidden
-    >
-      <mask id={maskId}>
-        <rect width="100" height="100" fill="white" />
-        <circle cx="71" cy="29" r="14" fill="black" />
-      </mask>
-      <circle
-        cx="50"
-        cy="50"
-        r="44"
-        fill="currentColor"
-        mask={`url(#${maskId})`}
-      />
+    <svg viewBox="0 0 24 24" className={cn("size-6 shrink-0", className)} aria-hidden>
+      <rect x="2.5" y="2.5" width="19" height="19" rx="5.5" fill="none" stroke="currentColor" strokeWidth="2.2" />
+      <circle cx="12" cy="12" r="3.6" fill="var(--primary)" />
     </svg>
   );
 }
@@ -42,5 +28,5 @@ export function OmgBrandMark({ className }: { className?: string }) {
  * on your own machine, said quietly rather than said with a different logo.
  */
 export function omgBrandToneClass(hosted: boolean): string {
-  return hosted ? "text-[#ff5530]" : "text-muted-foreground";
+  return hosted ? "text-foreground" : "text-foreground";
 }
