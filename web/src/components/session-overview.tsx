@@ -6,7 +6,7 @@ import { groupNodesByProject, type ProjectGroup } from "@/lib/session-groups";
 import type { Session } from "../App";
 
 export type OverviewNode = { session: Session; children: OverviewNode[] };
-export type OverviewView = "attention" | "all" | "projects";
+export type OverviewView = "taken" | "attention" | "all" | "projects";
 const EVENT = "omg-overview-preferences";
 const KEY = "omg:overview:";
 const subscribe = (cb: () => void) => {
@@ -36,6 +36,7 @@ export function buildOverviewGroups({ nodes, pins, view, query, unreadOnly, unre
   unreadOnly: boolean; unread: ReadonlySet<string>; busy: Record<string, boolean>;
   questions: ReadonlySet<string>; shortProject: (p: string) => string;
 }): ProjectGroup<OverviewNode>[] {
+  if (view === "taken") return [];
   const filtered = filterOverview(nodes, s => sessionMatchesSearch(s, query) && (!unreadOnly || unread.has(s.sessionId || "")));
   const count = (n: OverviewNode) => flattenOverview([n]).length;
   if (view === "projects") return groupNodesByProject(filtered, count, shortProject);
@@ -57,7 +58,7 @@ export function buildOverviewGroups({ nodes, pins, view, query, unreadOnly, unre
 }
 export function useOverviewPreferences() {
   const rawView = useSyncExternalStore(subscribe, () => read("view", "attention"), () => "attention");
-  const view: OverviewView = rawView === "all" || rawView === "projects" ? rawView : "attention";
+  const view: OverviewView = rawView === "all" || rawView === "projects" || rawView === "taken" ? rawView : "attention";
   const rawDensity = useSyncExternalStore(subscribe, () => read("density", "compact"), () => "compact");
   const density = rawDensity === "comfortable" ? "comfortable" : "compact";
   const [query, setQuery] = useState("");
@@ -71,19 +72,19 @@ export function OverviewToolbar({ prefs, count, project, onClearProject }: {
 }) {
   return <section aria-label="Gesprekkenoverzicht" onKeyDown={e => { if (!e.metaKey && !e.ctrlKey && !e.altKey) e.stopPropagation(); }} className="overview-toolbar px-2 pb-2">
     <div className="mb-2 flex items-center justify-between gap-2">
-      <h2 className="text-base font-semibold tracking-tight">Gesprekken <span className="ml-1 text-xs font-normal text-muted-foreground">{count}</span></h2>
+      <h2 className="text-base font-semibold tracking-tight">{prefs.view === "taken" ? "Taken" : <>Gesprekken <span className="ml-1 text-xs font-normal text-muted-foreground">{count}</span></>}</h2>
       <div className="flex items-center gap-1">
-        <label className="flex min-h-11 cursor-pointer items-center gap-1.5 text-xs text-muted-foreground"><input type="checkbox" checked={prefs.unreadOnly} onChange={e => prefs.setUnreadOnly(e.target.checked)} className="size-3.5 accent-primary" />Ongelezen</label>
+        <label className={cn("flex min-h-11 cursor-pointer items-center gap-1.5 text-xs text-muted-foreground", prefs.view === "taken" && "hidden")}><input type="checkbox" checked={prefs.unreadOnly} onChange={e => prefs.setUnreadOnly(e.target.checked)} className="size-3.5 accent-primary" />Ongelezen</label>
       <button type="button" onClick={prefs.toggleDensity} aria-label={prefs.density === "compact" ? "Ruime weergave" : "Compacte weergave"} title={prefs.density === "compact" ? "Ruime weergave" : "Compacte weergave"} className="flex min-h-11 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground hover:bg-muted focus-visible:outline-2 focus-visible:outline-primary"><SlidersHorizontal className="size-4" /><span className="sr-only">{prefs.density === "compact" ? "Compact" : "Ruim"}</span></button>
       </div>
     </div>
-    <div className="relative">
+    <div className={cn("relative", prefs.view === "taken" && "hidden")}>
       <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-3 size-4 text-muted-foreground" />
       <input type="search" aria-label="Zoek een gesprek" placeholder="Zoek een gesprek…" value={prefs.query} onChange={e => prefs.setQuery(e.target.value)} className="h-11 w-full rounded-lg border border-border/60 bg-muted/40 pl-9 pr-10 text-base outline-none placeholder:text-muted-foreground focus:border-primary" />
       {prefs.query && <button type="button" aria-label="Zoekopdracht wissen" onClick={() => prefs.setQuery("")} className="absolute right-0 top-0 flex size-11 items-center justify-center text-muted-foreground"><X className="size-4" /></button>}
     </div>
     <div role="group" aria-label="Groepeer gesprekken" className="mt-1 flex border-b border-border/60">
-      {([ ["attention", "Aandacht"], ["all", "Alle chats"], ["projects", "Projecten"] ] as const).map(([key,label]) => <button key={key} type="button" aria-pressed={prefs.view===key} onClick={() => prefs.setView(key)} className={cn("min-h-11 flex-1 border-b-2 px-1 text-[13px] font-medium focus-visible:outline-2 focus-visible:outline-primary", prefs.view===key ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}>{label}</button>)}
+      {([ ["taken", "Taken"], ["attention", "Aandacht"], ["all", "Alle chats"], ["projects", "Projecten"] ] as const).map(([key,label]) => <button key={key} type="button" aria-pressed={prefs.view===key} onClick={() => prefs.setView(key)} className={cn("min-h-11 flex-1 border-b-2 px-1 text-[13px] font-medium focus-visible:outline-2 focus-visible:outline-primary", prefs.view===key ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}>{label}</button>)}
     </div>
     {project && <button type="button" onClick={onClearProject} className="mt-1 flex min-h-11 max-w-full items-center gap-2 text-xs text-muted-foreground" aria-label="Alle projecten tonen"><span className="truncate">{project}</span><X className="size-3 shrink-0" /></button>}
 

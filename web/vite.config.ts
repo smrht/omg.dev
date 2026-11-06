@@ -89,6 +89,8 @@ function precompressAssets(): Plugin {
 // lfg's Bun server (serve.ts) owns process-control + streams under /api/*.
 // In dev the Vite server proxies them through so the SPA stays single-origin.
 const API_TARGET = process.env.LFG_API_TARGET ?? "http://localhost:8766";
+// agentbox: Taken-API (agentbox/taken/api.py) draait los op 8790.
+const TAKEN_TARGET = process.env.AGENTBOX_TAKEN_TARGET ?? "http://127.0.0.1:8790";
 const BUILD_SOURCEMAP = process.env.LFG_WEB_SOURCEMAP === "0" ? false : "hidden";
 
 // The version Settings shows as "Frontend". Read from the ROOT package.json,
@@ -158,6 +160,7 @@ export default defineConfig({
     allowedHosts: true,
     hmr: { clientPort: 443 },
     proxy: {
+      "/api/taken": { target: TAKEN_TARGET, changeOrigin: true },
       "/api": { target: API_TARGET, changeOrigin: true, ws: true },
     },
   },
@@ -169,6 +172,7 @@ export default defineConfig({
     port: 5174,
     allowedHosts: true,
     proxy: {
+      "/api/taken": { target: TAKEN_TARGET, changeOrigin: true },
       "/api": { target: API_TARGET, changeOrigin: true, ws: true },
     },
   },

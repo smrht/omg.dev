@@ -43,23 +43,23 @@ export function LiveHeaderContext({
   // never a person, and it rendered as "Welcome, Unassigned" in the preview.
   const rawName = viewerName?.trim() || user?.name?.trim() || (identity ? identity.split("@")[0] : "");
   const firstNamePart = rawName.split(/\s+/)[0] ?? "";
-  const firstName = firstNamePart
-    ? `${firstNamePart.charAt(0).toUpperCase()}${firstNamePart.slice(1)}`
-    : "";
+  // Eigen box: de rosternaam is een handle, de kop noemt Sam bij zijn voornaam.
+  void firstNamePart;
+  const firstName = "Sam";
   const questionCount = questions.length;
   const showCard = intro;
   const actionInMotion = busyCount > 0;
   const [showAmbientStatus, setShowAmbientStatus] = useState(false);
-  const ambientContext = `${busyCount} agent${busyCount === 1 ? "" : "s"} building`;
-  const welcomeMessage = firstName ? `Welcome, ${firstName}` : "Welcome";
+  const ambientContext = `${busyCount} agent${busyCount === 1 ? "" : "s"} bezig`;
+  const welcomeMessage = firstName ? `Hoi ${firstName}` : "Hoi";
   const headline = connectionText ?? (questionCount
     ? questionCount === 1
       ? firstName
-        ? `${firstName}, an agent needs you`
-        : "An agent needs you"
+        ? `${firstName}, een agent wacht`
+        : "Een agent wacht"
       : firstName
-        ? `${firstName}, ${questionCount} agents need you`
-        : `${questionCount} agents need you`
+        ? `${firstName}, ${questionCount} agents wachten`
+        : `${questionCount} agents wachten`
     : actionInMotion && showAmbientStatus
       ? ambientContext
       : welcomeMessage);

@@ -3123,3 +3123,62 @@ html.lfg-film .xterm {
   .workspace-row-model { display: none; }
   .workspace-row-state { width: 94px; font-size: 11px; }
 }
+
+/* ── agentbox: rustig warm palet (Sam, nov 2026) ─────────────────────────────
+   Alleen tokens: elke component volgt vanzelf. Papier en inkt in plaats van
+   iOS-grijs en -blauw; één accent (oranje van de Jij-regel) voor actie en
+   wat op Sam wacht. Donker houdt de neutralen, krijgt hetzelfde accent. */
+:root:not(.dark) {
+  --background: #f4f2ec;
+  --shell-surface: #f4f2ec;
+  --foreground: #1c1a17;
+  --card: #fffdf8;
+  --card-foreground: #1c1a17;
+  --stage-surface: #fffdf8;
+  --stage-field: #ffffff;
+  --popover: #fffdf8;
+  --popover-foreground: #1c1a17;
+  --primary: #a8460f;
+  --primary-foreground: #ffffff;
+  --secondary: #efece4;
+  --secondary-foreground: #1c1a17;
+  --muted: #efece4;
+  --muted-foreground: #665f55;
+  --accent: rgba(28, 26, 23, 0.07);
+  --accent-foreground: #1c1a17;
+  --destructive: #b42318;
+  --brand: #a8460f;
+  --info: #3d5a73;
+  --border: rgba(28, 26, 23, 0.11);
+  --input: rgba(28, 26, 23, 0.14);
+  --ring: #a8460f;
+  --text-2: #3a352e;
+  --border-strong: rgba(28, 26, 23, 0.26);
+  --code-bg: rgba(28, 26, 23, 0.05);
+}
+.dark {
+  --primary: #e58a52;
+  --primary-foreground: #1c1a17;
+  --brand: #e58a52;
+  --ring: #e58a52;
+}
+
+/* Taken: kleur van de stip vertelt de soort, verder geen chrome. */
+.taken .taak + .taak { border-top: 1px solid var(--border); }
+.taken .taak-stip { background: var(--border-strong); }
+.taken .taak[data-soort="vraag"] .taak-stip,
+.taken .taak[data-soort="mail"] .taak-stip { background: var(--primary); }
+.taken .taak[data-soort="bestelling"] .taak-stip { background: var(--info); }
+.taken .taak[data-soort="vast"] .taak-stip { background: var(--destructive); }
+.taken .taak[data-soort="vraag"] .taak-soort,
+.taken .taak[data-soort="mail"] .taak-soort { color: var(--primary); }
+.taken .taak[data-status="gedaan"] .taak-stip,
+.taken .taak[data-soort="gedaan"] .taak-stip { background: var(--success); }
+@media (hover: hover) {
+  .taken .taak .taak-knoppen { opacity: .55; transition: opacity .15s ease; }
+  .taken .taak:hover .taak-knoppen,
+  .taken .taak:focus-within .taak-knoppen { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .taken .taak .taak-knoppen { transition: none; }
+}

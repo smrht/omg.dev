@@ -1,4 +1,5 @@
 import { OverviewToolbar, useOverviewPreferences, buildOverviewGroups, flattenOverview } from "./components/session-overview";
+import { TakenLijst, TakenVandaag } from "./components/taken";
 import { type WorkspaceSummary } from "./components/desktop-workspace";
 import { SessionUsageControls } from "./components/session-usage-controls";
 import { WorkspaceFindingsMenu } from "./components/workspace-findings";
@@ -690,7 +691,7 @@ import {
   useAsk,
   useSessionQuestions,
 } from "./components/ask-center";
-import { GetAppsRailCard, PwaInstallCallout, PwaInstallSettingsSection } from "./components/pwa-install";
+import { PwaInstallCallout, PwaInstallSettingsSection } from "./components/pwa-install";
 import {
   CustomInstructionsPage,
   CustomInstructionsRow,
@@ -12731,7 +12732,7 @@ function LiveView({
           could not be scanned, only read. The row is the unit now; the
           transcript lives on the session's own page. */}
       <OverviewToolbar prefs={overviewPrefs} count={overviewGroups.reduce((n,g) => n+g.count,0)} project={projectFilter !== "__all" ? shortProject(projectFilter) : undefined} onClearProject={() => onProjectChange?.("__all")} />
-      {!overviewGroups.length && <p role="status" className="px-4 py-6 text-sm text-muted-foreground">Geen gesprekken gevonden. Pas je zoekopdracht of filters aan.</p>}
+      {overviewPrefs.view === "taken" ? <TakenLijst onOpenSession={openSessionPage} /> : !overviewGroups.length && <p role="status" className="px-4 py-6 text-sm text-muted-foreground">Geen gesprekken gevonden. Pas je zoekopdracht of filters aan.</p>}
       <>
 
       <SessionGroups
@@ -14473,7 +14474,7 @@ function RailStage({
             </div>
           ) : null}
           {!railCollapsed && <OverviewToolbar prefs={overviewPrefs} count={overviewGroups.reduce((n,g) => n+g.count,0)} project={projectFilter !== "__all" ? shortProject(projectFilter) : undefined} onClearProject={() => onProjectChange?.("__all")} />}
-          {!overviewGroups.length && !railCollapsed && <p role="status" className="px-3 py-6 text-sm text-muted-foreground">Geen gesprekken gevonden. Pas je zoekopdracht of filters aan.</p>}
+          {!railCollapsed && overviewPrefs.view === "taken" ? <TakenLijst smal onOpenSession={(sid) => activate(sid, false)} /> : !overviewGroups.length && !railCollapsed && <p role="status" className="px-3 py-6 text-sm text-muted-foreground">Geen gesprekken gevonden. Pas je zoekopdracht of filters aan.</p>}
           <SessionGroups
             groups={overviewGroups}
             pinnedNodes={[]}
@@ -14539,7 +14540,6 @@ function RailStage({
         </div>
         {/* Hosted too. The host offers "Install omg" only inside its
             account menu, so this card is the one visible offer on either. */}
-        {!railCollapsed ? <GetAppsRailCard /> : null}
         {/* The product mark, at the foot, where the machine switcher was. The
             header carries the status line instead. Without a status line
             (no shell headline), the header keeps the mark and this stays
@@ -14672,7 +14672,7 @@ function RailStage({
           // card any more: with nothing to show, the useful thing to show is
           // the place to start one. The hosted coach, when present, sits
           // above it.
-          <div className={cn("flex h-full min-h-0 flex-1 flex-col", STAGE_PANEL)}>
+          <div className={cn("flex h-full min-h-0 flex-1 flex-col overflow-y-auto", STAGE_PANEL)}>
             {coach ? (
               <div className="mx-auto w-full max-w-xl shrink-0 px-4 pt-4 text-left">{coach}</div>
             ) : null}
@@ -14691,6 +14691,7 @@ function RailStage({
                 }
               },
             })}
+            <TakenVandaag onOpenSession={(sid) => activate(sid, false)} onAlles={() => overviewPrefs.setView("taken")} />
           </div>
         )}
       </div>
@@ -23780,6 +23781,11 @@ function ComposerProjectSheet({
   );
 }
 
+function dagdeel() {
+  const h = new Date().getHours();
+  return h < 6 ? "Goedenacht" : h < 12 ? "Goedemorgen" : h < 18 ? "Goedemiddag" : "Goedenavond";
+}
+
 export function NewSessionDialog({
   open,
   repos,
@@ -25807,14 +25813,16 @@ export function NewSessionDialog({
   // the sheet. Greets the session owner by roster name, falling back to the
   // local part of the email, then to a plain "there".
   const stageOwner = users.find((item) => item.email === user);
-  const stageGreetingName =
-    stageOwner?.name?.trim() || (user ? user.split("@")[0] : "") || "there";
+  // Eigen box van Sam: de rosternaam is een handle ("Rocketmansh"), dus de
+  // begroeting gebruikt zijn voornaam.
+  void stageOwner;
+  const stageGreetingName = "Sam";
   if (variant === "stage") {
     return (
       <div
         // overflow-visible on purpose: see the form's stage branch. The
         // suggest menus need to escape upward past the greeting.
-        className="flex h-full min-h-0 flex-1 flex-col items-center justify-center overflow-visible p-4"
+        className="flex min-h-0 shrink-0 flex-col items-center justify-start overflow-visible px-4 pt-[14vh] pb-6"
         data-testid="new-session-stage"
         onKeyDown={(e) => {
           if (e.key === "Escape" && !e.defaultPrevented) {
@@ -25829,8 +25837,8 @@ export function NewSessionDialog({
         <section aria-label="New session" className="w-full max-w-xl">
           {/* A greeting, not a dialog title. No close control: Esc, or
               opening any session from the rail, leaves this surface. */}
-          <h2 className="px-3 pb-2 text-lg font-semibold">
-            Hello {stageGreetingName}!
+          <h2 className="px-3 pb-3 text-[22px] font-semibold tracking-tight">
+            {dagdeel()}, {stageGreetingName}
           </h2>
           {formBody}
         </section>
