@@ -33,9 +33,25 @@ const DOW: Record<string, number> = {
 };
 
 // Wall-clock fields of `d` in timezone `tz`.
-function zonedParts(d: Date, tz: string) {
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat("en-US", {
+//
+// agentbox (07-11-2026): mostRecentDue walks back up to 1500 minutes for every
+// scheduled agent on every 60s tick. Building a fresh Intl.DateTimeFormat per
+// minute made one tick cost ~5s of CPU on the main thread, so the whole server
+// (UI, sends, websockets) froze for seconds every minute. The formatter is now
+// built once per zone and the parts of each minute are cached; all agents walk
+// the same minutes, so a tick only computes the one new minute.
+type ZonedParts = { minute: number; hour: number; dom: number; month: number; dow: number };
+const formatters = new Map<string, Intl.DateTimeFormat>();
+const partsCache = new Map<string, ZonedParts>();
+const PARTS_CACHE_MAX = 6000;
+
+function zonedParts(d: Date, tz: string): ZonedParts {
+  const key = `${tz}|${d.getTime()}`;
+  const hit = partsCache.get(key);
+  if (hit) return hit;
+  let fmt = formatters.get(tz);
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat("en-US", {
       timeZone: tz,
       hourCycle: "h23",
       minute: "2-digit",
@@ -43,17 +59,24 @@ function zonedParts(d: Date, tz: string) {
       day: "2-digit",
       month: "2-digit",
       weekday: "short",
-    })
-      .formatToParts(d)
-      .map((p) => [p.type, p.value]),
-  );
-  return {
+    });
+    formatters.set(tz, fmt);
+  }
+  const parts = Object.fromEntries(fmt.formatToParts(d).map((p) => [p.type, p.value]));
+  const out: ZonedParts = {
     minute: parseInt(parts.minute as string, 10),
     hour: parseInt(parts.hour as string, 10),
     dom: parseInt(parts.day as string, 10),
     month: parseInt(parts.month as string, 10),
     dow: DOW[parts.weekday as string] ?? 0,
   };
+  if (partsCache.size >= PARTS_CACHE_MAX) {
+    // Oldest insertions first: the walk-back minutes that just fell out of the window.
+    let drop = partsCache.size - PARTS_CACHE_MAX + 500;
+    for (const k of partsCache.keys()) { partsCache.delete(k); if (--drop <= 0) break; }
+  }
+  partsCache.set(key, out);
+  return out;
 }
 
 function fieldMatch(field: string, value: number): boolean {

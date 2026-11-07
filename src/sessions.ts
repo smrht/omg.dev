@@ -200,8 +200,16 @@ const defaultTmuxProbe: TmuxProbe = {
   panePid: panePidForSession,
 };
 
+// agentbox (07-11-2026): listSessions runs every 1-2.5s (fleet watcher, warm
+// cache, every client poll) and each run spawned `tmux list-panes`. In a CPU
+// profile that spawn was a quarter of the server's main-thread time. Panes
+// change rarely; share one listing across calls for a few seconds.
+const PANE_CACHE_MS = 5_000;
+let sharedPanes: { at: number; map: Map<number, string> } | null = null;
+const freshPanes = () => (sharedPanes && Date.now() - sharedPanes.at < PANE_CACHE_MS ? sharedPanes.map : null);
+
 function makeTmuxProbe(profile: SessionProfile | null): TmuxProbe {
-  let panes: Map<number, string> | null = null;
+  let panes: Map<number, string> | null = freshPanes();
   const has = new Map<string, boolean>();
   const panePids = new Map<string, number | null>();
   const targets = new Map<number, string | null>();
@@ -233,6 +241,7 @@ function makeTmuxProbe(profile: SessionProfile | null): TmuxProbe {
       try {
         const r = Bun.spawnSync(PANE_ARGV);
         m = parsePanes(new TextDecoder().decode(r.stdout));
+        sharedPanes = { at: Date.now(), map: m };
       } catch {}
       panes = m;
       return m;
@@ -247,6 +256,7 @@ function makeTmuxProbe(profile: SessionProfile | null): TmuxProbe {
           const proc = Bun.spawn(PANE_ARGV, { stdout: "pipe", stderr: "ignore" });
           const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
           panes = parsePanes(out);
+          sharedPanes = { at: Date.now(), map: panes };
         } catch {
           // Leave `panes` unset: the synchronous path rebuilds it as before.
         }
