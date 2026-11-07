@@ -34,7 +34,7 @@ def _zin(t: str) -> str:
 
 
 def _ja_tekst(rest: str) -> str | None:
-    m = re.search(r"((?:Bij ja|Ja betekent(?: dat)?|Ja =|ja =)[:,]?\s*.+)", rest)
+    m = re.search(r"((?:Bij ja|Ja betekent(?: dat)?|Ja =)[:,]?\s*.+)", rest, re.I)
     if not m:
         return None
     zin = _zin(m.group(1))
@@ -48,7 +48,28 @@ def _ab_label(letter: str, jij: str, tekst: str) -> str:
     return _kort(m.group(1).strip(), 160) if m else ""
 
 
+def _laatste_vraag(tekst: str) -> str | None:
+    """Kale "ja of nee": de vraag zelf staat dan meestal net boven de Jij-regel."""
+    regels = [r for r in (tekst or "").splitlines() if not re.match(r"^\W*Jij\b", r)]
+    staart = _schoon(" ".join(regels[-25:]))
+    vragen = re.findall(r"(?:^|(?<=[.!?:]\s))([A-Z\u00c0-\u00dd][^.!?]{8,200}\?)", staart)
+    return _kort(vragen[-1], 200) if vragen else None
+
+
 def beslis(jij: str, tekst: str = "") -> dict:
+    r = _beslis(jij, tekst)
+    if r.get("vorm") == "janee" and not (r.get("vraag") or r.get("ja") or r.get("eerst")):
+        # Eerst een eerdere Jij-regel met "Ja betekent ...", anders de laatste vraag in de tekst.
+        for regel in reversed(re.findall(r"(?m)^\W*Jij\b\W*(.+)$", tekst or "")):
+            ja = _ja_tekst(_schoon(regel))
+            if ja:
+                r["ja"] = ja
+                return r
+        r["vraag"] = _laatste_vraag(tekst)
+    return r
+
+
+def _beslis(jij: str, tekst: str = "") -> dict:
     if jij.count("`") % 2 or re.search(r"[<>{}\\|]|'\s*,|\)\s*$", jij):
         return {"vorm": "open"}  # code, regels of half afgeknipte tekst: geen knoppen
     j = _schoon(jij).rstrip()

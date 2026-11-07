@@ -57,9 +57,47 @@ def vast_detail(text: str) -> str:
     return one_line(t.split("\n")[-1] or "Vastgelopen", 140)
 
 
+ARTIFACTS = Path(os.environ.get("OMG_DATA_DIR", Path.home() / "omg/data")) / "artifacts/index.json"
+
+
+def artifacts_per_sessie() -> dict[str, list[dict]]:
+    try:
+        idx = json.loads(ARTIFACTS.read_text())
+    except Exception:
+        return {}
+    out: dict[str, list[dict]] = {}
+    for a in idx.values():
+        if isinstance(a, dict) and a.get("sessionId"):
+            out.setdefault(a["sessionId"], []).append(a)
+    return out
+
+
+def presentatie(arts: list[dict], at: float | None, text: str) -> list[dict]:
+    """Bezos (Sam, 07-11-2026): wat de agent liet zien bij zijn vraag (beeld, video,
+    audio, bestand) plus de links uit zijn laatste bericht, zodat Sam kan kiezen
+    zonder het gesprek te openen. Alleen van de laatste uren van dit gesprek."""
+    out = []
+    if at:
+        recent = [a for a in arts if a.get("createdAt", 0) / 1000 >= at - 6 * 3600]
+        for a in sorted(recent, key=lambda a: a.get("createdAt", 0))[-4:]:
+            mime = a.get("mimeType") or ""
+            soort = "audio" if mime.startswith("audio") else a.get("media") or "file"
+            out.append({"soort": soort, "id": a["id"], "naam": a.get("name") or "",
+                        "onderschrift": one_line(a.get("caption") or a.get("title") or "", 120)})
+    gezien = set()
+    for u in re.findall(r"https?://[^\s)<>`\"']+", text or ""):
+        u = u.rstrip(".,;:!?*_")
+        if u in gezien or len(gezien) >= 3:
+            continue
+        gezien.add(u)
+        out.append({"soort": "link", "url": u, "naam": one_line(re.sub(r"^https?://(www\.)?", "", u), 60)})
+    return out
+
+
 def sessions() -> list[dict]:
     out = []
     data = json.load(urllib.request.urlopen(f"{OMG}/api/sessions", timeout=20))["sessions"]
+    arts = artifacts_per_sessie()
     today = datetime.now().date()
     for s in data:
         last = (s.get("last") or {})
@@ -91,6 +129,7 @@ def sessions() -> list[dict]:
                 out.append({**base, "id": f"gesprek:{sid}:{key}", "bron": "gesprek", "soort": "vraag",
                             "titel": one_line(j, 200), "detail": title,
                             "beslis": beslis(j_vol, text),
+                            "presentatie": presentatie(arts.get(sid, []), at, text),
                             "wat": first_sentence("\n".join(l for l in text.splitlines() if not re.match(r"\W*Jij\b", l)))})
     return out
 
