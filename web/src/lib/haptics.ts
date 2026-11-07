@@ -124,7 +124,21 @@ export function haptic(type?: HapticInput) {
   // trigger() is async and opens an AudioContext internally, so it can reject
   // ("Failed to start the audio device") when the OS won't hand out the audio
   // device. A missed buzz is not worth an unhandled rejection.
-  void getInstance()
-    .trigger(type)
-    .catch(() => {});
+  // agentbox: after the next frame. Synchronously this cost 50-80 ms on a
+  // phone-speed CPU in front of every button's own action (it builds an
+  // AudioContext); a buzz ~16 ms later is not noticeable, a frozen frame is.
+  // The iOS switch path above stays synchronous: it must run inside the tap.
+  afterNextFrame(() => {
+    void getInstance()
+      .trigger(type)
+      .catch(() => {});
+  });
+}
+
+export function afterNextFrame(run: () => void): void {
+  if (typeof requestAnimationFrame !== "function") {
+    setTimeout(run, 0);
+    return;
+  }
+  requestAnimationFrame(() => setTimeout(run, 0));
 }

@@ -18231,6 +18231,7 @@ function SessionTitleInlineEditor({
 // the squished mid-morph layout is never seen.
 const SHEET_EASE = "cubic-bezier(0.32, 0.72, 0, 1)";
 const SHEET_MS = 420;
+const CLOSE_MS = 260;
 
 // The session title in the details sheet header, pinned to a single line. If
 // the title is too wide to fit and the sheet has stayed open for 10s, a gentle
@@ -19255,8 +19256,10 @@ function SessionTitleSheet({
     const from = flipTransform();
     panel.animate(
       [
-        { transform: from, borderRadius: "16px", opacity: 0.55 },
-        { transform: "translate(0px,0px) scale(1,1)", borderRadius: "0px", opacity: 1 },
+        // agentbox: no borderRadius here. It is not compositor-animatable, so
+        // every frame repainted the whole full-screen chat on the main thread.
+        { transform: from, opacity: 0.55 },
+        { transform: "translate(0px,0px) scale(1,1)", opacity: 1 },
       ],
       { duration: SHEET_MS, easing: SHEET_EASE, fill: "both" },
     );
@@ -19291,20 +19294,26 @@ function SessionTitleSheet({
       onClose();
     };
     if (panel) {
+      // agentbox: dissolve into the row instead of landing on it at 55%
+      // opacity. The ease puts nearly all movement in the first ~150 ms; the
+      // old tail left a smeared half-transparent chat over the row for another
+      // ~300 ms before the overview came back sharp (frame capture 07-11).
       const anim = panel.animate(
-        [
-          { transform: "translate(0px,0px) scale(1,1)", borderRadius: "0px", opacity: 1 },
-          { transform: to, borderRadius: "16px", opacity: 0.55 },
-        ],
-        { duration: SHEET_MS * 0.85, easing: SHEET_EASE, fill: "both" },
+        [{ transform: "translate(0px,0px) scale(1,1)" }, { transform: to }],
+        { duration: CLOSE_MS, easing: SHEET_EASE, fill: "both" },
       );
+      panel.animate([{ opacity: 1 }, { opacity: 0.6, offset: 0.4 }, { opacity: 0 }], {
+        duration: CLOSE_MS,
+        easing: "linear",
+        fill: "both",
+      });
       anim.onfinish = finish;
       anim.oncancel = finish;
     } else {
       finish();
     }
     backdrop?.animate([{ opacity: 1 }, { opacity: 0 }], {
-      duration: SHEET_MS * 0.85,
+      duration: CLOSE_MS,
       easing: SHEET_EASE,
       fill: "both",
     });

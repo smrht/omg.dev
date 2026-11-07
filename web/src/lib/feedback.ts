@@ -5,12 +5,17 @@
 // the vocabulary is consistent across the app.
 
 import type { HapticInput } from "web-haptics";
-import { haptic } from "./haptics"; // self-gates on the haptics preference
-import { playSfx, type SfxName } from "./sfx";
+import { afterNextFrame, haptic } from "./haptics"; // self-gates on the haptics preference
+import { playSfx, primeSfx, type SfxName } from "./sfx";
 import { getUiFeedbackPrefs } from "./ui-feedback-prefs";
 
 function fire(sfx: SfxName | null, hap: HapticInput | null) {
-  if (sfx && getUiFeedbackPrefs().sound) playSfx(sfx);
+  // agentbox: the voices wait for the next frame so the press itself paints
+  // first; the context is still resumed inside the gesture for iOS.
+  if (sfx && getUiFeedbackPrefs().sound) {
+    primeSfx();
+    afterNextFrame(() => playSfx(sfx));
+  }
   if (hap != null) haptic(hap);
 }
 

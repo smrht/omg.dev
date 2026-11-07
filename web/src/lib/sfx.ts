@@ -101,6 +101,16 @@ const KIT: Record<SfxName, Voice[]> = {
   ],
 };
 
+/** agentbox: create/resume the context inside the gesture (iOS autoplay
+ *  policy); the voices themselves may then be scheduled a frame later. */
+export function primeSfx(): void {
+  try {
+    getCtx();
+  } catch {
+    /* no Web Audio */
+  }
+}
+
 export function playSfx(name: SfxName): void {
   const voices = KIT[name];
   if (!voices) return;

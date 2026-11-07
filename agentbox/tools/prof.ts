@@ -13,16 +13,24 @@ const { result: { targetId } } = await send("Target.createTarget", { url: "about
 const { result: { sessionId: s } } = await send("Target.attachToTarget", { targetId, flatten: true });
 await send("Page.enable", {}, s); await send("Runtime.enable", {}, s);
 const ev = async (expr: string) => (await send("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true }, s)).result?.result?.value;
-await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
+const mob = !!process.env.MOBIEL;
+await send("Emulation.setDeviceMetricsOverride", mob ? { width: 390, height: 844, deviceScaleFactor: 2, mobile: true } : { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
+if (mob) await send("Emulation.setTouchEmulationEnabled", { enabled: true }, s);
 await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "dark" }] }, s);
 await send("Page.navigate", { url }, s); await sleep(2500);
 await ev(`localStorage.setItem("lfg_user","contactexpertly@gmail.com");localStorage.setItem("lfg_v2_user_filter","contactexpertly@gmail.com");1`);
 await send("Page.navigate", { url }, s); await sleep(6000);
+const mode = process.env.MODE ?? "scroll";
+if (mode === "close") {
+  // open first, outside the profile; then profile only the close
+  await ev(`(async()=>{const rows=[...document.querySelectorAll("[data-overview-row]")].filter(e=>e.offsetParent); rows[Number("${process.env.PICK ?? 3}")].click();
+    for(let i=0;i<200;i++){ if(document.querySelector("[data-session-ready=true]")) break; await new Promise(r=>setTimeout(r,50)); } await new Promise(r=>setTimeout(r,1500)); })()`);
+}
 if (process.env.THROTTLE) await send("Emulation.setCPUThrottlingRate", { rate: Number(process.env.THROTTLE) }, s);
 await send("Profiler.enable", {}, s); await send("Profiler.setSamplingInterval", { interval: 200 }, s);
 await send("Profiler.start", {}, s);
-const mode = process.env.MODE ?? "scroll";
 await ev(`(async()=>{const sc=[...document.querySelectorAll("*")].filter(e=>e.scrollHeight>e.clientHeight+50&&/(auto|scroll)/.test(getComputedStyle(e).overflowY)).sort((a,b)=>b.scrollHeight-a.scrollHeight)[0];
+ if("${mode}"==="close"){document.querySelector('[role=dialog] button[aria-label="Close session details"]').click(); await new Promise(r=>setTimeout(r,900)); return}
  if("${mode}"==="idle"){await new Promise(r=>setTimeout(r,5000));return}
  if("${mode}"==="click"){const rows=[...document.querySelectorAll("[data-overview-row]")].filter(e=>e.offsetParent); rows[Number("${process.env.PICK ?? 3}")].click();
    for(let i=0;i<200;i++){const c=document.querySelector("[data-session-ready=true]"); if(c) break; await new Promise(r=>setTimeout(r,20));} await new Promise(r=>setTimeout(r,300)); return}
