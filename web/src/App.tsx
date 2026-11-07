@@ -1,5 +1,5 @@
 import { OverviewToolbar, useOverviewPreferences, buildOverviewGroups, flattenOverview } from "./components/session-overview";
-import { TakenLijst, TakenVandaag, MeldingenPagina, MELDINGEN_EVENT, OPDRACHT_EVENT, neemOpdracht, opdrachtVerstuurd } from "./components/taken";
+import { TakenLijst, TakenVandaag, MeldingenPagina, zetBevindingenAantal, MELDINGEN_EVENT, OPDRACHT_EVENT, neemOpdracht, opdrachtVerstuurd } from "./components/taken";
 import { type WorkspaceSummary } from "./components/desktop-workspace";
 import { SessionUsageControls } from "./components/session-usage-controls";
 import { WorkspaceFindingsMenu } from "./components/workspace-findings";
@@ -385,6 +385,7 @@ import {
   folderRecoveryNotice,
 } from "./lib/folder-browser-recovery";
 import { setThemePreference, THEME_CHANGE_EVENT } from "./lib/theme";
+import { FONT_CHANGE_EVENT, FONTS, fontLabel, getFont, nextFont, setFont, type FontId } from "./lib/font";
 import { startsInBottomSystemGestureZone } from "./lib/touch-gestures";
 import { recentSessionRoster } from "./lib/recent-session-roster";
 import {
@@ -494,6 +495,7 @@ import {
   X,
   Ellipsis,
   SquarePen,
+  Type,
 } from "lucide-react";
 import { toast } from "@/lib/notify";
 import { BrowserLoginCard } from "@/components/browser-login-card";
@@ -9149,6 +9151,24 @@ export function App() {
     return () => window.clearInterval(timer);
   }, [connectGateOpen, refreshCodingAgents, refreshToolConnections]);
 
+  // agentbox: bevindingen van auto-agents voor Meldingen. Hooks staan hier,
+  // vóór de vroege returns (connect-gate, onboarding, identiteit) hieronder:
+  // daarna geplaatst gaf een gate-wissel React #300 (minder hooks gerenderd).
+  const bevindingGroepen = useMemo(
+    () =>
+      groupFindingsByAgent(findings).map((r) => ({
+        id: r.agentId,
+        naam: agentName(r.agentId),
+        titel: r.findings[0]?.title ?? "",
+        aantal: r.findings.length,
+        wanneer: relTime(r.latestAt),
+        stip: SEV_DOT[r.severity],
+      })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [findings, autoAgents],
+  );
+  useEffect(() => zetBevindingenAantal(findings.length), [findings.length]);
+
   // Reuses the existing setup handlers and shared auth dialog for every row.
   // Once opened, it stays mounted through the tools page; a connected agent
   // must not make page two disappear mid-flow.
@@ -9335,7 +9355,16 @@ export function App() {
   );
   // agentbox: Notifications (de stilgevallen Shipped-feed) is vervangen door Meldingen.
   const notificationsPage = (_active: boolean) => (
-    <MeldingenPagina onOpenSession={(sid) => openHistoricalSession({ sessionId: sid, reviewLabel: "Melding" })} />
+    <MeldingenPagina
+      onOpenSession={(sid) => openHistoricalSession({ sessionId: sid, reviewLabel: "Melding" })}
+      bevindingen={bevindingGroepen}
+      onBekijk={(agentId) => setOpenReport(agentId)}
+      onOplossen={(agentId) =>
+        void launchAutoTriage(agentId ? findings.filter((f) => f.agentId === agentId) : findings)
+      }
+      onWegzetten={(agentId) => void clearAllFindings(findings.filter((f) => f.agentId === agentId))}
+      oplossenBezig={autoTriageBusy}
+    />
   );
   const artifactsPage = (active: boolean) => (
     <Suspense fallback={<div className="py-10 text-center text-sm text-muted-foreground">Loading…</div>}>
@@ -10987,6 +11016,7 @@ function PagesMenu({
             so the blur is visible behind it. */}
         <DropdownMenuSeparator />
         <PagesMenuDarkModeItem />
+        <PagesMenuFontItem />
         <PagesMenuFilmModeItem />
       </DropdownMenuContent>
     </DropdownMenu>
@@ -11016,6 +11046,66 @@ function PagesMenuDarkModeItem() {
       <span className="flex-1">Dark mode</span>
       <Switch checked={dark} tabIndex={-1} aria-hidden="true" className="pointer-events-none" />
     </DropdownMenuItem>
+  );
+}
+
+/** agentbox: lettertype kiezen. Each tap moves to the next font and applies
+ *  it at once, so you judge it in place; the name is set in its own face. */
+function PagesMenuFontItem() {
+  const [font, setFontState] = useState<FontId>(() => getFont());
+  useEffect(() => {
+    const sync = () => setFontState(getFont());
+    window.addEventListener(FONT_CHANGE_EVENT, sync);
+    return () => window.removeEventListener(FONT_CHANGE_EVENT, sync);
+  }, []);
+  return (
+    <DropdownMenuItem
+      closeOnClick={false}
+      onClick={() => setFont(nextFont(getFont()))}
+      aria-label={`Lettertype: ${fontLabel(font)}. Tik voor het volgende`}
+    >
+      <Type className="size-5 shrink-0 text-muted-foreground" />
+      <span className="flex-1">Lettertype</span>
+      <span className="text-sm text-muted-foreground">{fontLabel(font)}</span>
+    </DropdownMenuItem>
+  );
+}
+
+/** agentbox: lettertype in Instellingen, vier knoppen, elk in zijn eigen letter. */
+function SettingsFontRow() {
+  const [font, setFontState] = useState<FontId>(() => getFont());
+  useEffect(() => {
+    const sync = () => setFontState(getFont());
+    window.addEventListener(FONT_CHANGE_EVENT, sync);
+    return () => window.removeEventListener(FONT_CHANGE_EVENT, sync);
+  }, []);
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-2.5">
+      <div className="flex items-center gap-3">
+        <span className="flex size-7 items-center justify-center rounded-[7px] bg-foreground/80 text-background">
+          <Type className="size-4" />
+        </span>
+        <span className="text-sm font-medium">Lettertype</span>
+      </div>
+      <div role="radiogroup" aria-label="Lettertype" className="flex gap-1 rounded-lg bg-muted p-0.5">
+        {FONTS.map((f) => (
+          <button
+            key={f.id}
+            type="button"
+            role="radio"
+            aria-checked={font === f.id}
+            onClick={() => setFont(f.id)}
+            data-font-preview={f.id}
+            className={cn(
+              "h-7 rounded-md px-2.5 text-[13px] transition-colors",
+              font === f.id ? "bg-card font-medium text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -12758,11 +12848,7 @@ function LiveView({
         of them there put more work under a list that is already about work,
         and each one pushed the running sessions further off the fold. Same
         answer as iOS (mobile/src/omg/findings-pill.tsx). */}
-    <FindingsPill
-      count={findings.length}
-      aboveComposer={composerVisible}
-      onOpen={() => setFindingsOpen(true)}
-    />
+    {/* agentbox: geen bevindingen-pil meer; ze staan in Meldingen. */}
     <FindingsSheet
       open={findingsOpen && findings.length > 0}
       onOpenChange={setFindingsOpen}
@@ -14125,8 +14211,9 @@ function RailStage({
   // bottom sheet. A sheet is a phone shape: on desktop it covered the stage
   // and pulled the eye to the bottom of the screen, away from the rail the
   // pill lives in.
+  // agentbox: bevindingen staan in Meldingen; de rail toont geen pil meer.
   const autoRailPill =
-    findings.length && !railCollapsed ? (
+    false && findings.length && !railCollapsed ? (
       railFindingsOpen ? (
         <section
           aria-label="Updates"
@@ -20555,6 +20642,10 @@ const ChatStream = memo(function ChatStream({
     overscan: 6,
     scrollMargin,
     scrollToFn: noVirtualizerScroll,
+    // agentbox: geen flushSync per scrollevent. Met true rendert React elke
+    // bereikwijziging synchroon midden in het scrollen (2,2 s van 6 s in het
+    // profiel); overscan 6 vangt het ene frame vertraging op.
+    useFlushSync: false,
   });
   // Not an option, an instance field: the library reads it directly.
   virtualizer.shouldAdjustScrollPositionOnItemSizeChange = () => false;
@@ -21229,6 +21320,10 @@ const ChatStream = memo(function ChatStream({
     // While stuck to the bottom the glide owns the viewport; holding an old
     // row still would fight it.
     const current = anchorRef.current;
+    // agentbox: `top`/`height` only feed the requested-prepend fallback below.
+    // Reading scrollTop/scrollHeight here for the plain re-measure case forced
+    // a synchronous layout on every totalSize change mid-scroll (profiled
+    // ~0.4 s per 6 s of scrolling) for values that were never used.
     const anchor =
       requested ??
       (stick || !current
@@ -21236,8 +21331,8 @@ const ChatStream = memo(function ChatStream({
         : {
             anchorKey: current.key,
             anchorOffset: current.offset,
-            top: el.scrollTop,
-            height: el.scrollHeight,
+            top: 0,
+            height: 0,
           });
     if (!anchor) return;
     // A write landing while a fling is live cancels the momentum — the
@@ -22161,13 +22256,15 @@ function UserBubble({
   // Only measure while collapsed: when clamped, scrollHeight exceeds
   // clientHeight iff content is being hidden. While expanded the clamp is off
   // so the two are equal — skip so the toggle keeps showing "Show less".
-  useLayoutEffect(() => {
+  // agentbox: geen synchrone check() bij mount. Die las scrollHeight in een
+  // layout-effect en dwong per ballon een volledige reflow af; bij scrollen door
+  // een lang gesprek kostte dat 1,5 s per 6 s (profiel 7 nov). ResizeObserver
+  // roept de callback zelf aan na de eerstvolgende layout, zonder te forceren.
+  useEffect(() => {
     if (expanded) return;
     const el = bodyRef.current;
     if (!el) return;
-    const check = () => setOverflowing(el.scrollHeight - el.clientHeight > 1);
-    check();
-    const ro = new ResizeObserver(check);
+    const ro = new ResizeObserver(() => setOverflowing(el.scrollHeight - el.clientHeight > 1));
     ro.observe(el);
     return () => ro.disconnect();
   }, [html, expanded]);
@@ -31062,6 +31159,14 @@ function SettingsView({
     <div className="mx-auto max-w-xl space-y-8 pb-10" data-lfg-page-column>
       {bare ? <UserIconSettingsSection identityEmail={user} /> : <IdentitySettingsHeader user={user} />}
 
+      {/* agentbox: weergave van dit apparaat; het lettertype staat bovenaan. */}
+      <section className="space-y-2">
+        <h2 className="px-4 text-xs font-semibold text-muted-foreground">Weergave</h2>
+        <div className="overflow-hidden rounded-2xl border border-border bg-card/40">
+          <SettingsFontRow />
+        </div>
+      </section>
+
       {/* Computer — in standalone LFG this box IS the computer, so the row is
           static. When these sections are mounted by a host (omg) this is the
           slot that becomes a machine switcher. */}
@@ -31341,6 +31446,7 @@ function MoreView({
               aria-label="Toggle dark mode"
             />
           </div>
+          <SettingsFontRow />
           <div className="flex items-center justify-between gap-4 px-4 py-2.5">
             <div className="flex items-center gap-3">
               <span className="flex size-7 items-center justify-center rounded-[7px] bg-destructive text-white">

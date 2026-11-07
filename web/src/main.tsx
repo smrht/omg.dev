@@ -5,6 +5,9 @@ import { createRoot } from "react-dom/client";
 import * as ReactDOM from "react-dom";
 import "@fontsource-variable/geist";
 import "@fontsource-variable/geist-mono";
+// agentbox: leesbare letters; @font-face only, files load when a font is picked.
+import "@fontsource-variable/inter";
+import "@fontsource-variable/atkinson-hyperlegible-next";
 import "./index.css";
 import "./agentbox.css";
 import { routedToast as toast } from "./lib/host-toast";
@@ -22,6 +25,7 @@ import {
   THEME_CHANGE_EVENT,
   THEME_STORAGE_KEY,
 } from "./lib/theme";
+import { applyFont, FONT_CHANGE_EVENT, FONT_STORAGE_KEY } from "./lib/font";
 
 // Tell the boot shell the entry module is evaluating. Cancels the stuck-splash
 // recovery timer so a slow first paint after a successful download never shows
@@ -60,6 +64,12 @@ window.lfg = { React, ReactDOM, jsxRuntime: JsxRuntime, registerExtension };
 }
 
 applyTheme();
+applyFont();
+window.addEventListener("storage", (event) => {
+  if (event.key !== FONT_STORAGE_KEY && event.key !== null) return;
+  applyFont();
+  window.dispatchEvent(new Event(FONT_CHANGE_EVENT));
+});
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
   // Continue following the OS until the user makes an explicit selection.
   if (getThemePreference() !== null) return;

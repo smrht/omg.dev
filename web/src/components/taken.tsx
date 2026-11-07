@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Check, Clock, CornerDownRight, ExternalLink, MessageSquare, RotateCcw } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { Check, Clock, CornerDownRight, ExternalLink, Eye, Loader2, MessageSquare, RotateCcw, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // Taken: wat er voor Sam ligt, automatisch verzameld uit mail, gesprekken en
@@ -134,12 +134,30 @@ function wanneer(iso?: string) {
 export const isMelding = (i: Taak) => i.soort === "melding" || (!!i.machine && i.soort === "vast");
 
 /** Open werk voor de teller op de Taken-tab: voor jou + meldingen. Zo zie je het ook vanuit Aandacht. */
+/* agentbox: open bevindingen van auto-agents tellen mee in de Taken-tab.
+   App zet het aantal (de lijst zelf leeft daar); de tab leest het hier. */
+let bevindingenAantal = 0;
+const bevindingenLuisteraars = new Set<() => void>();
+export function zetBevindingenAantal(n: number) {
+  if (n === bevindingenAantal) return;
+  bevindingenAantal = n;
+  for (const l of bevindingenLuisteraars) l();
+}
+export function useBevindingenAantal(): number {
+  return useSyncExternalStore(
+    (l) => { bevindingenLuisteraars.add(l); return () => { bevindingenLuisteraars.delete(l); }; },
+    () => bevindingenAantal,
+    () => 0,
+  );
+}
+
 export function useTakenTelling(): { voorJou: number; meldingen: number } {
   const { data } = useTaken();
+  const bevindingen = useBevindingenAantal();
   return useMemo(() => {
     const d = deelTaken(data?.items ?? []);
-    return { voorJou: d.open.length, meldingen: d.meldingen.length };
-  }, [data]);
+    return { voorJou: d.open.length, meldingen: d.meldingen.length + bevindingen };
+  }, [data, bevindingen]);
 }
 
 export function deelTaken(items: Taak[]) {
@@ -295,7 +313,17 @@ export function TakenVandaag({ onOpenSession, onAlles }: { onOpenSession?: (sid:
  * stilgevallen Shipped-feed was). Hoofdactie is "Opdracht geven"; afhandelen
  * is de tweede knop.
  */
-export function MeldingenPagina({ onOpenSession }: { onOpenSession?: (sid: string) => void }) {
+export type BevindingGroep = { id: string; naam: string; titel: string; aantal: number; wanneer: string; stip: string };
+
+export function MeldingenPagina({ onOpenSession, bevindingen = [], onBekijk, onOplossen, onWegzetten, oplossenBezig = false }: {
+  onOpenSession?: (sid: string) => void;
+  /** Open findings from auto agents, one row per agent (the old "1 bevinding" pill). */
+  bevindingen?: BevindingGroep[];
+  onBekijk?: (id: string) => void;
+  onOplossen?: (id?: string) => void;
+  onWegzetten?: (id: string) => void;
+  oplossenBezig?: boolean;
+}) {
   const { data, fout, zet } = useTaken();
   const [toonAf, setToonAf] = useState(false);
   const items = data?.items ?? [];
@@ -305,11 +333,26 @@ export function MeldingenPagina({ onOpenSession }: { onOpenSession?: (sid: strin
   return (
     <section aria-label="Meldingen" className="taken meldingen-pagina mx-auto w-full max-w-3xl px-4 pb-16 pt-8 md:px-8">
       <header className="mb-4">
-        <h1 className="text-[22px] font-semibold tracking-tight">Meldingen <span className="ml-1 text-base font-normal tabular-nums text-muted-foreground">{open.length}</span></h1>
-        <p className="mt-1 text-sm text-muted-foreground">Shopmeldingen, facturen, monitors en vastgelopen bots. Geef een opdracht of handel af.</p>
+        <h1 className="text-[22px] font-semibold tracking-tight">Meldingen <span className="ml-1 text-base font-normal tabular-nums text-muted-foreground">{open.length + bevindingen.reduce((n, b) => n + b.aantal, 0)}</span></h1>
+        <p className="mt-1 text-sm text-muted-foreground">Shopmeldingen, facturen, monitors, vastgelopen bots en wat de auto-agents vonden. Geef een opdracht of handel af.</p>
       </header>
+      {bevindingen.length > 0 && <div className="mb-6">
+        <div className="mb-1 flex min-h-9 items-center gap-2">
+          <h2 className="taken-kop text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
+            Van auto-agents <span className="ml-1 font-normal tabular-nums">{bevindingen.reduce((n, b) => n + b.aantal, 0)}</span>
+          </h2>
+          {onOplossen && bevindingen.length > 1 ? <button type="button" onClick={() => onOplossen()} disabled={oplossenBezig}
+            className="ml-auto inline-flex h-8 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-primary">
+            {oplossenBezig ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : <Sparkles className="size-3.5" aria-hidden="true" />}Alles laten oplossen
+          </button> : null}
+        </div>
+        <ul className="divide-y divide-border/70 border-y border-border/70">
+          {bevindingen.map(b => <BevindingRij key={b.id} b={b} onBekijk={onBekijk} onOplossen={onOplossen} onWegzetten={onWegzetten} bezig={oplossenBezig} />)}
+        </ul>
+      </div>}
+      {bevindingen.length > 0 && <h2 className="taken-kop mb-1 flex min-h-9 items-center text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">Van shops en monitors <span className="ml-1.5 font-normal tabular-nums">{open.length}</span></h2>}
       {!data ? <p role="status" className="py-6 text-sm text-muted-foreground">{fout ? "Meldingen niet bereikbaar." : "Meldingen laden…"}</p>
-        : open.length === 0 ? <p className="py-6 text-sm text-muted-foreground">Geen open meldingen.</p>
+        : open.length === 0 ? <p className="py-6 text-sm text-muted-foreground">{bevindingen.length ? "Geen open shopmeldingen." : "Geen open meldingen."}</p>
         : <ul className="divide-y divide-border/70 border-y border-border/70">{open.map(t => <MeldingRij key={t.id} taak={t} zet={zet} onOpenSession={onOpenSession} />)}</ul>}
       {af.length > 0 && <div className="mt-6">
         <button type="button" onClick={() => setToonAf(v => !v)} aria-expanded={toonAf}
@@ -320,6 +363,39 @@ export function MeldingenPagina({ onOpenSession }: { onOpenSession?: (sid: strin
       </div>}
       {data && <Bronregel data={data} />}
     </section>
+  );
+}
+
+function BevindingRij({ b, onBekijk, onOplossen, onWegzetten, bezig }: { b: BevindingGroep; onBekijk?: (id: string) => void; onOplossen?: (id?: string) => void; onWegzetten?: (id: string) => void; bezig: boolean }) {
+  return (
+    <li className="taak melding-rij flex flex-col gap-2 py-3.5 sm:flex-row sm:items-start sm:gap-4" data-soort="bevinding">
+      <div className="flex min-w-0 flex-1 items-start gap-3">
+        <span aria-hidden="true" className={cn("mt-[7px] size-2 shrink-0 rounded-full", b.stip)} />
+        <div className="min-w-0 flex-1">
+          <p className="text-[15px] font-medium leading-snug text-foreground">{b.titel}</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            <span className="font-medium">{b.naam}</span>
+            {b.aantal > 1 ? <> · <span className="tabular-nums">{b.aantal} bevindingen</span></> : null}
+            {b.wanneer ? <> · <span className="tabular-nums">{b.wanneer}</span></> : null}
+          </p>
+        </div>
+      </div>
+      <div className="flex shrink-0 items-center gap-1.5 pl-5 sm:pl-0">
+        {onOplossen ? <button type="button" onClick={() => onOplossen(b.id)} disabled={bezig}
+          title="Een agent zoekt uit wat ervan klopt en lost het op"
+          className="melding-opdracht inline-flex h-9 items-center whitespace-nowrap gap-1.5 rounded-md px-3 text-sm font-medium disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">
+          <Sparkles className="size-4" aria-hidden="true" />Laten oplossen
+        </button> : null}
+        {onBekijk ? <button type="button" onClick={() => onBekijk(b.id)}
+          className="inline-flex h-9 items-center gap-1.5 whitespace-nowrap rounded-md px-3 text-sm text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary">
+          <Eye className="size-4" aria-hidden="true" />Bekijken
+        </button> : null}
+        {onWegzetten ? <button type="button" onClick={() => onWegzetten(b.id)} title="Wegzetten" aria-label={`Wegzetten: ${b.naam}`}
+          className="flex size-9 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary">
+          <Check className="size-4" />
+        </button> : null}
+      </div>
+    </li>
   );
 }
 
@@ -345,11 +421,11 @@ function MeldingRij({ taak, zet, onOpenSession }: { taak: Taak; zet: (id: string
       </div>
       <div className="flex shrink-0 items-center gap-1.5 pl-5 sm:pl-0">
         <button type="button" onClick={() => geefOpdracht(taak)}
-          className="melding-opdracht inline-flex h-9 items-center gap-1.5 rounded-md px-3 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">
+          className="melding-opdracht inline-flex h-9 items-center whitespace-nowrap gap-1.5 rounded-md px-3 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">
           <CornerDownRight className="size-4" aria-hidden="true" />Opdracht geven
         </button>
         <button type="button" onClick={() => zet(taak.id, "gedaan")}
-          className="inline-flex h-9 items-center gap-1.5 rounded-md px-3 text-sm text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary">
+          className="inline-flex h-9 items-center gap-1.5 whitespace-nowrap rounded-md px-3 text-sm text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary">
           <Check className="size-4" aria-hidden="true" />Afhandelen
         </button>
         {kanOpenen ? <button type="button" onClick={open} title={taak.sessie ? "Gesprek openen" : "Openen"} aria-label={`Openen: ${taak.titel}`}

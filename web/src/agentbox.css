@@ -64,7 +64,27 @@
   --border-strong: rgba(255, 255, 255, 0.18);
   --code-bg: rgba(255, 255, 255, 0.06);
 }
-html, body { font-family: var(--font-sans); font-feature-settings: "ss01", "cv11"; -webkit-font-smoothing: antialiased; }
+html, body { font-family: var(--font-sans); font-feature-settings: var(--font-features, normal); -webkit-font-smoothing: antialiased; }
+
+/* Lettertype-keuze (Pages-menu). Inter is de standaard: hoge x-hoogte en
+   duidelijke l/I/1 (cv05, cv08) op 12-14 px. Atkinson Hyperlegible is
+   ontworpen voor maximale leesbaarheid; Systeem = SF Pro op Mac/iPhone. */
+:root, :root[data-font="inter"] {
+  --font-sans: "Inter Variable", -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  --font-features: "cv05", "cv08";
+}
+:root[data-font="atkinson"] {
+  --font-sans: "Atkinson Hyperlegible Next Variable", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-features: normal;
+}
+:root[data-font="systeem"] {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, system-ui, sans-serif;
+  --font-features: normal;
+}
+:root[data-font="geist"] {
+  --font-sans: "Geist Variable", -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  --font-features: "ss01", "cv11";
+}
 code, kbd, pre, .font-mono { font-family: var(--font-mono); }
 
 /* ── Zijbalk ────────────────────────────────────────────────────────── */
@@ -327,3 +347,28 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
 @media (max-width: 767px) {
   .session-overview, .taken { padding-bottom: 3.25rem; }
 }
+
+/* ── Snelheid: geen live blur boven scrollende inhoud (Sam, 07-11) ────
+   Een backdrop-filter boven de chat moet bij elk scrollframe opnieuw de
+   inhoud eronder vervagen; op een telefoon is dat de duurste laag van het
+   scherm. Deze vlakken worden dicht (bijna-ondoorzichtig) in plaats van
+   glas: zelfde plek, zelfde kleur, geen GPU-werk per frame. */
+.lfg-scroll-pill,
+.mobile-scroll-composer-fade,
+.glass-island::before,
+.mobile-scroll-header-fade::before,
+.lfg-surface-toggle--dock,
+.lfg-term-deck {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+.lfg-scroll-pill { background-color: var(--card) !important; }
+.mobile-scroll-composer-fade { background-color: var(--background) !important; }
+.glass-island::before { background: color-mix(in srgb, var(--background) 96%, transparent) !important; }
+.mobile-scroll-header-fade::before { background: var(--background) !important; }
+
+/* Elke lettertypeknop toont zichzelf, ongeacht de huidige keuze. */
+[data-font-preview="inter"] { font-family: "Inter Variable", system-ui, sans-serif; }
+[data-font-preview="atkinson"] { font-family: "Atkinson Hyperlegible Next Variable", system-ui, sans-serif; }
+[data-font-preview="systeem"] { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, system-ui, sans-serif; }
+[data-font-preview="geist"] { font-family: "Geist Variable", system-ui, sans-serif; }
