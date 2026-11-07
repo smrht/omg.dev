@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 
 import { agentboxConfig } from "@/lib/agentbox-config";
 import { Check, Clock, CornerDownRight, ExternalLink, Eye, Loader2, MessageSquare, RotateCcw, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useAskOptional, stripMd, type Question } from "@/components/ask-center";
 
 // Taken: wat er voor Sam ligt, automatisch verzameld uit mail, gesprekken en
 // bestellingen (agentbox/taken/collect.py, elke 10 min). Alleen lezen: deze
@@ -23,7 +24,16 @@ export type Taak = {
   ongelezen?: boolean;
   status: "open" | "later" | "gedaan";
   afgevinkt?: string | null;
+  /** Bezos: welke knoppen de vraag krijgt (agentbox/taken/beslis.py). */
+  beslis?: Beslis;
+  /** Wat er gebeurde, in één zin uit het laatste bericht. */
+  wat?: string;
 };
+export type Beslis =
+  | { vorm: "janee"; vraag?: string | null; ja?: string | null; eerst?: string | null }
+  | { vorm: "ab"; vraag: string; opties: string[]; uitleg?: string[] | null; toelichting?: string | null }
+  | { vorm: "taak"; vraag: string }
+  | { vorm: "open" };
 type TakenData = { bijgewerkt?: string; ververst?: boolean; bronnen: Record<string, { ok: boolean; aantal: number; fout?: string }>; items: Taak[] };
 
 const LABEL: Record<TaakSoort, string> = {
@@ -265,7 +275,7 @@ export function TakenLijst({ onOpenSession, onMeldingen = () => window.dispatchE
       {delen.meldingen.length > 0 && onMeldingen && (
         <button type="button" onClick={onMeldingen}
           className="taken-meldingen-link mt-3 flex min-h-10 w-full items-center gap-2 rounded-md border border-border/70 px-3 text-left text-sm hover:bg-muted focus-visible:outline-2 focus-visible:outline-primary">
-          <span className="font-medium">Meldingen</span>
+          <span className="font-medium">Bezos</span>
           <span className="tabular-nums text-muted-foreground">{delen.meldingen.length}</span>
           <span className="ml-auto text-xs text-muted-foreground">openen</span>
         </button>
@@ -311,142 +321,303 @@ export function TakenVandaag({ onOpenSession, onAlles }: { onOpenSession?: (sid:
   );
 }
 
-/**
- * Meldingen als eigen scherm (vervangt het oude Notifications-scherm, dat de
- * stilgevallen Shipped-feed was). Hoofdactie is "Opdracht geven"; afhandelen
- * is de tweede knop.
- */
-export type BevindingGroep = { id: string; naam: string; titel: string; aantal: number; wanneer: string; stip: string };
 
-export function MeldingenPagina({ onOpenSession, bevindingen = [], onBekijk, onOplossen, onWegzetten, oplossenBezig = false }: {
+/* ───────────────────────── Bezos ─────────────────────────
+ * Sam, 07-11-2026: "ik ben het meesterbrein en de agents mijn uitvoerders. Ze vragen
+ * alleen een keuze of een richting aan mij en gaan dan uitvoeren." Dit scherm staat op
+ * de oude plek van Meldingen. Bovenaan wat een besluit van Sam vraagt, met de keuze als
+ * knop; daaronder wat hij zelf moet doen; onderaan, dicht, wat alleen ter info is.
+ *
+ * Een knop stuurt het antwoord naar de chat die de vraag stelde, via de taken-API. Die
+ * controleert eerst of de vraag daar nog precies zo staat en stuurt per vraag één keer.
+ */
+export type BezosBevinding = {
+  id: string; agentId: string; naam: string; titel: string; voorstel?: string;
+  ernst: "high" | "med" | "low"; wanneer: string;
+};
+
+const NIKS_TE_DOEN = /^(niks|niets|geen actie|geen)\b|niks te doen|niets te doen|geen actie nodig|no action|nothing to do/i;
+const SAM_ZELF = /\b(sam|jij)\b[^.]{0,60}\b(zelf|moet|kan|handmatig)\b/i;
+const MELDING_ACTIE = /storing|misbruik|wacht|waited|fout|mislukt|error|offline|\bdown\b|klacht|retour|dispute|chargeback|geweigerd|failed|verlop|expired|waarschuwing|alert|blokkade|geblokkeerd/i;
+
+type Kaart =
+  | { soort: "ask"; id: string; q: Question; tijd?: number }
+  | { soort: "vraag"; id: string; t: Taak }
+  | { soort: "bevinding"; id: string; b: BezosBevinding; zelf: boolean }
+  | { soort: "melding"; id: string; t: Taak };
+
+function bezosAntwoord(id: string, antwoord: string) {
+  return fetch(`/api/taken/item/${encodeURIComponent(id)}/antwoord`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ antwoord }),
+  }).then(async r => ({ ok: r.ok, ...(await r.json().catch(() => ({}))) as { error?: string; verouderd?: boolean } }));
+}
+
+export function BezosPagina({ onOpenSession, bevindingen = [], onBekijk, onOplossen, onWeg, oplossenBezig = false }: {
   onOpenSession?: (sid: string) => void;
-  /** Open findings from auto agents, one row per agent (the old "1 bevinding" pill). */
-  bevindingen?: BevindingGroep[];
-  onBekijk?: (id: string) => void;
-  onOplossen?: (id?: string) => void;
-  onWegzetten?: (id: string) => void;
+  bevindingen?: BezosBevinding[];
+  onBekijk?: (agentId: string) => void;
+  onOplossen?: (ids: string[]) => void;
+  onWeg?: (ids: string[]) => void;
   oplossenBezig?: boolean;
 }) {
   const { data, fout, zet } = useTaken();
-  const [toonAf, setToonAf] = useState(false);
-  const items = data?.items ?? [];
-  const open = useMemo(() => items.filter(i => i.status === "open" && isMelding(i))
-    .sort((a, b) => Number(!!b.machine && b.soort === "vast") - Number(!!a.machine && a.soort === "vast") || (b.tijd ?? "").localeCompare(a.tijd ?? "")), [items]);
-  const af = useMemo(() => items.filter(i => isMelding(i) && i.status === "gedaan" && isVandaag(i.afgevinkt)), [items]);
+  const ask = useAskOptional();
+  const [weg, setWeg] = useState<Set<string>>(() => new Set());
+  const verberg = useCallback((id: string) => setWeg(w => new Set(w).add(id)), []);
+
+  const delen = useMemo(() => {
+    const items = (data?.items ?? []).filter(i => i.status === "open" && !weg.has(i.id));
+    const beslis: Kaart[] = [], zelf: Kaart[] = [], info: Kaart[] = [];
+    for (const q of ask?.questions ?? []) if (!weg.has(`ask:${q.id}`)) beslis.push({ soort: "ask", id: `ask:${q.id}`, q });
+    for (const t of items.filter(i => i.soort === "vraag")) {
+      const v = t.beslis?.vorm ?? "open";
+      (v === "taak" ? zelf : beslis).push({ soort: "vraag", id: t.id, t });
+    }
+    for (const b of bevindingen) {
+      if (weg.has(b.id)) continue;
+      if (b.ernst === "low" || NIKS_TE_DOEN.test((b.voorstel ?? "").trim())) info.push({ soort: "bevinding", id: b.id, b, zelf: false });
+      else if (SAM_ZELF.test(b.voorstel ?? "")) zelf.push({ soort: "bevinding", id: b.id, b, zelf: true });
+      else beslis.push({ soort: "bevinding", id: b.id, b, zelf: false });
+    }
+    for (const t of items.filter(isMelding)) {
+      // Een bot die al dagen vastzit is geen besluit meer van vandaag: ter info.
+      const vers = !t.tijd || Date.now() - new Date(t.tijd).getTime() < 48 * 3600_000;
+      const actie = t.soort === "vast" ? vers : MELDING_ACTIE.test(`${t.titel} ${t.wie ?? ""}`);
+      (actie ? beslis : info).push({ soort: "melding", id: t.id, t });
+    }
+    // Keuzes met knoppen eerst, dan vragen die een antwoord in woorden nodig hebben.
+    const rang = (k: Kaart) => k.soort === "ask" ? 0 : k.soort === "vraag" ? (k.t.beslis?.vorm === "open" ? 2 : 1) : k.soort === "bevinding" ? 3 : 4;
+    beslis.sort((a, b) => rang(a) - rang(b));
+    return { beslis, zelf, info };
+  }, [data, ask?.questions, bevindingen, weg]);
+
+  const totaal = delen.beslis.length + delen.zelf.length;
   return (
-    <section aria-label="Meldingen" className="taken meldingen-pagina mx-auto w-full max-w-3xl px-4 pb-16 pt-8 md:px-8">
-      <header className="mb-4">
-        <h1 className="text-[22px] font-semibold tracking-tight">Meldingen <span className="ml-1 text-base font-normal tabular-nums text-muted-foreground">{open.length + bevindingen.reduce((n, b) => n + b.aantal, 0)}</span></h1>
-        <p className="mt-1 text-sm text-muted-foreground">Shopmeldingen, facturen, monitors, vastgelopen bots en wat de auto-agents vonden. Geef een opdracht of handel af.</p>
+    <section aria-label="Bezos" className="taken bezos mx-auto w-full max-w-2xl px-4 pb-16 pt-8 md:px-8">
+      <header className="mb-6">
+        <h1 className="text-[22px] font-semibold tracking-tight">Bezos {totaal > 0 ? <span className="ml-1 text-base font-normal tabular-nums text-muted-foreground">{totaal}</span> : null}</h1>
+        <p className="mt-1 text-sm text-muted-foreground">Jij kiest, de agents voeren uit.</p>
       </header>
-      {bevindingen.length > 0 && <div className="mb-6">
-        <div className="mb-1 flex min-h-9 items-center gap-2">
-          <h2 className="taken-kop text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
-            Van auto-agents <span className="ml-1 font-normal tabular-nums">{bevindingen.reduce((n, b) => n + b.aantal, 0)}</span>
-          </h2>
-          {onOplossen && bevindingen.length > 1 ? <button type="button" onClick={() => onOplossen()} disabled={oplossenBezig}
-            className="ml-auto inline-flex h-8 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-primary">
-            {oplossenBezig ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : <Sparkles className="size-3.5" aria-hidden="true" />}Alles laten oplossen
-          </button> : null}
-        </div>
-        <ul className="divide-y divide-border/70 border-y border-border/70">
-          {bevindingen.map(b => <BevindingRij key={b.id} b={b} onBekijk={onBekijk} onOplossen={onOplossen} onWegzetten={onWegzetten} bezig={oplossenBezig} />)}
-        </ul>
-      </div>}
-      {bevindingen.length > 0 && <h2 className="taken-kop mb-1 flex min-h-9 items-center text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">Van shops en monitors <span className="ml-1.5 font-normal tabular-nums">{open.length}</span></h2>}
-      {!data ? <p role="status" className="py-6 text-sm text-muted-foreground">{fout ? "Meldingen niet bereikbaar." : "Meldingen laden…"}</p>
-        : open.length === 0 ? <p className="py-6 text-sm text-muted-foreground">{bevindingen.length ? "Geen open shopmeldingen." : "Geen open meldingen."}</p>
-        : <ul className="divide-y divide-border/70 border-y border-border/70">{open.map(t => <MeldingRij key={t.id} taak={t} zet={zet} onOpenSession={onOpenSession} />)}</ul>}
-      {af.length > 0 && <div className="mt-6">
-        <button type="button" onClick={() => setToonAf(v => !v)} aria-expanded={toonAf}
-          className="taken-kop flex min-h-9 items-center text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground hover:text-foreground">
-          Vandaag afgehandeld <span className="ml-1.5 font-normal tabular-nums">{af.length}</span>
-        </button>
-        {toonAf && <ul>{af.map(t => <TaakRij key={t.id} taak={t} zet={zet} onOpenSession={onOpenSession} klein />)}</ul>}
-      </div>}
+      {!data && !ask ? <p role="status" className="py-6 text-sm text-muted-foreground">{fout ? "Niet bereikbaar." : "Laden…"}</p> : null}
+      {data || ask ? <>
+        <BezosKop aantal={delen.beslis.length}>Beslis</BezosKop>
+        {delen.beslis.length ? <ul className="bezos-lijst">{delen.beslis.map(k => <BezosRij key={k.id} k={k} ask={ask} zet={zet} verberg={verberg} onOpenSession={onOpenSession} onBekijk={onBekijk} onOplossen={onOplossen} onWeg={onWeg} oplossenBezig={oplossenBezig} />)}</ul>
+          : <p className="py-4 text-sm text-muted-foreground">Niets te beslissen. De agents kunnen door.</p>}
+        {delen.zelf.length > 0 && <>
+          <BezosKop aantal={delen.zelf.length}>Zelf doen</BezosKop>
+          <ul className="bezos-lijst">{delen.zelf.map(k => <BezosRij key={k.id} k={k} ask={ask} zet={zet} verberg={verberg} onOpenSession={onOpenSession} onBekijk={onBekijk} onOplossen={onOplossen} onWeg={onWeg} oplossenBezig={oplossenBezig} />)}</ul>
+        </>}
+        {delen.info.length > 0 && <TerInfo kaarten={delen.info} zet={zet} verberg={verberg} onOpenSession={onOpenSession} onBekijk={onBekijk} onWeg={onWeg} />}
+      </> : null}
       {data && <Bronregel data={data} />}
     </section>
   );
 }
 
-function BevindingRij({ b, onBekijk, onOplossen, onWegzetten, bezig }: { b: BevindingGroep; onBekijk?: (id: string) => void; onOplossen?: (id?: string) => void; onWegzetten?: (id: string) => void; bezig: boolean }) {
-  // Wegzetten wist alle bevindingen van deze agent en kent geen ongedaan maken:
-  // eerste tik vraagt "Zeker?", tweede tik binnen 4 s voert uit.
-  const [zeker, setZeker] = useState(false);
+function BezosKop({ children, aantal }: { children: string; aantal: number }) {
+  return <h2 className="taken-kop mt-8 mb-1 flex min-h-8 items-center text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground first:mt-0">
+    {children}<span className="ml-1.5 font-normal tabular-nums">{aantal}</span>
+  </h2>;
+}
+
+type Knop = { label: string; hoofd?: boolean; doe: () => Promise<void> | void; titel?: string };
+
+function BezosRij({ k, ask, zet, verberg, onOpenSession, onBekijk, onOplossen, onWeg, oplossenBezig }: {
+  k: Kaart; ask: ReturnType<typeof useAskOptional>; zet: (id: string, s: Taak["status"]) => void; verberg: (id: string) => void;
+  onOpenSession?: (sid: string) => void; onBekijk?: (agentId: string) => void; onOplossen?: (ids: string[]) => void; onWeg?: (ids: string[]) => void; oplossenBezig: boolean;
+}) {
+  const [bezig, setBezig] = useState<string | null>(null);
+  const [klaar, setKlaar] = useState<string | null>(null);
+  const [melding, setMelding] = useState<string | null>(null);
+  const [dicht, setDicht] = useState(false);
+  // Na het antwoord even "Verstuurd: Ja" laten staan, dan dichtvouwen en weg:
+  // zo zie je dat de keuze is aangekomen en waar de rij bleef.
   useEffect(() => {
-    if (!zeker) return;
-    const t = window.setTimeout(() => setZeker(false), 4000);
-    return () => window.clearTimeout(t);
-  }, [zeker]);
+    if (!klaar) return;
+    const a = window.setTimeout(() => setDicht(true), 1200);
+    const b = window.setTimeout(() => verberg(k.id), 1500);
+    return () => { window.clearTimeout(a); window.clearTimeout(b); };
+  }, [klaar, k.id, verberg]);
+
+  const stuur = (antwoord: string, label = antwoord) => async () => {
+    if (k.soort !== "vraag" && k.soort !== "melding") return;
+    setBezig(label); setMelding(null);
+    const r = await bezosAntwoord(k.id, antwoord).catch(() => ({ ok: false, error: "geen verbinding", verouderd: false }));
+    setBezig(null);
+    if (r.ok) { setKlaar(label); laad().catch(() => undefined); }
+    else setMelding(r.verouderd ? "De vraag is veranderd. Open het gesprek." : `Niet verstuurd: ${r.error ?? "onbekende fout"}.`);
+  };
+
+  let meta = "", vraag = "", context: string | undefined, ja: string | undefined;
+  let uitleg: [string, string][] = [];
+  let knoppen: Knop[] = [];
+  let open: (() => void) | undefined;
+  let stip = "bg-primary";
+  if (k.soort === "ask") {
+    const q = k.q;
+    meta = "Vraag van een agent";
+    const tekst = stripMd(q.question);
+    vraag = tekst.length > 180 ? `${tekst.slice(0, 179).replace(/\s+\S*$/, "")}…` : tekst;
+    knoppen = (q.options ?? []).slice(0, 4).map((o, i) => ({ label: o.length > 30 ? `${o.slice(0, 29)}…` : o, titel: o, hoofd: i === 0,
+      doe: async () => { setBezig(o); await ask?.answer(q, o); setBezig(null); setKlaar(o.length > 30 ? `${o.slice(0, 29)}…` : o); } }));
+    if (q.sessionId && onOpenSession) open = () => onOpenSession(q.sessionId as string);
+  } else if (k.soort === "vraag") {
+    const t = k.t, b = t.beslis ?? { vorm: "open" as const };
+    meta = t.detail ?? "Gesprek";
+    context = t.wat;
+    if (t.sessie && onOpenSession) open = () => onOpenSession(t.sessie as string);
+    if (b.vorm === "janee") {
+      // Kop = waar je ja of nee op zegt: de vraag, anders wat ja doet, anders wat je eerst bekijkt.
+      vraag = b.vraag || b.ja || b.eerst || t.titel;
+      if (b.vraag && b.ja) ja = b.ja;
+      knoppen = [{ label: "Ja", hoofd: true, doe: stuur("Ja") }, { label: "Nee", doe: stuur("Nee") }];
+    } else if (b.vorm === "ab") {
+      vraag = b.toelichting ? `${b.vraag}: ${b.toelichting}` : b.vraag;
+      uitleg = (b.uitleg ?? []).map((u, i) => [b.opties[i] ?? "", u.charAt(0).toUpperCase() + u.slice(1)]);
+      knoppen = b.opties.slice(0, 3).map(o => ({ label: o, doe: stuur(o) }));
+    } else if (b.vorm === "taak") {
+      vraag = b.vraag; stip = "bg-[var(--info)]";
+      knoppen = [{ label: "Gedaan", hoofd: true, titel: "De agent hoort dat het gedaan is en gaat verder", doe: stuur("Gedaan") },
+        { label: "Morgen", doe: () => zet(t.id, "later") }];
+    } else {
+      vraag = t.titel.charAt(0).toUpperCase() + t.titel.slice(1);
+      knoppen = open ? [{ label: "Antwoorden", hoofd: true, titel: "Open het gesprek en typ je antwoord", doe: open }, { label: "Morgen", doe: () => zet(t.id, "later") }] : [];
+      open = undefined;
+    }
+  } else if (k.soort === "bevinding") {
+    const b = k.b;
+    meta = `${b.naam}${b.wanneer ? ` · ${b.wanneer}` : ""}`;
+    vraag = b.titel; context = b.voorstel ? `Voorstel: ${b.voorstel}` : undefined;
+    stip = b.ernst === "high" ? "bg-destructive" : "bg-primary";
+    if (onBekijk) open = () => onBekijk(b.agentId);
+    knoppen = k.zelf
+      ? [{ label: "Gedaan", hoofd: true, doe: () => { onWeg?.([b.id]); setKlaar("Gedaan"); } },
+         { label: "Niet nodig", doe: () => { onWeg?.([b.id]); setKlaar("Weggezet"); } }]
+      : [{ label: "Laat oplossen", hoofd: true, titel: "Een agent voert het voorstel uit", doe: () => { onOplossen?.([b.id]); setKlaar("Agent gestart"); } },
+         { label: "Niet nodig", doe: () => { onWeg?.([b.id]); setKlaar("Weggezet"); } }];
+  } else {
+    const t = k.t;
+    meta = [t.soort === "vast" ? "Vastgelopen" : t.wie, wanneer(t.tijd)].filter(Boolean).join(" · ");
+    vraag = t.titel; context = t.detail;
+    stip = t.soort === "vast" ? "bg-destructive" : "bg-primary";
+    if (t.sessie && onOpenSession) open = () => onOpenSession(t.sessie as string);
+    else if (t.link) open = () => window.open(t.link, "_blank", "noopener");
+    if (t.soort === "vast") {
+      const herstart = /capaciteit|onverwacht/i.test(t.detail ?? "");
+      knoppen = [herstart ? { label: "Ga verder", hoofd: true, titel: "Stuur 'Ga verder' naar deze chat", doe: stuur("Ga verder") }
+        : { label: "Opdracht geven", hoofd: true, doe: () => geefOpdracht(t) }, { label: "Laat staan", doe: () => { zet(t.id, "gedaan"); setKlaar("Weggezet"); } }];
+    } else {
+      knoppen = [{ label: "Opdracht geven", hoofd: true, titel: "Nieuwe chat met deze melding al ingevuld", doe: () => geefOpdracht(t) },
+        { label: "Afhandelen", titel: t.bron === "mail" ? "De mail gaat uit je inbox" : undefined, doe: () => { zet(t.id, "gedaan"); setKlaar("Afgehandeld"); } }];
+    }
+  }
+
   return (
-    <li className="taak melding-rij flex flex-col gap-2 py-3.5 sm:flex-row sm:items-start sm:gap-4" data-soort="bevinding">
-      <div className="flex min-w-0 flex-1 items-start gap-3">
-        <span aria-hidden="true" className={cn("mt-[7px] size-2 shrink-0 rounded-full", b.stip)} />
-        <div className="min-w-0 flex-1">
-          <p className="text-[15px] font-medium leading-snug text-foreground">{b.titel}</p>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            <span className="font-medium">{b.naam}</span>
-            {b.aantal > 1 ? <> · <span className="tabular-nums">{b.aantal} bevindingen</span></> : null}
-            {b.wanneer ? <> · <span className="tabular-nums">{b.wanneer}</span></> : null}
-          </p>
+    <li className="bezos-rij" data-dicht={dicht ? "" : undefined}>
+      <div className="bezos-rij-binnen">
+        <div className="flex items-start gap-3 py-4">
+          <span aria-hidden="true" className={cn("mt-[9px] size-2 shrink-0 rounded-full", stip)} />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-xs text-muted-foreground">{meta}</p>
+            <p className="mt-0.5 text-base font-semibold leading-snug text-foreground">{vraag}</p>
+            {uitleg.length ? <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm leading-relaxed">
+              {uitleg.map(([l, u]) => <div key={l} className="contents"><dt className="font-semibold tabular-nums text-foreground">{l}</dt><dd className="text-foreground/80">{u}</dd></div>)}
+            </dl> : null}
+            {ja ? <p className="mt-1 text-sm leading-relaxed text-foreground/80">{ja}</p> : null}
+            {context ? <p className="mt-1 line-clamp-2 text-sm leading-relaxed text-muted-foreground">{context}</p> : null}
+            {klaar ? (
+              <p role="status" className="bezos-verstuurd mt-3 inline-flex h-10 items-center gap-1.5 text-sm font-medium text-primary">
+                <Check className="size-4" aria-hidden="true" />{k.soort === "vraag" || k.soort === "ask" ? `Verstuurd: ${klaar}` : klaar}
+              </p>
+            ) : (
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                {knoppen.map(kn => (
+                  <button key={kn.label} type="button" title={kn.titel} disabled={!!bezig || (oplossenBezig && kn.label === "Laat oplossen")}
+                    onClick={() => void kn.doe()}
+                    className={cn("bezos-knop inline-flex h-10 min-w-[4.5rem] items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-4 text-sm font-medium disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary",
+                      kn.hoofd ? "bezos-knop-hoofd" : "bezos-knop-neven")}>
+                    {bezig === kn.label || bezig === kn.titel ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : null}{kn.label}
+                  </button>
+                ))}
+                {open ? <button type="button" onClick={open} className="ml-auto inline-flex h-10 min-w-10 items-center justify-center gap-1 rounded-md px-2 text-sm text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary">
+                  {k.soort === "bevinding" ? <Eye className="size-4" aria-hidden="true" /> : k.soort === "melding" && !k.t.sessie ? <ExternalLink className="size-4" aria-hidden="true" /> : <MessageSquare className="size-4" aria-hidden="true" />}<span className="max-sm:sr-only">{k.soort === "bevinding" ? "Bekijken" : k.soort === "melding" && !k.t.sessie ? "Openen" : "Gesprek"}</span>
+                </button> : null}
+              </div>
+            )}
+            {melding ? <p role="alert" className="mt-2 text-sm text-destructive">{melding}</p> : null}
+          </div>
         </div>
-      </div>
-      <div className="flex shrink-0 flex-wrap items-center gap-1.5 pl-5 sm:flex-nowrap sm:pl-0">
-        {onOplossen ? <button type="button" onClick={() => onOplossen(b.id)} disabled={bezig}
-          title="Een agent zoekt uit wat ervan klopt en lost het op"
-          className="melding-opdracht inline-flex h-9 items-center whitespace-nowrap gap-1.5 rounded-md px-3 text-sm font-medium disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">
-          <Sparkles className="size-4" aria-hidden="true" />Laten oplossen
-        </button> : null}
-        {onBekijk ? <button type="button" onClick={() => onBekijk(b.id)}
-          className="inline-flex h-9 items-center gap-1.5 whitespace-nowrap rounded-md px-3 text-sm text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary">
-          <Eye className="size-4" aria-hidden="true" />Bekijken
-        </button> : null}
-        {onWegzetten ? <button type="button" onClick={() => (zeker ? onWegzetten(b.id) : setZeker(true))}
-          title={zeker ? "Nog een keer tikken om weg te zetten" : "Wegzetten"}
-          aria-label={zeker ? `Zeker wegzetten: ${b.naam}, ${b.aantal} ${b.aantal === 1 ? "bevinding" : "bevindingen"}` : `Wegzetten: ${b.naam}`}
-          className={cn("flex h-9 items-center justify-center gap-1.5 whitespace-nowrap rounded-md text-sm focus-visible:outline-2 focus-visible:outline-primary",
-            zeker ? "bg-destructive/10 px-3 font-medium text-destructive" : "w-9 text-muted-foreground hover:bg-muted hover:text-foreground")}>
-          <Check className="size-4" aria-hidden="true" />{zeker ? "Zeker?" : null}
-        </button> : null}
       </div>
     </li>
   );
 }
 
-function MeldingRij({ taak, zet, onOpenSession }: { taak: Taak; zet: (id: string, s: Taak["status"]) => void; onOpenSession?: (sid: string) => void }) {
-  const kanOpenen = !!(taak.sessie && onOpenSession) || !!taak.link;
-  const open = () => {
-    if (taak.sessie && onOpenSession) onOpenSession(taak.sessie);
-    else if (taak.link) window.open(taak.link, "_blank", "noopener");
+function TerInfo({ kaarten, zet, verberg, onOpenSession, onBekijk, onWeg }: {
+  kaarten: Kaart[]; zet: (id: string, s: Taak["status"]) => void; verberg: (id: string) => void;
+  onOpenSession?: (sid: string) => void; onBekijk?: (agentId: string) => void; onWeg?: (ids: string[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [zeker, setZeker] = useState(false);
+  const [bezig, setBezig] = useState(false);
+  const [uitslag, setUitslag] = useState<string | null>(null);
+  useEffect(() => {
+    if (!zeker) return;
+    const t = window.setTimeout(() => setZeker(false), 5000);
+    return () => window.clearTimeout(t);
+  }, [zeker]);
+  const meldingen = kaarten.flatMap(k => k.soort === "melding" ? [k.t] : []);
+  const mails = meldingen.filter(t => t.bron === "mail").length;
+  const bev = kaarten.flatMap(k => k.soort === "bevinding" ? [k.b.id] : []);
+  const allesGezien = async () => {
+    // Elke melding uit Gmail is één archivering: eerst bevestigen, met het aantal erbij.
+    if (mails > 0 && !zeker) { setZeker(true); return; }
+    setZeker(false); setBezig(true); setUitslag(null);
+    if (bev.length) onWeg?.(bev);
+    const r = await fetch("/api/taken/alles-gezien", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: meldingen.map(t => t.id) }) })
+      .then(x => x.json() as Promise<{ resultaat?: { id: string; ok: boolean }[] }>).catch(() => null);
+    setBezig(false);
+    const mis = (r?.resultaat ?? []).filter(x => !x.ok).length;
+    if (!r) setUitslag("Niet gelukt: geen verbinding.");
+    else if (mis) setUitslag(`${mis} ${mis === 1 ? "mail bleef" : "mails bleven"} in je inbox. Probeer het later nog eens.`);
+    for (const x of r?.resultaat ?? []) if (x.ok) verberg(x.id);
+    for (const id of bev) verberg(id);
+    laad().catch(() => undefined);
   };
   return (
-    <li className="taak melding-rij flex flex-col gap-2 py-3.5 sm:flex-row sm:items-start sm:gap-4" data-soort={taak.soort}>
-      <div className="flex min-w-0 flex-1 items-start gap-3">
-        <span aria-hidden="true" className="taak-stip mt-[7px] size-2 shrink-0 rounded-full" />
-        <div className="min-w-0 flex-1">
-          <p className="text-[15px] font-medium leading-snug text-foreground">{taak.titel}</p>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            <span className="taak-soort font-medium">{taak.soort === "vast" ? "Vastgelopen" : LABEL[taak.soort]}</span>
-            {" · "}<span className="tabular-nums">{wanneer(taak.tijd)}</span>
-            {taak.wie ? <> · {taak.wie}</> : null}
-          </p>
-          {taak.detail ? <p className="mt-1 line-clamp-2 text-sm leading-relaxed text-muted-foreground">{taak.detail}</p> : null}
-        </div>
-      </div>
-      <div className="flex shrink-0 flex-wrap items-center gap-1.5 pl-5 sm:flex-nowrap sm:pl-0">
-        <button type="button" onClick={() => geefOpdracht(taak)}
-          className="melding-opdracht inline-flex h-9 items-center whitespace-nowrap gap-1.5 rounded-md px-3 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">
-          <CornerDownRight className="size-4" aria-hidden="true" />Opdracht geven
+    <div className="mt-8">
+      <div className="flex min-h-10 items-center gap-2">
+        <button type="button" onClick={() => setOpen(o => !o)} aria-expanded={open}
+          className="taken-kop inline-flex min-h-10 items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary">
+          Ter info <span className="font-normal tabular-nums">{kaarten.length}</span>
+          <span className="font-normal normal-case tracking-normal">{open ? "verbergen" : "tonen"}</span>
         </button>
-        <button type="button" onClick={() => zet(taak.id, "gedaan")} title={taak.bron === "mail" ? "Afhandelen, de mail gaat uit je inbox" : "Afhandelen"}
-          className="inline-flex h-9 items-center gap-1.5 whitespace-nowrap rounded-md px-3 text-sm text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary">
-          <Check className="size-4" aria-hidden="true" />Afhandelen
+        <button type="button" onClick={() => void allesGezien()} disabled={bezig}
+          className={cn("ml-auto inline-flex h-9 items-center gap-1.5 whitespace-nowrap rounded-md px-3 text-sm focus-visible:outline-2 focus-visible:outline-primary disabled:opacity-50",
+            zeker ? "bg-destructive/10 font-medium text-destructive" : "text-muted-foreground hover:bg-muted hover:text-foreground")}>
+          {bezig ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : <Check className="size-4" aria-hidden="true" />}
+          {zeker ? `Zeker? ${mails} ${mails === 1 ? "mail gaat" : "mails gaan"} uit je inbox` : "Alles gezien"}
         </button>
-        {kanOpenen ? <button type="button" onClick={open} title={taak.sessie ? "Gesprek openen" : "Openen"} aria-label={`Openen: ${taak.titel}`}
-          className="flex size-9 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary">
-          <ExternalLink className="size-4" />
-        </button> : null}
       </div>
-    </li>
+      {uitslag ? <p role="alert" className="mt-1 text-sm text-destructive">{uitslag}</p> : null}
+      {open && <ul className="mt-1">
+        {kaarten.map(k => {
+          // Ter info is lezen, geen werk: één regel per melding, tik opent de bron.
+          const [titel, sub, doe] = k.soort === "melding"
+            ? [k.t.titel, [k.t.wie, wanneer(k.t.tijd), k.t.detail].filter(Boolean).join(" · "),
+               k.t.sessie && onOpenSession ? () => onOpenSession(k.t.sessie as string) : k.t.link ? () => window.open(k.t.link, "_blank", "noopener") : undefined]
+            : k.soort === "bevinding" ? [k.b.titel, [k.b.naam, k.b.voorstel].filter(Boolean).join(" · "), () => onBekijk?.(k.b.agentId)]
+            : ["", "", undefined];
+          return (
+            <li key={k.id} className="taak flex items-start gap-3 py-2.5" data-soort="melding">
+              <span aria-hidden="true" className="taak-stip mt-[7px] size-2 shrink-0 rounded-full" />
+              <button type="button" onClick={doe} disabled={!doe} className="min-w-0 flex-1 text-left focus-visible:outline-2 focus-visible:outline-primary disabled:cursor-default">
+                <span className="block text-[13px] font-medium leading-snug text-foreground">{titel}</span>
+                <span className="mt-0.5 block truncate text-xs text-muted-foreground">{sub}</span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>}
+    </div>
   );
 }

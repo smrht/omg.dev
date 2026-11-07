@@ -1,7 +1,7 @@
 import { OverviewToolbar, useOverviewPreferences, buildOverviewGroups, flattenOverview } from "./components/session-overview";
 import { agentboxConfig, greetingName } from "./lib/agentbox-config";
 import { applyStopOverrides, clearStopped, markStopped, useStopOverrideVersion } from "./lib/stop-override";
-import { TakenLijst, TakenVandaag, MeldingenPagina, zetBevindingenAantal, MELDINGEN_EVENT, OPDRACHT_EVENT, neemOpdracht, opdrachtVerstuurd } from "./components/taken";
+import { TakenLijst, TakenVandaag, BezosPagina, zetBevindingenAantal, MELDINGEN_EVENT, OPDRACHT_EVENT, neemOpdracht, opdrachtVerstuurd } from "./components/taken";
 import { type WorkspaceSummary } from "./components/desktop-workspace";
 import { SessionUsageControls } from "./components/session-usage-controls";
 import { WorkspaceFindingsMenu } from "./components/workspace-findings";
@@ -9166,20 +9166,21 @@ export function App() {
   // agentbox: bevindingen van auto-agents voor Meldingen. Hooks staan hier,
   // vóór de vroege returns (connect-gate, onboarding, identiteit) hieronder:
   // daarna geplaatst gaf een gate-wissel React #300 (minder hooks gerenderd).
-  const bevindingGroepen = useMemo(
+  const bezosBevindingen = useMemo(
     () =>
-      groupFindingsByAgent(findings).map((r) => ({
-        id: r.agentId,
-        naam: agentName(r.agentId),
-        titel: r.findings[0]?.title ?? "",
-        aantal: r.findings.length,
-        wanneer: relTime(r.latestAt),
-        stip: SEV_DOT[r.severity],
+      findings.map((f) => ({
+        id: f.id,
+        agentId: f.agentId,
+        naam: agentName(f.agentId),
+        titel: f.title,
+        voorstel: f.suggest,
+        ernst: f.severity,
+        wanneer: relTime(f.lastSeenAt ?? f.createdAt),
       })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [findings, autoAgents],
   );
-  const bevindingenTotaal = bevindingGroepen.reduce((n, g) => n + g.aantal, 0);
+  const bevindingenTotaal = findings.length;
   useEffect(() => zetBevindingenAantal(bevindingenTotaal), [bevindingenTotaal]);
 
   // Reuses the existing setup handlers and shared auth dialog for every row.
@@ -9366,16 +9367,15 @@ export function App() {
       [s.sessionId, s.nativeSessionId].filter((x): x is string => !!x),
     ),
   );
-  // agentbox: Notifications (de stilgevallen Shipped-feed) is vervangen door Meldingen.
+  // agentbox: Notifications (de stilgevallen Shipped-feed) is vervangen door Bezos,
+  // het beslisscherm (Sam, 07-11-2026). Bevindingen gaan er los in, één per rij.
   const notificationsPage = (_active: boolean) => (
-    <MeldingenPagina
-      onOpenSession={(sid) => openHistoricalSession({ sessionId: sid, reviewLabel: "Melding" })}
-      bevindingen={bevindingGroepen}
+    <BezosPagina
+      onOpenSession={(sid) => openHistoricalSession({ sessionId: sid, reviewLabel: "Bezos" })}
+      bevindingen={bezosBevindingen}
       onBekijk={(agentId) => setOpenReport(agentId)}
-      onOplossen={(agentId) =>
-        void launchAutoTriage(agentId ? findings.filter((f) => f.agentId === agentId) : findings)
-      }
-      onWegzetten={(agentId) => void clearAllFindings(findings.filter((f) => f.agentId === agentId))}
+      onOplossen={(ids) => void launchAutoTriage(findings.filter((f) => ids.includes(f.id)))}
+      onWeg={(ids) => void clearAllFindings(findings.filter((f) => ids.includes(f.id)))}
       oplossenBezig={autoTriageBusy}
     />
   );
@@ -10955,7 +10955,7 @@ function PagesMenu({
           {hiddenPages.includes("notifications") ? null : (
             <DropdownMenuRadioItem value="notifications">
               <Bell className="size-5 shrink-0 text-muted-foreground" />
-              Meldingen
+              Bezos
             </DropdownMenuRadioItem>
           )}
           {hiddenPages.includes("artifacts") ? null : (

@@ -73,6 +73,11 @@ export function useAsk(): AskContextValue {
   return ctx;
 }
 
+/** agentbox: Bezos reads the questions too, but must not crash outside the provider. */
+export function useAskOptional(): AskContextValue | null {
+  return useContext(AskContext);
+}
+
 // Owns the single poll loop + queue so the nav badge and the Notification
 // Center read one source of truth — and the feed never fetches questions a
 // second time.

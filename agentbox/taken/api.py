@@ -4,7 +4,10 @@
 GET  /api/taken                 -> items met status (open, later, gedaan)
 POST /api/taken/item/<id>       -> body {"status": "gedaan"|"later"|"open"}
 POST /api/taken/verversen       -> start de collector op de achtergrond
-Luistert alleen op 127.0.0.1. Verstuurt niets naar buiten.
+POST /api/taken/item/<id>/antwoord -> body {"antwoord": "Ja"}: Bezos-knop, stuurt het antwoord
+                                   naar de chat die de vraag stelde (alleen als die vraag nog staat)
+POST /api/taken/alles-gezien    -> body {"ids": [...]}: meldingen afhandelen, één voor één
+Luistert alleen op 127.0.0.1. Stuurt alleen Sams eigen antwoord naar zijn eigen omg-chat.
 
 Mail (Sam, 07-11-2026): "gedaan" op een mailtaak (ook via Opdracht geven, dat zet hem
 op gedaan zodra de chat start) archiveert die ene Gmail-draad: label INBOX eraf. Terug
@@ -17,6 +20,9 @@ import json, os, re, subprocess, sys, threading, time, urllib.parse, urllib.requ
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from beslis import laatste_jij, sleutel  # noqa: E402
 
 STATE = Path(os.environ.get("TAKEN_STATE", Path.home() / ".local/state/taken"))
 PORT = int(os.environ.get("TAKEN_PORT", "8790"))
@@ -129,6 +135,96 @@ def merged() -> dict:
             "ververst": running["p"] is not None and running["p"].poll() is None, "items": items}
 
 
+DRY = os.environ.get("TAKEN_DRY_SEND") == "1"
+OMG_USER = os.environ.get("TAKEN_USER", "contactexpertly@gmail.com")
+ANTWOORD_ID = re.compile(r"gesprek:([0-9a-f-]{36}):([0-9a-f]{8}|vast)")
+
+
+def antwoord_tekst(antwoord: str, vraag: str) -> str:
+    # Antwoord eerst: de agent leest de eerste regel als Sams keuze (zelfde reden als
+    # formatPushbackAnswerText in omg: een afgeknipte staart mag de keuze niet kosten).
+    return f"{antwoord}\n\n(Gekozen in Bezos, op je vraag: \"{vraag}\")"
+
+
+def beantwoord(iid: str, antwoord: str) -> tuple[int, dict]:
+    """Bezos-knop. Drie sloten: de vraag moet nog precies zo in de chat staan (geen laat 'Ja'
+    op een nieuwe vraag), één antwoord per vraag (dubbel tikken, tweede toestel), en pas
+    daarna versturen."""
+    m = ANTWOORD_ID.fullmatch(iid)
+    antwoord = (antwoord or "").strip()
+    if not m or not antwoord or len(antwoord) > 160:
+        return 400, {"error": "ongeldige vraag of antwoord"}
+    sid, key = m.groups()
+    item = next((i for i in load("items.json", {}).get("items", []) if i["id"] == iid), None)
+    if not item:
+        return 404, {"error": "vraag niet gevonden"}
+    try:
+        data = json.load(urllib.request.urlopen(f"{OMG}/api/sessions", timeout=8))["sessions"]
+    except Exception:
+        return 503, {"error": "omg niet bereikbaar"}
+    sess = next((x for x in data if x.get("sessionId") == sid), None)
+    if not sess:
+        return 409, {"error": "gesprek bestaat niet meer", "verouderd": True}
+    last = sess.get("last") or {}
+    if key == "vast":
+        if sess.get("status") != "blocked":
+            return 409, {"error": "gesprek loopt alweer", "verouderd": True}
+    else:
+        nu = laatste_jij(last.get("text") or "") if last.get("role") in (None, "assistant") else None
+        if sess.get("busy") or not nu or sleutel(nu[0]) != key:
+            return 409, {"error": "de vraag is veranderd, open het gesprek", "verouderd": True}
+    with LOCK:
+        st = load("status.json", {})
+        if (st.get(iid) or {}).get("beantwoord"):
+            return 409, {"error": "al beantwoord", "beantwoord": st[iid]["beantwoord"]}
+        now = datetime.now(timezone.utc).isoformat()
+        st[iid] = {"status": "gedaan", "om": now, "beantwoord": {"antwoord": antwoord, "om": now, "dry": DRY}}
+        save_status(st)
+    text = antwoord_tekst(antwoord, item.get("titel") or "")
+    try:
+        if DRY:
+            with open(STATE / "antwoorden-dry.jsonl", "a") as f:
+                f.write(json.dumps({"sessie": sid, "text": text, "om": now}, ensure_ascii=False) + "\n")
+        else:
+            req = urllib.request.Request(f"{OMG}/api/sessions/{sid}/send", method="POST",
+                                         headers={"Content-Type": "application/json"},
+                                         data=json.dumps({"text": text, "mode": "steer", "user": OMG_USER}).encode())
+            urllib.request.urlopen(req, timeout=30).read()
+    except Exception as e:
+        with LOCK:  # niet aangekomen: vraag weer open, zodat Sam het opnieuw kan doen
+            st = load("status.json", {})
+            st.pop(iid, None)
+            save_status(st)
+        return 502, {"error": f"versturen mislukt: {type(e).__name__}"}
+    print(f"bezos {iid}: {antwoord}{' (dry)' if DRY else ''}", file=sys.stderr, flush=True)
+    return 200, {"ok": True, "id": iid, "antwoord": antwoord, "dry": DRY}
+
+
+def alles_gezien(ids: list) -> tuple[int, dict]:
+    """Ter-info-meldingen afhandelen. Alleen meldingen (geen mail van mensen), één voor één,
+    zodat een mislukte archivering zichtbaar blijft in plaats van stil over te slaan."""
+    items = {i["id"]: i for i in load("items.json", {}).get("items", [])}
+    if not isinstance(ids, list) or len(ids) > 40:
+        return 400, {"error": "maximaal 40 ids"}
+    uit = []
+    for iid in ids:
+        i = items.get(iid)
+        if not i or i.get("soort") != "melding":
+            uit.append({"id": iid, "ok": False, "fout": "geen melding"})
+            continue
+        with LOCK:
+            st = load("status.json", {})
+            st[iid] = {"status": "gedaan", "om": datetime.now(timezone.utc).isoformat()}
+            save_status(st)
+        if iid.startswith("mail:"):
+            mail_bijwerken(iid, True)
+            rec = load("status.json", {}).get(iid, {})
+            uit.append({"id": iid, "ok": bool(rec.get("gearchiveerd")), "fout": rec.get("archieffout")})
+        else:
+            uit.append({"id": iid, "ok": True})
+    return 200, {"ok": all(u["ok"] for u in uit), "resultaat": uit}
+
+
 class H(BaseHTTPRequestHandler):
     def _send(self, code: int, body: dict) -> None:
         raw = json.dumps(body, ensure_ascii=False).encode()
@@ -155,6 +251,15 @@ class H(BaseHTTPRequestHandler):
                     running["p"] = subprocess.Popen([sys.executable, str(COLLECT)],
                                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return self._send(202, {"ok": True})
+        if path in ("/api/taken/alles-gezien",) or (path.startswith("/api/taken/item/") and path.endswith("/antwoord")):
+            try:
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            except Exception:
+                return self._send(400, {"error": "geen geldige json"})
+            if path == "/api/taken/alles-gezien":
+                return self._send(*alles_gezien(body.get("ids") or []))
+            iid = urllib.parse.unquote(path[len("/api/taken/item/"):-len("/antwoord")])
+            return self._send(*beantwoord(iid, str(body.get("antwoord") or "")))
         if path.startswith("/api/taken/item/"):
             iid = urllib.parse.unquote(path[len("/api/taken/item/"):])
             try:

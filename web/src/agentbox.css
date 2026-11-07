@@ -376,3 +376,20 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
 [data-font-preview="atkinson"] { font-family: "Atkinson Hyperlegible Next Variable", system-ui, sans-serif; }
 [data-font-preview="systeem"] { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, system-ui, sans-serif; }
 [data-font-preview="geist"] { font-family: "Geist Variable", system-ui, sans-serif; }
+
+/* Bezos (07-11-2026): rijen zonder kaders, haarlijn ertussen. Een beantwoorde rij
+   toont kort "Verstuurd" en vouwt dan dicht, zodat je ziet dat de keuze aankwam. */
+.bezos-lijst { border-top: 1px solid color-mix(in oklab, var(--border) 70%, transparent); }
+.bezos-rij { display: grid; grid-template-rows: 1fr; border-bottom: 1px solid color-mix(in oklab, var(--border) 70%, transparent); transition: grid-template-rows 260ms cubic-bezier(.2, 0, 0, 1), opacity 200ms ease; }
+.bezos-rij > .bezos-rij-binnen { overflow: hidden; min-height: 0; }
+.bezos-rij[data-dicht] { grid-template-rows: 0fr; opacity: 0; }
+.bezos-verstuurd { animation: bezos-in 180ms ease-out both; }
+@keyframes bezos-in { from { opacity: 0; transform: translateY(4px); } }
+.bezos-knop-hoofd { background: var(--primary); color: var(--primary-foreground); transition: background-color 150ms ease; }
+.bezos-knop-hoofd:hover { background: color-mix(in oklab, var(--primary) 86%, black); }
+.bezos-knop-neven { background: color-mix(in oklab, var(--foreground) 6%, transparent); color: var(--foreground); transition: background-color 150ms ease; }
+.bezos-knop-neven:hover { background: color-mix(in oklab, var(--foreground) 11%, transparent); }
+@media (prefers-reduced-motion: reduce) {
+  .bezos-rij { transition: none; }
+  .bezos-verstuurd { animation: none; }
+}

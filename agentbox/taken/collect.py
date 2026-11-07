@@ -13,6 +13,9 @@ Schrijft ~/.local/state/taken/items.json. Verstuurt niets, wijzigt niets in de b
 """
 from __future__ import annotations
 import hashlib, html, json, os, re, subprocess, sys, time, urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from beslis import beslis, laatste_jij, sleutel  # noqa: E402
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -67,7 +70,7 @@ def sessions() -> list[dict]:
         title = one_line(s.get("title") or "Gesprek", 70)
         at = (s.get("lastActivityAt") or 0) / 1000 or None
         machine = bool(s.get("botName")) or title.startswith(("Mailtaak", "Mail-intake"))
-        jij = re.findall(r"Jij:\s*([^\n]{2,240})", text)
+        jij = laatste_jij(text)
         base = {"sessie": sid, "tijd": iso(at), "machine": machine}
         if s.get("status") == "blocked":
             out.append({**base, "id": f"gesprek:{sid}:vast", "bron": "gesprek", "soort": "vast",
@@ -76,16 +79,19 @@ def sessions() -> list[dict]:
         if s.get("busy"):
             continue
         if jij:
-            j = jij[-1].strip().rstrip(".")
+            j, j_vol = jij
             if re.match(r"niks\b", j, re.I):
                 if at and datetime.fromtimestamp(at).date() == today:
                     out.append({**base, "id": f"gedaan:{sid}:{int(at)}", "bron": "gedaan", "soort": "gedaan",
                                 "titel": title, "detail": first_sentence(text)})
             else:
                 # sleutel op de tekst: een nieuwe vraag in hetzelfde gesprek is een nieuwe taak
-                key = hashlib.sha1(j.encode()).hexdigest()[:8]
+                key = sleutel(j)
+                # Bezos: welke knoppen (ja/nee, A/B, gedaan) en wat er gebeurde, in één zin.
                 out.append({**base, "id": f"gesprek:{sid}:{key}", "bron": "gesprek", "soort": "vraag",
-                            "titel": one_line(j, 200), "detail": title})
+                            "titel": one_line(j, 200), "detail": title,
+                            "beslis": beslis(j_vol, text),
+                            "wat": first_sentence("\n".join(l for l in text.splitlines() if not re.match(r"\W*Jij\b", l)))})
     return out
 
 
