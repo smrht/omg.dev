@@ -12,7 +12,7 @@ Bronnen:
 Schrijft ~/.local/state/taken/items.json. Verstuurt niets, wijzigt niets in de bronnen.
 """
 from __future__ import annotations
-import hashlib, json, os, re, subprocess, sys, time, urllib.request
+import hashlib, html, json, os, re, subprocess, sys, time, urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,6 +27,7 @@ def iso(ts: float | None) -> str | None:
 
 
 def one_line(t: str, n: int = 160) -> str:
+    t = html.unescape(t or "")  # eerst &#39; -> ', anders sloopt de #-filter hieronder hem tot "&39;"
     t = re.sub(r"[`*#>]|\[([^\]]*)\]\([^)]*\)", lambda m: m.group(1) or "", t or "")
     t = re.sub(r"\s+", " ", t).strip()
     return t if len(t) <= n else t[: n - 1].rsplit(" ", 1)[0] + "…"

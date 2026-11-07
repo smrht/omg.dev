@@ -74,13 +74,11 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
 /* Groepskoppen: klein, rustig, één hoogte. */
 .session-overview[data-overview-density] > div > div > button[aria-expanded] { min-height: 26px; font-size: 11px; letter-spacing: .02em; }
 
-/* Rijen. Compact = één regel (mark, titel, tijd); een rij die op Sam wacht of
-   bezig is houdt zijn tweede regel, want daar staat de reden. */
+/* Rijen: titel plus een korte tweede regel. Sam leest daaraan waar een gesprek
+   over gaat (7 nov: "die kleine tekst onder de titels is handig"). */
 .session-overview[data-overview-density="compact"] [data-overview-row] {
-  height: 32px; padding: 0 6px 0 8px; gap: 8px; border-radius: 6px;
+  height: 44px; padding: 0 6px 0 8px; gap: 8px; border-radius: 6px;
 }
-.session-overview[data-overview-density="compact"] [data-overview-row][data-row-hot] { height: 46px; }
-.session-overview[data-overview-density="compact"] [data-overview-row]:not([data-row-hot]) .rail-preview { display: none; }
 .session-overview[data-overview-density="comfortable"] [data-overview-row] { height: 50px; padding: 0 6px 0 8px; gap: 10px; border-radius: 6px; }
 .session-overview[data-overview-density] .overview-row-title { font-size: 13.5px; font-weight: 500; letter-spacing: -0.005em; }
 .session-overview[data-overview-density] .overview-row-title.font-bold { font-weight: 650; }
@@ -113,7 +111,6 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
 [data-agentbox-rail] .taken .taak { padding-block: 5px; }
 
 [data-agentbox-rail] .taken .taak .text-sm { font-size: 13px; }
-.taken .taak-knoppen button { width: 28px; height: 28px; }
 
 /* ── Chat ───────────────────────────────────────────────────────────── */
 .markdown { font-size: 14.5px; line-height: 1.6; }
@@ -125,11 +122,9 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
 
 /* ── Touch: 44px blijft, alleen typografie en lucht worden strakker ── */
 @media (pointer: coarse) {
-  .session-overview[data-overview-density="compact"] [data-overview-row] { height: 44px; }
-  .session-overview[data-overview-density="compact"] [data-overview-row][data-row-hot] { height: 56px; }
+  .session-overview[data-overview-density="compact"] [data-overview-row] { height: 56px; }
   .ab-toolbar .ab-search, .ab-toolbar .ab-icon-btn { height: 40px; min-width: 40px; }
   .ab-toolbar .ab-tab { height: 40px; font-size: 14px; }
-  .taken .taak-knoppen button { width: 40px; height: 40px; }
   .markdown, .msg-text.user-bubble { font-size: 15.5px; }
 }
 
@@ -138,9 +133,6 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
 
 /* Smalle takenlijst (zijbalk): titel krijgt de hele breedte, het vinkje
    zweeft rechts en verschijnt bij hover of focus. Op touch altijd zichtbaar. */
-.taken .taak-knoppen-zweef { position: absolute; right: 0; top: 50%; translate: 0 -50%; opacity: 0; background: var(--shell-surface, var(--background)); border-radius: 6px; }
-.taken .taak:hover .taak-knoppen-zweef, .taken .taak-knoppen-zweef:focus-within { opacity: 1; }
-@media (pointer: coarse) { .taken .taak-knoppen-zweef { position: static; translate: none; opacity: 1; } }
 /* Nieuwe sessie houdt zijn label; de mapkiezer geeft ruimte. */
 .ab-newrow > :last-child { min-width: 0; flex-shrink: 1; }
 .ab-newrow > button:first-child { flex-shrink: 0; flex-basis: auto; }
@@ -288,3 +280,45 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
 /* Limietbalk: de vulling schuift naar de nieuwe stand (stil bij reduced motion). */
 .ab-meter-fill { transition: width 400ms cubic-bezier(0.22, 1, 0.36, 1); }
 @media (prefers-reduced-motion: reduce) { .ab-meter-fill { transition: none; } }
+
+/* Codeblok = tekst om te kopiëren (Sam, 7 nov). De kopieerknop is altijd zichtbaar
+   en heet "Kopieer"; downloaden is weg, dat gebruikt niemand voor een tweet of prompt. */
+.markdown [data-streamdown="code-block-download-button"] { display: none !important; }
+.markdown [data-streamdown="code-block-actions"] { opacity: 1; top: 4px; right: 6px; }
+.markdown [data-streamdown="code-block-actions"] [data-streamdown="code-block-copy-button"] {
+  display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px;
+  border: 1px solid var(--border) !important; border-radius: 6px;
+  background: var(--background) !important; color: var(--foreground);
+  font-family: var(--font-sans); font-size: 11.5px; font-weight: 500; cursor: pointer;
+  transition: background-color 150ms ease, border-color 150ms ease;
+}
+.markdown [data-streamdown="code-block-actions"] [data-streamdown="code-block-copy-button"]:hover { border-color: var(--foreground) !important; }
+.markdown [data-streamdown="code-block-copy-button"]::after { content: "Kopieer"; }
+.markdown [data-streamdown="code-block-copy-button"] svg { width: 13px; height: 13px; }
+.markdown [data-streamdown="code-block"][data-language="text"] [data-streamdown="code-block-body"],
+.markdown [data-streamdown="code-block"][data-language="plaintext"] [data-streamdown="code-block-body"],
+.markdown [data-streamdown="code-block"][data-language=""] [data-streamdown="code-block-body"] { padding-right: 6rem; }
+@media (max-width: 767px) {
+  .markdown [data-streamdown="code-block"][data-language="text"] [data-streamdown="code-block-body"],
+  .markdown [data-streamdown="code-block"][data-language="plaintext"] [data-streamdown="code-block-body"],
+  .markdown [data-streamdown="code-block"][data-language=""] [data-streamdown="code-block-body"] { padding-right: 0.85rem; padding-top: 2.4rem; }
+}
+@media (prefers-reduced-motion: reduce) { .markdown [data-streamdown="code-block-copy-button"] { transition: none; } }
+
+/* Takenrij: knoppen met woorden onder de tekst (Sam, 7 nov: "wat betekenen die knoppen?").
+   De titel krijgt de volle breedte en mag over twee regels lopen. */
+.taken .taak .taak-titel { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.taken .taak-knoppen { opacity: 1 !important; }
+.taken .taak-knop {
+  display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 8px;
+  border-radius: 6px; font-size: 12px; font-weight: 500; color: var(--muted-foreground);
+  transition: background-color 150ms ease, color 150ms ease;
+}
+.taken .taak-knop svg { width: 13px; height: 13px; }
+.taken .taak-knop:hover { background: var(--muted); color: var(--foreground); }
+.taken .taak-knop:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.taken .taak-knop-hoofd { margin-left: -8px; color: var(--primary); }
+:root:not(.dark) .taken .taak-knop-hoofd { color: color-mix(in oklab, var(--primary) 70%, black); }
+.taken .taak-knop-hoofd:hover { background: color-mix(in oklab, var(--primary) 12%, transparent); color: var(--primary); }
+@media (pointer: coarse) { .taken .taak-knop { height: 36px; padding: 0 10px; font-size: 13px; } .taken .taak-knop-hoofd { margin-left: -10px; } }
+@media (prefers-reduced-motion: reduce) { .taken .taak-knop { transition: none; } }

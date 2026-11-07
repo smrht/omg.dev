@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Check, Clock, CornerDownRight, ExternalLink, RotateCcw } from "lucide-react";
+import { Check, Clock, CornerDownRight, ExternalLink, MessageSquare, RotateCcw } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // Taken: wat er voor Sam ligt, automatisch verzameld uit mail, gesprekken en
@@ -152,7 +152,7 @@ export function deelTaken(items: Taak[]) {
   return { open, meldingen, later, gedaan };
 }
 
-function TaakRij({ taak, onOpenSession, zet, klein, smal }: {
+function TaakRij({ taak, onOpenSession, zet, klein }: {
   taak: Taak; onOpenSession?: (sid: string) => void; zet: (id: string, s: Taak["status"]) => void; klein?: boolean; smal?: boolean;
 }) {
   const kanOpenen = !!(taak.sessie && onOpenSession) || !!taak.link;
@@ -161,13 +161,16 @@ function TaakRij({ taak, onOpenSession, zet, klein, smal }: {
     else if (taak.link) window.open(taak.link, "_blank", "noopener");
   };
   const klaar = taak.status === "gedaan" || taak.soort === "gedaan";
+  // Een vraag met sessie wacht op antwoord in DIE chat: daar hoort "Beantwoorden",
+  // geen nieuwe sessie (die agent zou het antwoord nooit krijgen).
+  const beantwoorden = taak.soort === "vraag" && !!taak.sessie && !!onOpenSession;
   return (
     <li className="taak group relative flex items-start gap-3 py-2.5" data-soort={taak.soort} data-status={taak.status}>
       <span aria-hidden="true" className="taak-stip mt-[7px] size-2 shrink-0 rounded-full" />
       <div className="min-w-0 flex-1">
         <button type="button" onClick={open} disabled={!kanOpenen}
           className="block w-full min-w-0 text-left focus-visible:outline-2 focus-visible:outline-primary disabled:cursor-default">
-          <span className={cn("block truncate font-medium leading-snug text-foreground", klein ? "text-[13px]" : "text-sm", klaar && "text-muted-foreground")}>{taak.titel}</span>
+          <span className={cn("taak-titel block font-medium leading-snug text-foreground", klein ? "text-[13px]" : "text-sm", klaar && "text-muted-foreground")}>{taak.titel}</span>
           <span className="mt-0.5 block truncate text-xs text-muted-foreground">
             <span className="taak-soort font-medium">{LABEL[taak.soort]}</span>
             {" · "}<span className="tabular-nums">{wanneer(taak.afgevinkt && taak.status === "gedaan" ? taak.afgevinkt : taak.tijd)}</span>
@@ -176,25 +179,35 @@ function TaakRij({ taak, onOpenSession, zet, klein, smal }: {
             {taak.link && !taak.sessie ? <ExternalLink aria-hidden="true" className="ml-1 inline size-3 align-[-2px]" /> : null}
           </span>
         </button>
+        {taak.soort !== "gedaan" && (
+          <div className="taak-knoppen mt-1.5 flex flex-wrap items-center gap-1">
+            {taak.status === "open" ? (
+              <>
+                {beantwoorden ? (
+                  <button type="button" onClick={open} className="taak-knop taak-knop-hoofd" aria-label={`Beantwoorden in het gesprek: ${taak.titel}`}>
+                    <MessageSquare aria-hidden="true" />Beantwoorden
+                  </button>
+                ) : (
+                  <button type="button" onClick={() => geefOpdracht(taak)} className="taak-knop taak-knop-hoofd" aria-label={`Opdracht geven: ${taak.titel}`}
+                    title="Start een nieuwe sessie met deze taak al ingevuld">
+                    <CornerDownRight aria-hidden="true" />Opdracht geven
+                  </button>
+                )}
+                <button type="button" onClick={() => zet(taak.id, "later")} className="taak-knop" aria-label={`Morgen terug: ${taak.titel}`} title="Verbergen tot morgen">
+                  <Clock aria-hidden="true" />Morgen
+                </button>
+                <button type="button" onClick={() => zet(taak.id, "gedaan")} className="taak-knop" aria-label={`Gedaan: ${taak.titel}`} title="Afvinken">
+                  <Check aria-hidden="true" />Gedaan
+                </button>
+              </>
+            ) : (
+              <button type="button" onClick={() => zet(taak.id, "open")} className="taak-knop" aria-label={`Terugzetten: ${taak.titel}`}>
+                <RotateCcw aria-hidden="true" />Terugzetten
+              </button>
+            )}
+          </div>
+        )}
       </div>
-      {taak.soort !== "gedaan" && (
-        <div className={cn("taak-knoppen flex shrink-0 items-center", smal && "taak-knoppen-zweef")}>
-          {taak.status === "open" ? (
-            <>
-              {/* Een vraag met sessie wacht op antwoord in DIE chat; een nieuwe sessie bereikt die agent nooit. Klik op de rij opent het gesprek. */}
-              {!(taak.soort === "vraag" && taak.sessie) && <button type="button" onClick={() => geefOpdracht(taak)} title="Opdracht geven" aria-label={`Opdracht geven: ${taak.titel}`}
-                className="flex size-9 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary"><CornerDownRight className="size-4" /></button>}
-              {!smal && <button type="button" onClick={() => zet(taak.id, "later")} title="Later (morgen terug)" aria-label={`Later: ${taak.titel}`}
-                className="flex size-9 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary"><Clock className="size-4" /></button>}
-              <button type="button" onClick={() => zet(taak.id, "gedaan")} title="Gedaan" aria-label={`Gedaan: ${taak.titel}`}
-                className="flex size-9 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary"><Check className="size-4" /></button>
-            </>
-          ) : (
-            <button type="button" onClick={() => zet(taak.id, "open")} title="Terugzetten" aria-label={`Terugzetten: ${taak.titel}`}
-              className="flex size-9 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary"><RotateCcw className="size-4" /></button>
-          )}
-        </div>
-      )}
     </li>
   );
 }
