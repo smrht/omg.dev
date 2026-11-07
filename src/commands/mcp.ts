@@ -550,7 +550,12 @@ async function createSubagent({
  * HTTP instead of each agent spawning its own copy.
  */
 const AGENTBOX_SHIP_DISABLED = true;
-const AGENTBOX_SHIP_DISABLED_MESSAGE = "omg_ship staat uit op deze box (Sam, 06-10-2026). Er is niets gepost en dat is goed zo. Klaar = geverifieerd, gecommit en gepusht in de projectrepo en geregistreerd in de eigen administratie (memory/docs/sprintrecord). Meld resultaat, repo/SHA en bewijs gewoon in de chat. Roep omg_ship niet opnieuw aan.";
+const AGENTBOX_SHIP_DISABLED_MESSAGE_SAM = "omg_ship staat uit op deze box (Sam, 06-10-2026). Er is niets gepost en dat is goed zo. Klaar = geverifieerd, gecommit en gepusht in de projectrepo en geregistreerd in de eigen administratie (memory/docs/sprintrecord). Meld resultaat, repo/SHA en bewijs gewoon in de chat. Roep omg_ship niet opnieuw aan.";
+// agentbox: other boxes get the same switch without Sam's name or admin paths.
+const AGENTBOX_SHIP_DISABLED_MESSAGE_NEUTRAL = "omg_ship is switched off on this box. Nothing was posted, and that is fine. Done = verified, committed and pushed in the project repo. Report result, repo/SHA and evidence in chat. Do not call omg_ship again.";
+function agentboxShipDisabledMessage(): string {
+  return isSamBox() ? AGENTBOX_SHIP_DISABLED_MESSAGE_SAM : AGENTBOX_SHIP_DISABLED_MESSAGE_NEUTRAL;
+}
 
 export function buildOmgMcpServer(): McpServer {
   const server = new McpServer({
@@ -1190,7 +1195,7 @@ export function buildOmgMcpServer(): McpServer {
     {
       title: "Disabled: omg.dev Shipped Channel",
       description:
-        "DISABLED on this box (Sam, 2026-10-06): never call this tool; it posts nothing. Finish work by committing, pushing and reporting in chat. Former behaviour: post a verified result in the omg.dev Shipped feed. Publishing is not a lifecycle event: the source session stays live for chat or follow-up. A Shipped post does not itself prove production deployment; when deployment was requested, verify it before you claim it. Never use this for planning, partial, blocked, or still-unverified work. Write it like a launch tweet: a punchy headline + at most 1-2 short sentences on the outcome and why it matters. To update an earlier post, pass its id.",
+        (isSamBox() ? "DISABLED on this box (Sam, 2026-10-06): " : "DISABLED on this box: ") + "never call this tool; it posts nothing. Finish work by committing, pushing and reporting in chat. Former behaviour: post a verified result in the omg.dev Shipped feed. Publishing is not a lifecycle event: the source session stays live for chat or follow-up. A Shipped post does not itself prove production deployment; when deployment was requested, verify it before you claim it. Never use this for planning, partial, blocked, or still-unverified work. Write it like a launch tweet: a punchy headline + at most 1-2 short sentences on the outcome and why it matters. To update an earlier post, pass its id.",
       inputSchema: {
         title: z.string().min(1).describe("Short headline for what shipped (e.g. 'WhatsApp reconnect loop fixed')."),
         commitRefs: z.array(z.string().regex(/^[a-f0-9]{7,40}$/i)).min(1).max(100).optional().describe("All commits backing this result. In shared checkouts, verifies these reached main and checks their files for unfinished edits; unrelated workspace changes do not block."),
@@ -1215,7 +1220,7 @@ export function buildOmgMcpServer(): McpServer {
       // posting; not an error, so agents do not retry. Anchors above stay intact
       // for ship_shared_apply.py.
       if (AGENTBOX_SHIP_DISABLED) {
-        return result({ shipped: false, disabled: true, message: AGENTBOX_SHIP_DISABLED_MESSAGE });
+        return result({ shipped: false, disabled: true, message: agentboxShipDisabledMessage() });
       }
       const sid = await activeSessionId(sessionId);
       const data = await api<{
