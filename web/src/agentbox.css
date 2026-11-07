@@ -64,7 +64,11 @@
   --border-strong: rgba(255, 255, 255, 0.18);
   --code-bg: rgba(255, 255, 255, 0.06);
 }
-html, body { font-family: var(--font-sans); font-feature-settings: var(--font-features, normal); -webkit-font-smoothing: antialiased; }
+/* Sam 07-11: "niet bold maar wel iets dikker". Alle vier de fonts zijn
+   variabel (systeem = SF Pro, ook variabel), dus 450/540 rendert echt
+   tussen regular en semibold in. Semibold/bold blijven 600/700. */
+:root { --font-weight-normal: 450; --font-weight-medium: 540; }
+html, body { font-family: var(--font-sans); font-weight: 450; font-feature-settings: var(--font-features, normal); -webkit-font-smoothing: antialiased; }
 
 /* Lettertype-keuze (Pages-menu). Inter is de standaard: hoge x-hoogte en
    duidelijke l/I/1 (cv05, cv08) op 12-14 px. Atkinson Hyperlegible is
@@ -100,7 +104,7 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
   height: 44px; padding: 0 6px 0 8px; gap: 8px; border-radius: 6px;
 }
 .session-overview[data-overview-density="comfortable"] [data-overview-row] { height: 50px; padding: 0 6px 0 8px; gap: 10px; border-radius: 6px; }
-.session-overview[data-overview-density] .overview-row-title { font-size: 13.5px; font-weight: 500; letter-spacing: -0.005em; }
+.session-overview[data-overview-density] .overview-row-title { font-size: 13.5px; font-weight: 540; letter-spacing: -0.005em; }
 .session-overview[data-overview-density] .overview-row-title.font-bold { font-weight: 650; }
 .session-overview[data-overview-density] .rail-preview { font-size: 12px; height: 16px; }
 .session-overview[data-overview-density] [data-overview-mark] { width: 18px; height: 18px; }
@@ -309,7 +313,7 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
   display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px;
   border: 1px solid var(--border) !important; border-radius: 6px;
   background: var(--background) !important; color: var(--foreground);
-  font-family: var(--font-sans); font-size: 11.5px; font-weight: 500; cursor: pointer;
+  font-family: var(--font-sans); font-size: 11.5px; font-weight: 540; cursor: pointer;
   transition: background-color 150ms ease, border-color 150ms ease;
 }
 .markdown [data-streamdown="code-block-actions"] [data-streamdown="code-block-copy-button"]:hover { border-color: var(--foreground) !important; }
@@ -331,7 +335,7 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
 .taken .taak-knoppen { opacity: 1 !important; }
 .taken .taak-knop {
   display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 8px;
-  border-radius: 6px; font-size: 12px; font-weight: 500; color: var(--muted-foreground);
+  border-radius: 6px; font-size: 12px; font-weight: 540; color: var(--muted-foreground);
   transition: background-color 150ms ease, color 150ms ease;
 }
 .taken .taak-knop svg { width: 13px; height: 13px; }

@@ -75,6 +75,8 @@ const PREFETCH_COUNT = 8;
 // Module-level, not a component ref: the app remounts (e.g. after picking a
 // profile) and a per-instance ref would re-run the whole prefetch sweep.
 const attempted = new Set<string>();
+const stamps = new Map<string, string>();
+const stale = new Set<string>();
 const queue: string[] = [];
 let sweeping = false;
 
@@ -98,9 +100,26 @@ export function prefetchTranscripts(
   orderedSids: string[],
   load: (sid: string) => Promise<{ messages: OmgChatMessage[]; nextBefore: number | null }>,
 ) {
-  for (const sid of orderedSids
-    .filter((sid) => sid && !attempted.has(sid) && !cache.has(sid))
-    .slice(0, PREFETCH_COUNT)) {
+  // agentbox: an entry may be "sid@stamp". The stamp is the session's last
+  // activity once it is idle (constant while it runs). A chat prefetched while
+  // it was still working kept that page forever, so opening it right after it
+  // finished painted the transcript without its final answer until the
+  // revalidate landed. A new stamp means: fetch this one again, once.
+  const sids: string[] = [];
+  for (const entry of orderedSids.slice(0, PREFETCH_COUNT)) {
+    const at = entry.indexOf("@");
+    const sid = at < 0 ? entry : entry.slice(0, at);
+    const stamp = at < 0 ? "" : entry.slice(at + 1);
+    if (!sid) continue;
+    const seen = stamps.get(sid);
+    if (stamp && seen != null && seen !== stamp) {
+      attempted.delete(sid);
+      stale.add(sid);
+    }
+    if (stamp) stamps.set(sid, stamp);
+    sids.push(sid);
+  }
+  for (const sid of sids.filter((sid) => !attempted.has(sid) && (!cache.has(sid) || stale.has(sid)))) {
     if (!queue.includes(sid)) queue.push(sid);
   }
   // Queued rather than dropped: the narrow and wide layouts each report their
@@ -113,11 +132,16 @@ export function prefetchTranscripts(
       // the user actually opened.
       while (queue.length) {
         const sid = queue.shift() as string;
-        if (attempted.has(sid) || cache.has(sid)) continue;
+        const refresh = stale.delete(sid);
+        if (attempted.has(sid) || (cache.has(sid) && !refresh)) continue;
         attempted.add(sid);
         try {
+          const startedAt = Date.now();
           const page = await load(sid);
-          if (cache.has(sid)) continue;
+          // Never clobber a page written after this request left (the user's
+          // own open, or live events on a mounted chat).
+          const current = cache.get(sid);
+          if (current && (!refresh || current.at > startedAt)) continue;
           writeTranscriptCache(sid, page.messages, page.nextBefore);
         } catch {
           // Best-effort; opening the session still fetches normally.
@@ -137,5 +161,32 @@ export function clearTranscriptCache(sid?: string) {
   }
   cache.clear();
   attempted.clear();
+  stamps.clear();
+  stale.clear();
   queue.length = 0;
+}
+
+/**
+ * agentbox: start a session's page fetch at pointerdown, before React spends
+ * ~100-350 ms rendering the open. The chat effect then takes this promise
+ * instead of issuing its own request. Only a very recent prime counts, so a
+ * stray press that never became an open cannot serve a stale page later.
+ */
+const PRIME_TTL_MS = 3000;
+const primed = new Map<string, { at: number; page: Promise<unknown> }>();
+
+export function primeTranscriptFetch(sid: string, fetchPage: (sid: string) => Promise<unknown>) {
+  if (!sid) return;
+  const hit = primed.get(sid);
+  if (hit && Date.now() - hit.at < PRIME_TTL_MS) return;
+  const page = fetchPage(sid);
+  page.catch(() => {}); // an unused prime must not surface as unhandled
+  primed.set(sid, { at: Date.now(), page });
+}
+
+export function takePrimedTranscript<T>(sid: string): Promise<T> | null {
+  const hit = primed.get(sid);
+  primed.delete(sid);
+  if (!hit || Date.now() - hit.at >= PRIME_TTL_MS) return null;
+  return hit.page as Promise<T>;
 }

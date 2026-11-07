@@ -287,7 +287,10 @@ export function prefetchChatEngine(): void {
   // Swallow the rejection: a warm-up is best-effort, and OmgChatEngine re-imports
   // (and recovers) on render. Left floating, a failed prefetch became an
   // unhandled rejection and a phantom finding.
-  const run = () => void import("./lib/chat-engine").catch(() => {});
+  const run = () => {
+    void import("./lib/chat-engine").catch(() => {});
+    void preloadMessageResponse();
+  };
   const ric = (globalThis as { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number })
     .requestIdleCallback;
   if (typeof ric === "function") ric(run, { timeout: 3000 });
@@ -338,7 +341,9 @@ import { classifyUserTurn } from "./lib/system-message";
 import { canDriveSession } from "./lib/session-runtime";
 import {
   prefetchTranscripts,
+  primeTranscriptFetch,
   readTranscriptCache,
+  takePrimedTranscript,
   updateTranscriptCacheMessages,
   writeTranscriptCache,
 } from "./lib/transcript-cache";
@@ -540,6 +545,7 @@ import {
 import {
   ASSISTANT_SINGLE_LINE_PX,
   estimateRowHeight,
+  roughRowHeight,
   estimateUnprobedRowHeight,
   HEIGHT_MODEL_VERSION,
   ROW_GAP_PX,
@@ -740,6 +746,7 @@ import {
   Message as AiMessage,
   MessageContent,
   MessageResponse,
+  preloadMessageResponse,
 } from "@/components/ai-elements/message";
 import {
   Reasoning,
@@ -12568,9 +12575,11 @@ function LiveView({
   const overviewFolded = useFoldedRailGroups();
   // On-screen order: pinned, bots, then working, then idle. Mobile's bot list
   // is empty by design because Bots owns those persistent conversations.
-  const screenOrder = overviewGroups.filter(g => !overviewFolded.includes(g.key)).flatMap(g => flattenOverview(g.nodes))
-    .map(s => s.sessionId).filter((id): id is string => !!id);
-  const prefetchKey = screenOrder.slice(0, 8).join(",");
+  const screenSessions = overviewGroups.filter(g => !overviewFolded.includes(g.key)).flatMap(g => flattenOverview(g.nodes))
+    .filter(s => !!s.sessionId);
+  const screenOrder = screenSessions.map(s => s.sessionId).filter((id): id is string => !!id);
+  const prefetchKey = screenSessions.slice(0, 8)
+    .map(s => `${s.sessionId}@${prefetchStamp(s, !!busyBySid[s.sessionId ?? ""])}`).join(",");
   useEffect(() => {
     if (!prefetchKey) return;
     prefetchTranscripts(prefetchKey.split(","), loadTranscriptPage);
@@ -13658,7 +13667,13 @@ function RailStage({
   // Warm the transcripts at the top of the rail so opening one paints instantly
   // instead of waiting on its first `/messages` round trip. The narrow layout
   // does the same from its own order; the prefetcher dedupes across both.
-  const railPrefetchKey = orderedSids.slice(0, 8).join(",");
+  // agentbox: "sid@stamp" — the stamp moves once a session goes idle with a
+  // new last message, so a chat that just finished is fetched again.
+  const railPrefetchKey = railOrderedSessions
+    .filter((s) => !!s.sessionId)
+    .slice(0, 8)
+    .map((s) => `${s.sessionId}@${prefetchStamp(s, !!busyBySid[s.sessionId ?? ""])}`)
+    .join(",");
   useEffect(() => {
     if (!railPrefetchKey) return;
     prefetchTranscripts(railPrefetchKey.split(","), loadTranscriptPage);
@@ -15371,6 +15386,10 @@ const RailRow = memo(function RailRow({
         role="button"
         tabIndex={0}
         aria-label={ariaLabel}
+        onPointerDown={(e) => {
+          // agentbox: fetch the transcript while the press is still down.
+          if (railKey && !collapsed && e.button === 0) primeTranscriptFetch(railKey, fetchTranscriptPageRaw);
+        }}
         onClick={(e) => {
           if (drag.current.swiped) {
             drag.current.swiped = false;
@@ -17046,6 +17065,19 @@ function ComposerTextarea({ className, ...props }: SkillTextareaProps) {
 }
 
 // Shared transcript page loader used to warm the cache ahead of a session open.
+/** agentbox: prefetch freshness. Constant while a session runs (its live
+ *  events would make every token a refetch); its last activity once idle. */
+function prefetchStamp(s: Session, busy: boolean): string {
+  if (busy) return "busy";
+  return String(s.last?.ts ?? s.lastActivityAt ?? 0);
+}
+
+function fetchTranscriptPageRaw(sid: string) {
+  return api<{ messages: Message[]; nextBefore?: number | null }>(transcriptPagePath(sid), {
+    cache: "no-store",
+  });
+}
+
 async function loadTranscriptPage(sid: string) {
   const page = await api<{ messages: Message[]; nextBefore?: number | null }>(
     transcriptPagePath(sid),
@@ -17420,9 +17452,11 @@ function SessionChatBody({
       setNextBefore(null);
       setMessages([]);
     }
-    void api<{ messages: Message[]; nextBefore?: number | null }>(
-      transcriptPagePath(sid),
-      { cache: "no-store" },
+    void (
+      takePrimedTranscript<{ messages: Message[]; nextBefore?: number | null }>(sid) ??
+      api<{ messages: Message[]; nextBefore?: number | null }>(transcriptPagePath(sid), {
+        cache: "no-store",
+      })
     )
       .then((page) => {
         if (cancelled) return;
@@ -20380,6 +20414,13 @@ const onTouchStart = (e: ReactTouchEvent) => {
  *     have just arrived, i.e. exactly here.
  */
 const CHAT_TAIL_ROWS = 30;
+// agentbox: rows from the bottom that get the exact height model on first
+// sight (about two phone screens); everything above starts at roughRowHeight.
+const EXACT_TAIL_ROWS = 12;
+// agentbox: one height cache for every ChatStream. Keys carry the message id,
+// the metrics version and both content widths, so sharing across sessions and
+// columns is safe; reopening a chat no longer recomputes what it already knew.
+const CHAT_HEIGHT_CACHE = new Map<string, number>();
 
 /** The virtualizer must never write scrollTop. See the wiring comment below. */
 const noVirtualizerScroll = () => {};
@@ -20581,7 +20622,6 @@ const ChatStream = memo(function ChatStream({
   const virtualContainerRef = useRef<HTMLDivElement>(null);
   const [scrollMargin, setScrollMargin] = useState(0);
   const metrics = useChatMarkdownMetrics(ref, items.length);
-  const heightCacheRef = useRef(new Map<string, number>());
   useEffect(() => {
     // Warm the lazily-loaded block splitter; until it resolves every row falls
     // back to a flat estimate.
@@ -20608,10 +20648,20 @@ const ChatStream = memo(function ChatStream({
         return estimateUnprobedRowHeight(item, speakerChanged);
       }
       const text = item.type === "tools" ? "" : (item.message.text ?? "");
-      const key = `${item.key}|${metrics.version}|${HEIGHT_MODEL_VERSION}|${speakerChanged ? 1 : 0}|${text.length}`;
-      const cache = heightCacheRef.current;
+      // agentbox: the cache is module-wide (CHAT_HEIGHT_CACHE), so reopening a
+      // chat reuses every height already computed, in any column. Width is in
+      // the key because the cache now outlives one container.
+      const widths = `${rowContext.assistant.contentWidth}/${rowContext.user?.contentWidth ?? 0}`;
+      const key = `${item.key}|${metrics.version}|${HEIGHT_MODEL_VERSION}|${widths}|${speakerChanged ? 1 : 0}|${text.length}`;
+      const cache = CHAT_HEIGHT_CACHE;
       const cached = cache.get(key);
       if (cached != null) return cached;
+      // Only rows near the bottom, where a chat opens, get the exact model on
+      // first sight; the rest get a character-count estimate that is replaced
+      // by their DOM height when they mount (see roughRowHeight).
+      if (index < items.length - EXACT_TAIL_ROWS) {
+        return roughRowHeight(item, { ...rowContext, speakerChanged });
+      }
       // A streaming row mints a new key per token. Cap the cache rather than
       // let one long session grow it without bound.
       if (cache.size > 8000) cache.clear();
@@ -21168,7 +21218,6 @@ const ChatStream = memo(function ChatStream({
     // Our write, not theirs: the event this raises must not move the mode.
     userDrivenRef.current = false;
     lastUserScrollAtRef.current = Number.NEGATIVE_INFINITY;
-    heightCacheRef.current.clear();
     growthKeyRef.current = null;
     justSwitchedRef.current = true;
     stopGlide();

@@ -14,6 +14,12 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 const { result: { targetId } } = await send("Target.createTarget", { url: "about:blank" });
 const { result: { sessionId: s } } = await send("Target.attachToTarget", { targetId, flatten: true });
 await send("Page.enable", {}, s); await send("Runtime.enable", {}, s);
+// THROTTLE=4 bootst een telefoon na: CPU 4x trager + 80 ms RTT via Tailscale.
+if (process.env.THROTTLE) {
+  await send("Network.enable", {}, s);
+  await send("Emulation.setCPUThrottlingRate", { rate: Number(process.env.THROTTLE) }, s);
+  await send("Network.emulateNetworkConditions", { offline: false, latency: Number(process.env.RTT ?? 80), downloadThroughput: 1.5e6, uploadThroughput: 0.75e6 }, s);
+}
 const ev = async (expr: string) => (await send("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true }, s)).result?.result?.value;
 for (const [naam, w, h, mobiel] of [["desktop", 1440, 900, false], ["mobiel", Number(process.env.MOBIEL_W ?? 390), 844, true]] as const) {
   await send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: mobiel ? 2 : 1, mobile: mobiel }, s);

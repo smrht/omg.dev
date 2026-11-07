@@ -65,6 +65,16 @@ window.lfg = { React, ReactDOM, jsxRuntime: JsxRuntime, registerExtension };
 
 applyTheme();
 applyFont();
+// agentbox: fetch the markdown renderer while the app is idle. Opening the
+// first chat used to wait for this chunk, then measure every row twice (once
+// before it landed, once after).
+{
+  const idle = (cb: () => void) =>
+    "requestIdleCallback" in window ? window.requestIdleCallback(cb, { timeout: 3000 }) : setTimeout(cb, 1500);
+  idle(() => {
+    void import("./lib/markdown-metrics").then((m) => m.markdownBlockSplitter());
+  });
+}
 window.addEventListener("storage", (event) => {
   if (event.key !== FONT_STORAGE_KEY && event.key !== null) return;
   applyFont();

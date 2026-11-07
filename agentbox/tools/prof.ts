@@ -18,11 +18,14 @@ await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-sch
 await send("Page.navigate", { url }, s); await sleep(2500);
 await ev(`localStorage.setItem("lfg_user","contactexpertly@gmail.com");localStorage.setItem("lfg_v2_user_filter","contactexpertly@gmail.com");1`);
 await send("Page.navigate", { url }, s); await sleep(6000);
+if (process.env.THROTTLE) await send("Emulation.setCPUThrottlingRate", { rate: Number(process.env.THROTTLE) }, s);
 await send("Profiler.enable", {}, s); await send("Profiler.setSamplingInterval", { interval: 200 }, s);
 await send("Profiler.start", {}, s);
 const mode = process.env.MODE ?? "scroll";
 await ev(`(async()=>{const sc=[...document.querySelectorAll("*")].filter(e=>e.scrollHeight>e.clientHeight+50&&/(auto|scroll)/.test(getComputedStyle(e).overflowY)).sort((a,b)=>b.scrollHeight-a.scrollHeight)[0];
  if("${mode}"==="idle"){await new Promise(r=>setTimeout(r,5000));return}
+ if("${mode}"==="click"){const rows=[...document.querySelectorAll("[data-overview-row]")].filter(e=>e.offsetParent); rows[Number("${process.env.PICK ?? 3}")].click();
+   for(let i=0;i<200;i++){const c=document.querySelector("[data-session-ready=true]"); if(c) break; await new Promise(r=>setTimeout(r,20));} await new Promise(r=>setTimeout(r,300)); return}
  for(let i=0;i<60;i++){ if(sc) sc.scrollTop = (i%2? 0 : sc.scrollHeight); await new Promise(r=>setTimeout(r,60)); } })()`);
 const { result: { profile } } = await send("Profiler.stop", {}, s);
 const byId = new Map(profile.nodes.map((n: any) => [n.id, n]));

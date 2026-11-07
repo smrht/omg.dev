@@ -780,3 +780,55 @@ export function estimateUnprobedRowHeight<T extends RowMessage>(
   }
   return Math.max(1, Math.round(height + ROW_GAP_PX + (speakerChanged ? SPEAKER_CHANGE_PX : 0)));
 }
+
+/**
+ * agentbox: a cheap estimate for rows far above the opening viewport.
+ *
+ * The exact model (markdownHeight → pretext segmentation per block) costs
+ * ~35 ms per prose row at phone speed; opening a 40-row page paid it for every
+ * row, most of which sit thousands of pixels above where the chat opens. Those
+ * rows get their real DOM height the moment they mount, and the anchor
+ * correction already holds the viewport still when an above-the-fold estimate
+ * is replaced. So they only need a plausible size, from character counts.
+ * Non-prose rows (pills, media, thinking, system lines) are already cheap and
+ * keep their exact model.
+ */
+export function roughRowHeight<T extends RowMessage>(
+  item: ChatRenderItem<T>,
+  ctx: RowContext,
+): number {
+  if (item.type === "tools") return estimateRowHeight(item, ctx);
+  const message = item.message;
+  const raw = message.text ?? "";
+  const prose =
+    !isInterrupted(message) &&
+    !["thinking", "html", "image", "video", "file"].includes(message.kind as string) &&
+    raw.trim().length > 0 &&
+    !(message.role === "user" && classifyUserTurn(raw));
+  if (!prose) return estimateRowHeight(item, ctx);
+  const envelope = message.role === "user" ? parseOmgPromptEnvelope(raw) : null;
+  const text = envelope?.task ?? raw;
+  const metrics = message.role === "user" ? (ctx.user ?? ctx.assistant) : ctx.assistant;
+  const p = metrics.blocks.p;
+  const perLine = Math.max(16, Math.floor(metrics.contentWidth / Math.max(1, p.fontSize * 0.5)));
+  let lines = 0;
+  let paragraphs = 0;
+  for (const para of text.split(/\n{2,}/)) {
+    if (!para.trim()) continue;
+    paragraphs += 1;
+    for (const line of para.split("\n")) lines += Math.max(1, Math.ceil(line.length / perLine));
+  }
+  let body = lines * p.lineHeight + Math.max(0, paragraphs - 1) * Math.max(p.marginBottom, p.marginTop);
+  if (message.role === "user") {
+    const clamp = USER_BUBBLE_CLAMP_LINES * p.lineHeight;
+    body = Math.min(body, clamp) + (body > clamp + 1 ? USER_BUBBLE_TOGGLE_PX : 0);
+  }
+  const height =
+    (envelope ? OMG_INSTRUCTIONS_LEADING_PX : 0) +
+    body +
+    metrics.root.paddingTop +
+    metrics.root.paddingBottom +
+    metrics.root.borderTop +
+    metrics.root.borderBottom;
+  return Math.max(1, Math.round(height + ROW_GAP_PX + (ctx.speakerChanged ? SPEAKER_CHANGE_PX : 0)));
+}

@@ -499,11 +499,43 @@ function installWatchers(doc: Document): void {
   watchersInstalled = true;
   const fonts = (doc as Document & { fonts?: FontFaceSet }).fonts;
   if (fonts?.ready) void fonts.ready.then(() => invalidateMarkdownMetrics()).catch(() => {});
-  const observer = new MutationObserver(() => invalidateMarkdownMetrics());
+  // agentbox: a face chosen later (Lettertype) loads after `ready` settled.
+  fonts?.addEventListener?.("loadingdone", () => invalidateMarkdownMetrics());
+  // agentbox: only a change that can move text counts. The mobile shell
+  // writes --lfg-app-height / --lfg-mobile-header-height / keyboard state on
+  // <html> on every header resize and keyboard show/hide; each of those used
+  // to throw away every row height mid-open and mid-send.
+  let lastSig = typographySignature(doc);
+  const observer = new MutationObserver(() => {
+    const sig = typographySignature(doc);
+    if (sig === lastSig) return;
+    lastSig = sig;
+    invalidateMarkdownMetrics();
+  });
   observer.observe(doc.documentElement, {
     attributes: true,
-    attributeFilter: ["class", "style", "data-theme"],
+    attributeFilter: ["class", "style", "data-theme", "data-font"],
   });
+}
+
+const TYPOGRAPHY_NEUTRAL_CLASSES = new Set(["lfg-keyboard-open", "lfg-film"]);
+
+/** What on <html> can change text metrics: classes (theme), theme/font
+ *  attributes and the root's computed font. Layout-only custom properties
+ *  in the style attribute are deliberately left out. */
+export function typographySignature(doc: Document): string {
+  const root = doc.documentElement;
+  const classes = [...root.classList].filter((c) => !TYPOGRAPHY_NEUTRAL_CLASSES.has(c)).sort().join(" ");
+  const cs = doc.defaultView?.getComputedStyle(root);
+  return [
+    classes,
+    root.getAttribute("data-theme") ?? "",
+    root.getAttribute("data-font") ?? "",
+    cs?.fontFamily ?? "",
+    cs?.fontSize ?? "",
+    cs?.fontWeight ?? "",
+    cs?.lineHeight ?? "",
+  ].join("|");
 }
 
 /** Probe (or reuse) the metrics for one row class at one content width. */
