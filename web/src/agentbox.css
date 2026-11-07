@@ -275,6 +275,7 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
 /* Opdracht geven: hoofdactie in de accenttint, niet zeven volle blokken. */
 .melding-opdracht { background: color-mix(in oklab, var(--primary) 12%, transparent); color: var(--primary); transition: background-color 150ms ease, color 150ms ease; }
 .melding-opdracht:hover { background: var(--primary); color: var(--primary-foreground); }
+:root:not(.dark) .melding-opdracht:not(:hover) { color: color-mix(in oklab, var(--primary) 70%, black); } /* 5,5:1 op de tint; puur accent haalde 3,9 */
 .markdown [data-streamdown="code-block-actions"],
 .markdown [data-streamdown="code-block-actions"] * { background: transparent !important; border-color: transparent !important; box-shadow: none !important; }
 .markdown ul, .markdown ol { list-style-position: outside; padding-left: 1.25em; }
@@ -283,3 +284,7 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
   .markdown [data-streamdown="code-block"][data-language="text"] [data-streamdown="code-block-body"],
   .markdown [data-streamdown="code-block"][data-language=""] [data-streamdown="code-block-body"] { padding-right: 3rem; }
 }
+
+/* Limietbalk: de vulling schuift naar de nieuwe stand (stil bij reduced motion). */
+.ab-meter-fill { transition: width 400ms cubic-bezier(0.22, 1, 0.36, 1); }
+@media (prefers-reduced-motion: reduce) { .ab-meter-fill { transition: none; } }

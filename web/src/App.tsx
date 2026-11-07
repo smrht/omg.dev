@@ -707,7 +707,7 @@ import {
   UpdateSettingsRow,
 } from "./components/update-drawer";
 import { UsageCampfireHost, useUsageRingLongPress, openUsageCampfire } from "./components/UsageCampfire";
-import { RailUsageMeters, UsageWindowRow, MeterBar, tightestWindow, leftPct, windowName, resetText } from "./components/usage-meters";
+import { RailUsageMeters, UsageWindowRow, MeterBar, tightestWindow, leftPct, windowName, resetText, metLaatsteStand, standTijd, type ShownUsage } from "./components/usage-meters";
 import { BankedResetCredits } from "./components/BankedResetCredits";
 import {
   consumeBankedReset,
@@ -10702,7 +10702,7 @@ function ComposerUsageIndicator({ agent, accountId, enabled = true }: {
 
 // One provider's limit windows: label, percent and next reset. Shared by the
 // desktop rings popover and the mobile agent sheet's Usage page.
-function UsageDetailsBody({ provider }: { provider: ProviderUsage }) {
+function UsageDetailsBody({ provider }: { provider: ShownUsage }) {
   const windows = activityRingOrder(provider.windows ?? []);
   return (
     <>
@@ -10727,7 +10727,11 @@ function UsageDetailsBody({ provider }: { provider: ProviderUsage }) {
           {provider.available ? provider.note ?? "No limit data reported" : provider.note ?? "Not signed in"}
         </p>
       )}
-      {windows.length && provider.note ? (
+      {provider.standVan ? (
+        <p className="mt-2 text-[11px] leading-snug text-muted-foreground/80">
+          Stand van {standTijd(provider.standVan)}: de bron geeft nu geen nieuw cijfer.
+        </p>
+      ) : windows.length && provider.note ? (
         <p className="mt-2 text-[11px] leading-snug text-muted-foreground/80">{provider.note}</p>
       ) : null}
       {provider.resetCredits?.availableCount ? (
@@ -10747,12 +10751,14 @@ function UsageDetailsBody({ provider }: { provider: ProviderUsage }) {
 // Long-press opens the full-screen Usage Campfire (all agents on an arc).
 // Desktop: bare Shift also toggles the campfire.
 function UsageRingsButton({
-  provider,
+  provider: rawProvider,
   className,
 }: {
   provider: ProviderUsage;
   className?: string;
 }) {
+  // agentbox: valt de bron weg (Anthropic 429), dan de laatste goede stand, gedempt.
+  const provider = metLaatsteStand(rawProvider);
   const windows = activityRingOrder(provider.windows ?? []);
   const longPress = useUsageRingLongPress();
   return (
@@ -10785,7 +10791,7 @@ function UsageRingsButton({
               const tight = tightestWindow(windows);
               const left = tight ? leftPct(tight) : null;
               return (
-                <span className="flex items-center gap-1.5 text-xs tabular-nums">
+                <span className={cn("flex items-center gap-1.5 text-xs tabular-nums", provider.standVan && "opacity-60")}>
                   <MeterBar left={left} className="w-8" />
                   <span className={cn(left != null && left <= 10 ? "text-destructive" : left != null && left <= 25 ? "text-primary" : "text-muted-foreground")}>
                     {left == null ? "—" : `${Math.round(left)}%`}
@@ -14183,11 +14189,11 @@ function RailStage({
             onClick={() => setRailFindingsOpen(true)}
             data-testid="rail-findings-pill"
             aria-expanded={false}
-            aria-label={`${findings.length} update${findings.length === 1 ? "" : "s"} from auto agents. Open`}
+            aria-label={`${findings.length} ${findings.length === 1 ? "bevinding" : "bevindingen"} van auto-agents. Openen`}
             className="pointer-events-auto flex h-7 items-center gap-1.5 rounded-full border border-border/70 bg-card/90 px-2.5 text-xs font-medium text-muted-foreground shadow-sm backdrop-blur-xl transition-colors hover:text-foreground"
           >
             <span className="tabular-nums">
-              {findings.length} update{findings.length === 1 ? "" : "s"}
+              {findings.length} {findings.length === 1 ? "bevinding" : "bevindingen"}
             </span>
             <ChevronUp className="size-3 shrink-0 opacity-70" />
           </button>
@@ -25275,10 +25281,12 @@ export function NewSessionDialog({
   const usageSummary = (() => {
     if (usageLoading) return "Gebruik laden…";
     if (!usage) return "Gebruiksgegevens niet beschikbaar";
-    const closest = usage.windows?.length ? activityRingOrder(usage.windows)[0] : null;
-    return closest?.pct != null
-      ? `${closest.label}: ${Math.round(closest.pct)}% gebruikt`
-      : "Limiet niet beschikbaar";
+    // agentbox: wat er nog OVER is van het venster dat het eerst op is.
+    const shown = metLaatsteStand(usage);
+    const tight = tightestWindow(shown.windows);
+    const left = tight ? leftPct(tight) : null;
+    if (left == null || !tight) return "Limiet niet beschikbaar";
+    return `${Math.round(left)}% over (${windowName(tight.label)})${shown.standVan ? `, stand van ${standTijd(shown.standVan)}` : ""}`;
   })();
   // The project the inline composer will start in, named the same way as the
   // drawer's project pill. Null while it would only be a fallback guess.

@@ -29,8 +29,8 @@ describe("UserFilterMenu", () => {
 
     const trigger = ui.query('[aria-label="Filter live sessions by user"]');
     expect(trigger?.getAttribute("title")).toBe("Ada");
-    expect((trigger?.querySelector("img") as HTMLImageElement | null)?.src).toBe(
-      "https://example.com/ada.png",
-    );
+    // agentbox: een letter in plaats van de profielfoto.
+    expect(trigger?.querySelector("img")).toBeNull();
+    expect(trigger?.textContent).toBe("A");
   });
 });

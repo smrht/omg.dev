@@ -18,11 +18,13 @@ test("project view retains pins; unread uses authoritative set",()=>{
  const result=buildOverviewGroups({...base,view:"projects",pins:new Set(["a"]),unreadOnly:true,unread:new Set(["a"]),nodes:[node("a",{project:"study"}),node("b",{project:"work",unread:true})]});
  expect(result.map(g=>g.label)).toEqual(["study"]);expect(result[0]?.count).toBe(1);
 });
-test("toolbar controls query, view and density; no reload required",()=>{
+test("toolbar controls query, view and density; no reload required",async()=>{
  function Harness(){const prefs=useOverviewPreferences();return <><OverviewToolbar prefs={prefs} count={3}/><output>{prefs.view}:{prefs.density}:{prefs.unreadOnly.toString()}</output></>}
  ui=mount();ui.render(<Harness/>);
  const projects=ui.queryAll('button[aria-pressed]').find(e=>e.textContent==='Projecten') as HTMLButtonElement;
  ui.flush(()=>projects.click());expect(ui.query('output')?.textContent).toContain('projects');
- ui.flush(()=>(ui.query('[aria-label="Ruime weergave"]') as HTMLButtonElement).click());expect(ui.query('output')?.textContent).toContain('comfortable');
- ui.flush(()=>(ui.query('input[type="checkbox"]') as HTMLInputElement).click());expect(ui.query('output')?.textContent).toContain('true');
+ // agentbox: dichtheid en ongelezen zitten in het menu "Weergave en filter".
+ const item=async(label:string)=>{if(!document.querySelector('[role="menu"]'))await ui.flushAsync(()=>(ui.query('[aria-label="Weergave en filter"]') as HTMLElement).click());await ui.flushAsync(()=>(Array.from(document.querySelectorAll('[role="menuitemcheckbox"]')).find(e=>e.textContent?.includes(label)) as HTMLElement).click());};
+ await item('Compacte rijen');expect(ui.query('output')?.textContent).toContain('comfortable');
+ await item('Alleen ongelezen');expect(ui.query('output')?.textContent).toContain('true');
 });

@@ -124,7 +124,7 @@ export function PwaInstallCallout() {
         </div>
         <Button size="sm" onClick={() => void action.act()} disabled={action.busy}>
           <Download className="size-4" />
-          {mode === "native" ? "Install" : "How"}
+          {mode === "native" ? "Installeren" : "Hoe"}
         </Button>
         <Button size="icon-xs" variant="ghost" onClick={dismiss} aria-label="Dismiss install suggestion">
           <X className="size-3.5" />

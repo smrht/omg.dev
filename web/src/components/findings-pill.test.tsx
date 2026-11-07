@@ -12,9 +12,9 @@ afterEach(() => ui.cleanup());
 const pill = () => ui.query('[data-testid="findings-pill"]') as HTMLButtonElement | null;
 
 test("the label is singular for one update", () => {
-  expect(findingsLabel(1)).toBe("1 update");
-  expect(findingsLabel(2)).toBe("2 updates");
-  expect(findingsLabel(80)).toBe("80 updates");
+  expect(findingsLabel(1)).toBe("1 bevinding");
+  expect(findingsLabel(2)).toBe("2 bevindingen");
+  expect(findingsLabel(80)).toBe("80 bevindingen");
 });
 
 test("nothing is drawn when nothing is open", () => {
@@ -27,8 +27,8 @@ test("nothing is drawn when nothing is open", () => {
 test("the pill shows the count and opens", () => {
   let opened = 0;
   ui.render(<FindingsPill count={3} onOpen={() => (opened += 1)} aboveComposer />);
-  expect(pill()?.textContent).toContain("3 updates");
-  expect(pill()?.getAttribute("aria-label")).toBe("3 updates from auto agents. Open");
+  expect(pill()?.textContent).toContain("3 bevindingen");
+  expect(pill()?.getAttribute("aria-label")).toBe("3 bevindingen van auto-agents. Openen");
   ui.flush(() => pill()!.click());
   expect(opened).toBe(1);
 });

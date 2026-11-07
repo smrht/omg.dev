@@ -40,7 +40,7 @@ export function findingsPillBottom(aboveComposer: boolean): string {
 }
 
 export function findingsLabel(count: number): string {
-  return `${count} update${count === 1 ? "" : "s"}`;
+  return `${count} ${count === 1 ? "bevinding" : "bevindingen"}`;
 }
 
 export function FindingsPill({
@@ -63,7 +63,7 @@ export function FindingsPill({
         type="button"
         onClick={onOpen}
         data-testid="findings-pill"
-        aria-label={`${label} from auto agents. Open`}
+        aria-label={`${label} van auto-agents. Openen`}
         className="pointer-events-auto flex h-7 items-center gap-1.5 rounded-full border border-border/70 bg-card/90 px-2.5 text-xs font-medium text-muted-foreground shadow-sm backdrop-blur-xl transition-colors hover:text-foreground"
       >
         <span className="tabular-nums">{label}</span>

@@ -172,8 +172,9 @@ function TaakRij({ taak, onOpenSession, zet, klein, smal }: {
         <div className={cn("taak-knoppen flex shrink-0 items-center", smal && "taak-knoppen-zweef")}>
           {taak.status === "open" ? (
             <>
-              <button type="button" onClick={() => geefOpdracht(taak)} title="Opdracht geven" aria-label={`Opdracht geven: ${taak.titel}`}
-                className="flex size-9 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary"><CornerDownRight className="size-4" /></button>
+              {/* Een vraag met sessie wacht op antwoord in DIE chat; een nieuwe sessie bereikt die agent nooit. Klik op de rij opent het gesprek. */}
+              {!(taak.soort === "vraag" && taak.sessie) && <button type="button" onClick={() => geefOpdracht(taak)} title="Opdracht geven" aria-label={`Opdracht geven: ${taak.titel}`}
+                className="flex size-9 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary"><CornerDownRight className="size-4" /></button>}
               {!smal && <button type="button" onClick={() => zet(taak.id, "later")} title="Later (morgen terug)" aria-label={`Later: ${taak.titel}`}
                 className="flex size-9 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary"><Clock className="size-4" /></button>}
               <button type="button" onClick={() => zet(taak.id, "gedaan")} title="Gedaan" aria-label={`Gedaan: ${taak.titel}`}

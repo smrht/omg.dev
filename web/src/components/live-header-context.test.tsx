@@ -7,6 +7,7 @@ let ui: Mounted;
 beforeEach(() => { ui = mount(); globalThis.fetch = (async () => Response.json({ questions: [] })) as typeof fetch; });
 afterEach(() => { ui.cleanup(); globalThis.fetch = originalFetch; });
 
+// agentbox: eigen box, de kop noemt altijd Sam (rosternamen zijn handles).
 test("keeps the same header control when loading ends and shows the known name", () => {
   const props = { brand: <span>omg</span>, viewerName: "Benny Kok", busyCount: 0, onOpenNotifications: () => {} };
   ui.render(<AskProvider><LiveHeaderContext {...props} intro /></AskProvider>);
@@ -14,13 +15,13 @@ test("keeps the same header control when loading ends and shows the known name",
   expect(button?.getAttribute("aria-label")).toBe("omg.dev");
   ui.render(<AskProvider><LiveHeaderContext {...props} intro={false} /></AskProvider>);
   expect(ui.query("button")).toBe(button);
-  expect(button?.getAttribute("aria-label")).toBe("Welcome, Benny");
+  expect(button?.getAttribute("aria-label")).toBe("Hoi Sam");
 });
 
 test("keeps the welcome readable without an identity and opens notifications", () => {
   let opened = 0;
   ui.render(<AskProvider><LiveHeaderContext brand={<span>omg</span>} intro={false} busyCount={0} onOpenNotifications={() => opened++} /></AskProvider>);
-  expect(ui.query("button")?.getAttribute("aria-label")).toBe("Welcome");
+  expect(ui.query("button")?.getAttribute("aria-label")).toBe("Hoi Sam");
   expect(ui.text()).not.toContain("Unassigned");
   ui.flush(() => (ui.query("button") as HTMLElement).click());
   expect(opened).toBe(1);
@@ -43,7 +44,7 @@ test("connection status replaces the greeting and tapping retries until recovery
   render("reconnecting", true);
   expect(ui.query("button")).toBe(button);
   expect(button.getAttribute("aria-label")).toBe("Reconnecting… Tap to retry");
-  expect(ui.text()).not.toContain("Welcome");
+  expect(ui.text()).not.toContain("Hoi Sam");
   ui.flush(() => button.click());
   expect(retries).toBe(1);
   expect(notifications).toBe(0);
@@ -51,7 +52,7 @@ test("connection status replaces the greeting and tapping retries until recovery
   expect(button.getAttribute("aria-label")).toBe("Connection unavailable Tap to retry");
   expect(ui.text()).not.toContain("cloud_runtime_unavailable");
   render("live", true);
-  expect(button.getAttribute("aria-label")).toContain("Welcome, Benny");
+  expect(button.getAttribute("aria-label")).toContain("Hoi Sam");
   ui.flush(() => button.click());
   expect(notifications).toBe(1);
 });
@@ -61,7 +62,7 @@ test("the greeting uses confirmed cloud lifecycle states during connection", () 
   for (const [lifecycle, message] of [["starting", "Starting your computer…"], ["waking", "Waking your computer…"], ["failed", "Could not start your computer"], ["paused", "Computer paused"]] as const) {
     ui.render(<RuntimeAvailabilityContext.Provider value={{ lifecycle, status: "connecting", ready: false, loading: true, error: null, retry: () => {} }}><AskProvider><LiveHeaderContext {...props} intro /></AskProvider></RuntimeAvailabilityContext.Provider>);
     expect(ui.query("button")?.getAttribute("aria-label")).toBe(message);
-    expect(ui.text()).not.toContain("Welcome");
+    expect(ui.text()).not.toContain("Hoi Sam");
   }
 });
 
@@ -76,5 +77,5 @@ test("a ready cloud keeps connecting until the client recovers", () => {
   expect(ui.text()).toContain("Connecting…");
   expect(ui.text()).not.toContain("Connection unavailable");
   render(true, null);
-  expect(ui.text()).toContain("Welcome, Benny");
+  expect(ui.text()).toContain("Hoi Sam");
 });
