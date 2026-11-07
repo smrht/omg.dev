@@ -133,6 +133,15 @@ function wanneer(iso?: string) {
 // Een vastgelopen bot (Copyreviewer e.d.) is geen werk voor Sam: dat is een melding.
 export const isMelding = (i: Taak) => i.soort === "melding" || (!!i.machine && i.soort === "vast");
 
+/** Open werk voor de teller op de Taken-tab: voor jou + meldingen. Zo zie je het ook vanuit Aandacht. */
+export function useTakenTelling(): { voorJou: number; meldingen: number } {
+  const { data } = useTaken();
+  return useMemo(() => {
+    const d = deelTaken(data?.items ?? []);
+    return { voorJou: d.open.length, meldingen: d.meldingen.length };
+  }, [data]);
+}
+
 export function deelTaken(items: Taak[]) {
   const open = items.filter(i => i.status === "open" && i.soort !== "gedaan" && !isMelding(i))
     .sort((a, b) => RANG[a.soort] - RANG[b.soort] || (b.tijd ?? "").localeCompare(a.tijd ?? ""));

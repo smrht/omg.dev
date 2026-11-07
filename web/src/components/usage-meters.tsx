@@ -176,7 +176,7 @@ export function RailUsageMeters({ collapsed }: { collapsed?: boolean }) {
         const bezig = !byId.has(p.id);
         const standVan = (p as ShownUsage).standVan;
         return (
-          <span key={p.id} className={cn("block", standVan && "opacity-60")}>
+          <span key={p.id} className={cn("block", standVan && "opacity-75")}>
           <span className="flex items-center gap-2 text-xs" title={standVan ? `Stand van ${standTijd(standVan)}; ${p.note ?? "de bron geeft nu geen cijfer"}` : !p.windows?.length ? (p.note ?? "geen limietcijfers") : (p.windows ?? []).map((x) => `${windowName(x.label)}: ${leftPct(x) == null ? "geen cijfer" : `${Math.round(leftPct(x)!)}% over`}${x.resetsAt ? `, ${resetText(x.resetsAt)}` : ""}`).join("\n")}>
             <img src={agentIconSrc(p.kind)} alt="" className="size-3.5 shrink-0" />
             <span className="w-16 shrink-0 truncate text-muted-foreground">{providerName(p, rows)}</span>
@@ -194,7 +194,7 @@ export function RailUsageMeters({ collapsed }: { collapsed?: boolean }) {
     {open ? (
       <div className="max-h-60 space-y-3 overflow-y-auto px-3 pb-3 [scrollbar-width:thin]">
         {rows.filter((p) => (p.windows ?? []).length).map((p) => (
-          <div key={p.id} className={cn("space-y-2", (p as ShownUsage).standVan && "opacity-60")}>
+          <div key={p.id} className={cn("space-y-2", (p as ShownUsage).standVan && "opacity-75")}>
             <div className="flex items-center gap-1.5 text-[11px] font-medium text-foreground">
               <img src={agentIconSrc(p.kind)} alt="" className="size-3" />
               {providerName(p, rows)}

@@ -10791,11 +10791,12 @@ function UsageRingsButton({
               const tight = tightestWindow(windows);
               const left = tight ? leftPct(tight) : null;
               return (
-                <span className={cn("flex items-center gap-1.5 text-xs tabular-nums", provider.standVan && "opacity-60")}>
-                  <MeterBar left={left} className="w-8" />
-                  <span className={cn(left != null && left <= 10 ? "text-destructive" : left != null && left <= 25 ? "text-primary" : "text-muted-foreground")}>
-                    {left == null ? "—" : `${Math.round(left)}%`}
+                <span className={cn("flex items-center gap-1.5 text-xs tabular-nums", provider.standVan && "opacity-75")}>
+                  <MeterBar left={left} className="w-10" />
+                  <span className={cn("font-medium", left != null && left <= 10 ? "text-destructive" : left != null && left <= 25 ? "text-primary" : "text-foreground")}>
+                    {left == null ? "—" : `${Math.round(left)}% over`}
                   </span>
+                  {tight ? <span className="text-muted-foreground">{provider.standVan ? `stand ${standTijd(provider.standVan)}` : windowName(tight.label)}</span> : null}
                 </span>
               );
             })()}
@@ -25910,7 +25911,7 @@ export function NewSessionDialog({
             a per-session name field in here instead — wrong idea; the title
             belongs to the dialog, and sessions are renamed from their own
             header once they exist.) */}
-        <DrawerTitle className="px-3 pt-0.5 pb-1.5">New session</DrawerTitle>
+        <DrawerTitle className="px-3 pt-0.5 pb-1.5">Nieuwe sessie</DrawerTitle>
         {formBody}
       </DrawerContent>
     </Drawer>
@@ -26775,7 +26776,7 @@ function ComposerThinkingControl({
           className="max-w-28 truncate text-xs font-medium transition-colors duration-150"
           style={scrub.scrubbing ? { color: scrub.previewAccent } : undefined}
         >
-          {automatic ? "Thinking: Auto" : `Thinking: ${thinkingLevelLabel(shown)}`}
+          {automatic ? "Denkwerk: auto" : `Denkwerk: ${pickerThinkingLabel(thinkingLevelLabel(shown))}`}
         </span>
       </button>
 
@@ -26850,7 +26851,7 @@ function ComposerStartButton({
         {/* The button stays exactly as it is during a scrub — no ring, scale,
             icon or label swap. The floating panel carries the live level. */}
         <Send className="size-4" />
-        <span>Start</span>
+        <span>Starten</span>
       </Button>
 
       {scrub.panel}

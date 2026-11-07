@@ -20,7 +20,7 @@ for (const [naam, w, h, mobiel] of [["desktop", 1440, 900, false], ["mobiel", 39
   await send("Emulation.setTouchEmulationEnabled", { enabled: mobiel }, s);
   await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: scheme }, { name: "prefers-reduced-motion", value: process.env.MOTION ? "no-preference" : "reduce" }] }, s);
   await send("Page.navigate", { url }, s); await sleep(2500);
-  await ev(`localStorage.setItem("lfg_user","contactexpertly@gmail.com");localStorage.setItem("lfg_v2_user_filter","contactexpertly@gmail.com");1`);
+  await ev(`localStorage.setItem("lfg_user","contactexpertly@gmail.com");localStorage.setItem("lfg_v2_user_filter","contactexpertly@gmail.com");${process.env.PRE_JS ?? ""};1`);
   await send("Page.navigate", { url }, s);
   for (let t = 0; t < 40; t++) {
     await sleep(500);

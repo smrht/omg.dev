@@ -5,6 +5,7 @@ import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMe
 import { overviewState, sessionMatchesSearch } from "@/lib/session-overview";
 import { groupNodesByProject, type ProjectGroup } from "@/lib/session-groups";
 import type { Session } from "../App";
+import { useTakenTelling } from "./taken";
 
 export type OverviewNode = { session: Session; children: OverviewNode[] };
 export type OverviewView = "taken" | "attention" | "all" | "projects";
@@ -78,6 +79,7 @@ export function OverviewToolbar({ prefs, count, project, onClearProject, folderM
   // werkt ook in Taken. Op touch houden de knoppen 44px (agentbox.css).
   const taken = prefs.view === "taken";
   const index = Math.max(0, VIEWS.findIndex(([key]) => key === prefs.view));
+  const telling = useTakenTelling();
   return <section aria-label="Gesprekkenoverzicht" onKeyDown={e => { if (!e.metaKey && !e.ctrlKey && !e.altKey) e.stopPropagation(); }} className="overview-toolbar ab-toolbar px-2 pb-1">
     <div className="flex items-center gap-0.5">
       <div className="relative min-w-0 flex-1">
@@ -100,7 +102,7 @@ export function OverviewToolbar({ prefs, count, project, onClearProject, folderM
       </div>
     </div>
     <div role="group" aria-label="Weergave" className="ab-tabs relative mt-1.5 grid grid-cols-4 border-b border-border">
-      {VIEWS.map(([key, label]) => <button key={key} type="button" aria-pressed={prefs.view === key} onClick={() => prefs.setView(key)} className={cn("ab-tab h-8 truncate px-0 text-[12.5px] transition-colors focus-visible:outline-2 focus-visible:outline-primary", prefs.view === key ? "font-semibold text-foreground" : "font-medium text-muted-foreground hover:text-foreground")}>{label}</button>)}
+      {VIEWS.map(([key, label]) => <button key={key} type="button" aria-pressed={prefs.view === key} onClick={() => prefs.setView(key)} className={cn("ab-tab h-8 truncate px-0 text-[12.5px] transition-colors focus-visible:outline-2 focus-visible:outline-primary", prefs.view === key ? "font-semibold text-foreground" : "font-medium text-muted-foreground hover:text-foreground")}>{label}{key === "taken" && telling.voorJou + telling.meldingen > 0 ? <span className="ml-1 text-[11px] font-medium tabular-nums text-primary" aria-label={`${telling.voorJou} voor jou, ${telling.meldingen} meldingen`}>{telling.voorJou + telling.meldingen}</span> : null}</button>)}
       <span aria-hidden="true" className="ab-tab-streep pointer-events-none absolute -bottom-px left-0 h-[2px] w-1/4 rounded-full bg-foreground" style={{ transform: `translateX(${index * 100}%)` }} />
     </div>
     {project && <button type="button" onClick={onClearProject} className="mt-1 flex min-h-8 max-w-full items-center gap-2 px-1 text-xs text-muted-foreground" aria-label="Alle projecten tonen"><span className="truncate">{project}</span><X className="size-3 shrink-0" /></button>}
