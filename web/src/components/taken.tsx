@@ -217,7 +217,7 @@ function TaakRij({ taak, onOpenSession, zet, klein }: {
                 <button type="button" onClick={() => zet(taak.id, "later")} className="taak-knop" aria-label={`Morgen terug: ${taak.titel}`} title="Verbergen tot morgen">
                   <Clock aria-hidden="true" />Morgen
                 </button>
-                <button type="button" onClick={() => zet(taak.id, "gedaan")} className="taak-knop" aria-label={`Gedaan: ${taak.titel}`} title="Afvinken">
+                <button type="button" onClick={() => zet(taak.id, "gedaan")} className="taak-knop" aria-label={`Gedaan: ${taak.titel}`} title={taak.bron === "mail" ? "Afvinken, de mail gaat uit je inbox" : "Afvinken"}>
                   <Check aria-hidden="true" />Gedaan
                 </button>
               </>
@@ -438,7 +438,7 @@ function MeldingRij({ taak, zet, onOpenSession }: { taak: Taak; zet: (id: string
           className="melding-opdracht inline-flex h-9 items-center whitespace-nowrap gap-1.5 rounded-md px-3 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">
           <CornerDownRight className="size-4" aria-hidden="true" />Opdracht geven
         </button>
-        <button type="button" onClick={() => zet(taak.id, "gedaan")}
+        <button type="button" onClick={() => zet(taak.id, "gedaan")} title={taak.bron === "mail" ? "Afhandelen, de mail gaat uit je inbox" : "Afhandelen"}
           className="inline-flex h-9 items-center gap-1.5 whitespace-nowrap rounded-md px-3 text-sm text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary">
           <Check className="size-4" aria-hidden="true" />Afhandelen
         </button>

@@ -5,9 +5,15 @@ GET  /api/taken                 -> items met status (open, later, gedaan)
 POST /api/taken/item/<id>       -> body {"status": "gedaan"|"later"|"open"}
 POST /api/taken/verversen       -> start de collector op de achtergrond
 Luistert alleen op 127.0.0.1. Verstuurt niets naar buiten.
+
+Mail (Sam, 07-11-2026): "gedaan" op een mailtaak (ook via Opdracht geven, dat zet hem
+op gedaan zodra de chat start) archiveert die ene Gmail-draad: label INBOX eraf. Terug
+naar open of later zet INBOX er weer op. Sams klik is de goedkeuring voor precies die
+draad; de Executor-pauze wordt alleen hervat als adres, draad en labels kloppen.
+Nooit verwijderen, nooit andere labels.
 """
 from __future__ import annotations
-import json, os, subprocess, sys, threading, time, urllib.parse
+import json, os, re, subprocess, sys, threading, time, urllib.parse
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -16,7 +22,54 @@ STATE = Path(os.environ.get("TAKEN_STATE", Path.home() / ".local/state/taken"))
 PORT = int(os.environ.get("TAKEN_PORT", "8790"))
 COLLECT = Path(__file__).with_name("collect.py")
 LOCK = threading.Lock()
+GMAIL_LOCK = threading.Lock()
+EXECUTOR = str(Path.home() / "bin/executor-mcp")
+MODIFY = "tools.google_gmail.user.contactexpertly.gmail.users.threads.modify"
 running = {"p": None}
+
+
+def _executor(tool: str, args: dict) -> dict:
+    p = subprocess.run([EXECUTOR, "call", tool, json.dumps(args)], capture_output=True, text=True, timeout=120)
+    res = json.loads(p.stdout)["result"]
+    return res.get("structuredContent") or {"status": "error", "error": str(res)[:200]}
+
+
+def gmail_inbox(thread: str, archive: bool) -> tuple[bool, str]:
+    """Haal INBOX van een draad af (archive) of zet hem terug. Eén draad, alleen INBOX."""
+    if not re.fullmatch(r"[0-9a-f]{10,24}", thread):
+        return False, "ongeldige draad-id"
+    key = "removeLabelIds" if archive else "addLabelIds"
+    code = (f'const m = await {MODIFY}({{userId:"me", id:{json.dumps(thread)}, body:{{{key}:["INBOX"]}}}});'
+            ' return {ok: m.ok === true, status: m.http?.status ?? null};')
+    with GMAIL_LOCK:
+        r = _executor("execute", {"code": code})
+        if r.get("status") == "waiting_for_interaction":
+            it = r.get("interaction") or {}
+            a = it.get("args") or {}
+            if it.get("address") != MODIFY or a.get("id") != thread or a.get("body") != {key: ["INBOX"]}:
+                _executor("resume", {"executionId": r["executionId"], "action": "decline", "content": "{}"})
+                return False, "onverwachte goedkeuringsvraag, geweigerd"
+            r = _executor("resume", {"executionId": r["executionId"], "action": "accept", "content": "{}"})
+    out = r.get("result") or {}
+    if r.get("status") == "completed" and out.get("ok") and out.get("status") == 200:
+        return True, "ok"
+    return False, str(r.get("error") or out)[:160]
+
+
+def mail_bijwerken(iid: str, archive: bool) -> None:
+    ok, msg = gmail_inbox(iid[len("mail:"):], archive)
+    with LOCK:
+        st = load("status.json", {})
+        rec = st.get(iid)
+        if archive and rec is not None:
+            rec["gearchiveerd"] = ok
+            if not ok:
+                rec["archieffout"] = msg
+            save_status(st)
+        elif not archive and ok and rec is not None:
+            rec.pop("gearchiveerd", None)
+            save_status(st)
+    print(f"gmail {'archief' if archive else 'terug'} {iid}: {msg}", file=sys.stderr, flush=True)
 
 
 def load(name: str, default):
@@ -91,6 +144,7 @@ class H(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "status moet gedaan, later of open zijn"})
             with LOCK:
                 st = load("status.json", {})
+                was_archief = bool(st.get(iid, {}).get("gearchiveerd"))
                 if status == "open":
                     st.pop(iid, None)
                 else:
@@ -98,7 +152,14 @@ class H(BaseHTTPRequestHandler):
                     st[iid] = {"status": status, "om": now.isoformat()}
                     if status == "later":
                         st[iid]["tot"] = (now + timedelta(hours=int(body.get("uren", 20)))).isoformat()
+                    if status != "gedaan" and was_archief:
+                        st[iid]["gearchiveerd"] = True  # tot de terugzet gelukt is
                 save_status(st)
+            if iid.startswith("mail:"):
+                if status == "gedaan":  # ook opnieuw: een nieuw antwoord zet de draad terug in de inbox
+                    threading.Thread(target=mail_bijwerken, args=(iid, True), daemon=True).start()
+                elif status != "gedaan" and was_archief:
+                    threading.Thread(target=mail_bijwerken, args=(iid, False), daemon=True).start()
             return self._send(200, {"ok": True, "id": iid, "status": status})
         self._send(404, {"error": "not found"})
 
