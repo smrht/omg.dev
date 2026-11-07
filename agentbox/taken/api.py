@@ -44,6 +44,8 @@ def gmail_inbox(thread: str, archive: bool) -> tuple[bool, str]:
     """Haal INBOX van een draad af (archive) of zet hem terug. Eén draad, alleen INBOX."""
     if not re.fullmatch(r"[0-9a-f]{10,24}", thread):
         return False, "ongeldige draad-id"
+    if os.environ.get("TAKEN_DRY_SEND") == "1":
+        return True, "dry: niet gearchiveerd"  # staging: Gmail blijft onaangeroerd
     key = "removeLabelIds" if archive else "addLabelIds"
     code = (f'const m = await {MODIFY}({{userId:"me", id:{json.dumps(thread)}, body:{{{key}:["INBOX"]}}}});'
             ' return {ok: m.ok === true, status: m.http?.status ?? null};')
