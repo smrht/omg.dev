@@ -1,4 +1,5 @@
 import { subsessionCreationKey, resolveSubsessionParent } from "../subsession-policy.ts";
+import { agentboxWebConfig, isSamBox } from "../agentbox-profile.ts";
 import { inspectFinalTurn } from "../final-turn.ts";
 import { resolveSessionCyberAccessProgram, applySessionCyberAccessProgram } from "../session-cyber-access.ts";
 import { inspectIdleChild, mintTerminalReceipt, sessionIdleReport, IDLE_CHILD_POLICY } from "../omg-idle-child.ts";
@@ -1991,7 +1992,7 @@ async function webIndexResponse() {
   // window.lfg (host React + registerExtension) exists and contributes UI
   // (e.g. a private tab). Open-source forks set nothing → clean core.
   let html = await Bun.file(INDEX_PATH).text();
-  const runtimeConfig = `<script>window.__LFG_CONFIG__=${JSON.stringify({ liveTransport: liveTransportMode() })}</script>`;
+  const runtimeConfig = `<script>window.__LFG_CONFIG__=${JSON.stringify({ liveTransport: liveTransportMode(), agentbox: agentboxWebConfig() })}</script>`;
   html = html.includes("</head>")
     ? html.replace("</head>", `${runtimeConfig}</head>`)
     : runtimeConfig + html;
@@ -4572,7 +4573,7 @@ export async function cmdServe() {
       // agentbox: the Taken tab reads a separate local API (agentbox/taken/api.py,
       // taken-api.service on 127.0.0.1:8790). Same-origin proxy so the tailnet
       // gate above covers it; the API itself only listens on loopback.
-      if (path === "/api/taken" || path.startsWith("/api/taken/")) {
+      if ((path === "/api/taken" || path.startsWith("/api/taken/")) && isSamBox()) {
         const target = (process.env.AGENTBOX_TAKEN_TARGET ?? "http://127.0.0.1:8790") + path + url.search;
         try {
           const headers = new Headers();

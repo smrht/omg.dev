@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { agentboxConfig } from "@/lib/agentbox-config";
 import { Check, Clock, CornerDownRight, ExternalLink, Eye, Loader2, MessageSquare, RotateCcw, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -99,6 +100,8 @@ export function useTaken() {
   const [data, setData] = useState<TakenData | null>(cache);
   const [fout, setFout] = useState(false);
   useEffect(() => {
+    // agentbox: only Sam's box has a Taken API; elsewhere nothing is polled.
+    if (!agentboxConfig().taken) return;
     let dood = false;
     const haal = () => laad().then(d => { if (!dood) { setData(d); setFout(false); } }, () => { if (!dood) setFout(true); });
     const opWijziging = () => { if (!dood && cache) setData(cache); };

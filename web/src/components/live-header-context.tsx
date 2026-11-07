@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { greetingName } from "@/lib/agentbox-config";
 import { useRuntimeAvailability, runtimeStatusText } from "../lib/runtime-availability";
 import { useAsk } from "./ask-center";
 import { MorphText } from "./ui/morph-text";
@@ -43,9 +44,8 @@ export function LiveHeaderContext({
   // never a person, and it rendered as "Welcome, Unassigned" in the preview.
   const rawName = viewerName?.trim() || user?.name?.trim() || (identity ? identity.split("@")[0] : "");
   const firstNamePart = rawName.split(/\s+/)[0] ?? "";
-  // Eigen box: de rosternaam is een handle, de kop noemt Sam bij zijn voornaam.
-  void firstNamePart;
-  const firstName = "Sam";
+  // agentbox: de rosternaam is een handle; de kop noemt de eigenaar van de box bij zijn voornaam.
+  const firstName = greetingName(firstNamePart);
   const questionCount = questions.length;
   const showCard = intro;
   const actionInMotion = busyCount > 0;

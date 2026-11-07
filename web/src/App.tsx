@@ -1,4 +1,5 @@
 import { OverviewToolbar, useOverviewPreferences, buildOverviewGroups, flattenOverview } from "./components/session-overview";
+import { agentboxConfig, greetingName } from "./lib/agentbox-config";
 import { applyStopOverrides, clearStopped, markStopped, useStopOverrideVersion } from "./lib/stop-override";
 import { TakenLijst, TakenVandaag, MeldingenPagina, zetBevindingenAantal, MELDINGEN_EVENT, OPDRACHT_EVENT, neemOpdracht, opdrachtVerstuurd } from "./components/taken";
 import { type WorkspaceSummary } from "./components/desktop-workspace";
@@ -1535,7 +1536,7 @@ const DEVIN_MODELS = ["adaptive", "swe", "opus", "gpt", "sonnet", "gemini", "cod
 const COPILOT_MODELS = ["claude-sonnet-4.5", "claude-sonnet-4", "gpt-5", "grok-4.7"];
 const ZCODE_MODELS = ["zaiplan/glm-5.3-flash", "zaiplan/glm-5.3"];
 // The project a new chat starts in on this box when the view is "All projects".
-const COMPOSER_DEFAULT_PROJECT = "sites-beheer";
+const COMPOSER_DEFAULT_PROJECT = agentboxConfig().defaultProject;
 const JCODE_MODELS = ["auto"];
 // fx routes through Vercel AI Gateway, so its ids are `provider/model` strings.
 // Kept in sync with FX_MODELS in src/agent-catalog.ts (the server catalog
@@ -14800,7 +14801,7 @@ function RailStage({
             {/* Alleen de takenlijst scrolt: de composer blijft overflow-visible
                 zodat zijn suggestiemenu's omhoog kunnen uitsteken. */}
             <div className="min-h-0 flex-1 overflow-y-auto">
-              <TakenVandaag onOpenSession={(sid) => activate(sid, false)} onAlles={() => overviewPrefs.setView("taken")} />
+              {agentboxConfig().taken ? <TakenVandaag onOpenSession={(sid) => activate(sid, false)} onAlles={() => overviewPrefs.setView("taken")} /> : null}
             </div>
           </div>
         )}
@@ -26087,8 +26088,7 @@ export function NewSessionDialog({
   const stageOwner = users.find((item) => item.email === user);
   // Eigen box van Sam: de rosternaam is een handle ("Rocketmansh"), dus de
   // begroeting gebruikt zijn voornaam.
-  void stageOwner;
-  const stageGreetingName = "Sam";
+  const stageGreetingName = greetingName(stageOwner?.name?.trim() || (user ? user.split("@")[0] : "") || "there");
   if (variant === "stage") {
     return (
       <div

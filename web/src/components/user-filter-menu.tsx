@@ -1,5 +1,6 @@
 import { Globe, UserRound } from "lucide-react";
 
+import { agentboxConfig } from "@/lib/agentbox-config";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -78,7 +79,7 @@ export function UserFilterMenu({
       >
         {selected ? (
           // agentbox: een rustige letter in plaats van de profielfoto.
-          <span className="text-[11px] font-semibold uppercase leading-none">{/^(contactexpertly|smrht)@/.test(selected.email) ? "S" : (selected.name ?? selected.email).trim().charAt(0)}</span>
+          <span className="text-[11px] font-semibold uppercase leading-none">{agentboxConfig().profile === "sam" && /^(contactexpertly|smrht)@/.test(selected.email) ? "S" : (selected.name ?? selected.email).trim().charAt(0)}</span>
         ) : active ? (
           <UserRound className={cn("shrink-0", size === "sm" ? "size-3.5" : "size-[18px]")} />
         ) : (

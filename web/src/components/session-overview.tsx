@@ -1,4 +1,5 @@
 import { useState, useSyncExternalStore, type ReactNode } from "react";
+import { agentboxConfig } from "@/lib/agentbox-config";
 import { Search, X, SlidersHorizontal } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -60,7 +61,7 @@ export function buildOverviewGroups({ nodes, pins, view, query, unreadOnly, unre
 }
 export function useOverviewPreferences() {
   const rawView = useSyncExternalStore(subscribe, () => read("view", "attention"), () => "attention");
-  const view: OverviewView = rawView === "all" || rawView === "projects" || rawView === "taken" ? rawView : "attention";
+  const view: OverviewView = rawView === "all" || rawView === "projects" || (rawView === "taken" && agentboxConfig().taken) ? rawView : "attention";
   const rawDensity = useSyncExternalStore(subscribe, () => read("density", "compact"), () => "compact");
   const density = rawDensity === "comfortable" ? "comfortable" : "compact";
   const [query, setQuery] = useState("");
@@ -69,7 +70,9 @@ export function useOverviewPreferences() {
     toggleDensity: () => write("density", density === "compact" ? "comfortable" : "compact"),
     query, setQuery, unreadOnly, setUnreadOnly };
 }
-const VIEWS = [["taken", "Taken"], ["attention", "Aandacht"], ["all", "Alles"], ["projects", "Projecten"]] as const;
+const ALL_VIEWS = [["taken", "Taken"], ["attention", "Aandacht"], ["all", "Alles"], ["projects", "Projecten"]] as const;
+// agentbox: Taken reads Sam's own mail/conversations; other boxes do not show the tab.
+const VIEWS = ALL_VIEWS.filter(([key]) => key !== "taken" || agentboxConfig().taken);
 
 export function OverviewToolbar({ prefs, count, project, onClearProject, folderMenu }: {
   prefs: ReturnType<typeof useOverviewPreferences>; count: number; project?: string; onClearProject?: () => void; folderMenu?: ReactNode;

@@ -1,4 +1,5 @@
 import { subsessionCreationKey } from "../subsession-policy.ts";
+import { isSamBox } from "../agentbox-profile.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -2059,7 +2060,8 @@ export function buildOmgMcpServer(): McpServer {
 
   // Sam's own portfolio tools live in their own module so upstream merges of
   // this file stay clean.
-  registerSamTools(server);
+  // agentbox: Sam's deploy-poller/placement/Executor tools exist only on his box.
+  if (isSamBox()) registerSamTools(server);
 
   return server;
 }

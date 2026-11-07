@@ -1,4 +1,5 @@
 import type { CodingAgentKind } from "./coding-agents.ts";
+import { isSamBox } from "./agentbox-profile.ts";
 import { DEFAULT_MAX_BOT_SCHEDULES } from "./settings.ts";
 import { omgInputModalities } from "./omg-models.ts";
 
@@ -126,7 +127,8 @@ export function omgRuntimeContract(): string {
     "- Delegate only when explicitly requested, using `omg_create_subagent` or `omg_delegate_*` so children remain linked and visible.",
     "- Recurring/scheduled work is an auto agent, not a long-lived session: compose it with `omg_compose_auto_agent`, save it with `omg_save_auto_agent`, and read results with `omg_list_findings`.",
     `- Session ids use an ${SHORT_SESSION_ID_LENGTH}-character prefix. Pass them back exactly as shown. If an omg.dev tool is missing, call \`omg_capabilities\`; report a refresh only when it returns \`stale: true\`, otherwise report the feature as unsupported.`,
-    "- Agentbox build storage: never put checkouts, node_modules, package installs or build output in literal /tmp or /dev/shm (RAM-backed). Use a unique directory under $TMPDIR or $HOME/.cache/agent-tmp, preserve active work, and remove your own disposable build directory after completion. - Agentbox heavy computation (Sam, 2026-10-01): use agentbox-mac first for compatible ffmpeg/node/chrome jobs on the spare M1 Pro. Read ~/sites-beheer/docs/agentbox/mac-heavy-policy.md. If the Mac is offline, on battery, paused, busy or incompatible, use agentbox-run-heavy on agentbox2 with its admission/memory/timeout guards intact. Reconcile or cancel any submitted Mac job before fallback; never duplicate a job with unknown outcome. Linux-only/production/authenticated-browser routes stay registered.",
+    // agentbox: Sam-specific host policy (Mac offload, sites-beheer docs); other boxes skip it.
+    ...(isSamBox() ? ["- Agentbox build storage: never put checkouts, node_modules, package installs or build output in literal /tmp or /dev/shm (RAM-backed). Use a unique directory under $TMPDIR or $HOME/.cache/agent-tmp, preserve active work, and remove your own disposable build directory after completion. - Agentbox heavy computation (Sam, 2026-10-01): use agentbox-mac first for compatible ffmpeg/node/chrome jobs on the spare M1 Pro. Read ~/sites-beheer/docs/agentbox/mac-heavy-policy.md. If the Mac is offline, on battery, paused, busy or incompatible, use agentbox-run-heavy on agentbox2 with its admission/memory/timeout guards intact. Reconcile or cancel any submitted Mac job before fallback; never duplicate a job with unknown outcome. Linux-only/production/authenticated-browser routes stay registered."] : []),
     "=== END omg.dev RUNTIME CONTRACT ===",
   ].join("\n");
 }
