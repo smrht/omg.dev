@@ -28,6 +28,11 @@ while :; do
   sleep 60
 done
 set -- $(busy); before=$2; log "stil sinds $IDLE_MIN min, sessies=$before; overstap"
+ids(){ curl -s -m10 127.0.0.1:8766/api/sessions | python3 -c '
+import json,sys
+d=json.load(sys.stdin); L=d if isinstance(d,list) else d.get("sessions",[])
+for s in L: print(s.get("sessionId",""), s.get("status",""))' 2>/dev/null; }
+ids | cut -d" " -f1 | sort > "$W/voor-ids.txt"
 systemctl --user stop omg.service
 tar -C "$HOME/omg" -cf "$W/data-voor-overstap.tar" data && log "tar ok $(du -sh "$W/data-voor-overstap.tar" | cut -f1)" || log "tar FOUT"
 cat > "$D/40-agentbox.conf" <<CONF
@@ -47,6 +52,13 @@ CONF
 systemctl --user daemon-reload; systemctl --user start omg.service
 if n=$(health); then
   log "nieuw gezond sessies=$n (voor $before) pid=$(systemctl --user show omg.service -p MainPID --value)"
+  sleep 30; ids > "$W/na-ids.txt"
+  missing=$(cut -d" " -f1 "$W/na-ids.txt" | sort | comm -23 "$W/voor-ids.txt" - | wc -l)
+  errs=$(awk '$2=="error"||$2=="failed"' "$W/na-ids.txt" | wc -l)
+  idx=$(curl -s -m10 127.0.0.1:8766/); sam=0
+  for a in $(echo "$idx" | grep -oE '/assets/[^"]+\.js' | sort -u); do
+    c=$(curl -s -m20 "127.0.0.1:8766$a" | grep -cE 'tailda028c|kie-usage|samht|agentbox-mac'); sam=$((sam+c)); done
+  log "POSTCHECK ontbrekend=$missing fout=$errs samstrings_bundle=$sam"
   log "RESULT=OK"; exit 0
 fi
 log "nieuw ONGEZOND, terug naar oude boom"
