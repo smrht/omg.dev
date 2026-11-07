@@ -15388,7 +15388,10 @@ const RailRow = memo(function RailRow({
         aria-label={ariaLabel}
         onPointerDown={(e) => {
           // agentbox: fetch the transcript while the press is still down.
-          if (railKey && !collapsed && e.button === 0) primeTranscriptFetch(railKey, fetchTranscriptPageRaw);
+          // Mouse only: on touch every scroll through the list starts with a
+          // pointerdown on some row, and opening is render-bound anyway.
+          if (railKey && !collapsed && e.button === 0 && e.pointerType === "mouse")
+            primeTranscriptFetch(railKey, fetchTranscriptPageRaw);
         }}
         onClick={(e) => {
           if (drag.current.swiped) {
@@ -20639,29 +20642,22 @@ const ChatStream = memo(function ChatStream({
     };
   }, [metrics]);
 
-  const estimateSize = useCallback(
-    (index: number) => {
+  /** agentbox: the exact model for one row, through the module-wide cache
+   *  (reopening a chat, in any column, reuses every height already computed;
+   *  width is in the key because the cache outlives one container). With
+   *  compute=false it only answers from the cache. */
+  const exactRowHeight = useCallback(
+    (index: number, compute: boolean): number | null => {
       const item = items[index];
-      if (!item) return ASSISTANT_SINGLE_LINE_PX + ROW_GAP_PX;
+      if (!item || !rowContext) return null;
       const speakerChanged = index > 0 && speakerRunEdges(speakers, index).firstOfRun;
-      if (!rowContext) {
-        return estimateUnprobedRowHeight(item, speakerChanged);
-      }
       const text = item.type === "tools" ? "" : (item.message.text ?? "");
-      // agentbox: the cache is module-wide (CHAT_HEIGHT_CACHE), so reopening a
-      // chat reuses every height already computed, in any column. Width is in
-      // the key because the cache now outlives one container.
       const widths = `${rowContext.assistant.contentWidth}/${rowContext.user?.contentWidth ?? 0}`;
       const key = `${item.key}|${metrics.version}|${HEIGHT_MODEL_VERSION}|${widths}|${speakerChanged ? 1 : 0}|${text.length}`;
       const cache = CHAT_HEIGHT_CACHE;
       const cached = cache.get(key);
       if (cached != null) return cached;
-      // Only rows near the bottom, where a chat opens, get the exact model on
-      // first sight; the rest get a character-count estimate that is replaced
-      // by their DOM height when they mount (see roughRowHeight).
-      if (index < items.length - EXACT_TAIL_ROWS) {
-        return roughRowHeight(item, { ...rowContext, speakerChanged });
-      }
+      if (!compute) return null;
       // A streaming row mints a new key per token. Cap the cache rather than
       // let one long session grow it without bound.
       if (cache.size > 8000) cache.clear();
@@ -20670,6 +20666,23 @@ const ChatStream = memo(function ChatStream({
       return height;
     },
     [items, speakers, rowContext, metrics.version],
+  );
+
+  const estimateSize = useCallback(
+    (index: number) => {
+      const item = items[index];
+      if (!item) return ASSISTANT_SINGLE_LINE_PX + ROW_GAP_PX;
+      const speakerChanged = index > 0 && speakerRunEdges(speakers, index).firstOfRun;
+      if (!rowContext) {
+        return estimateUnprobedRowHeight(item, speakerChanged);
+      }
+      // Only rows near the bottom, where a chat opens, get the exact model on
+      // first sight; the rest get a character-count estimate until the idle
+      // fill below has computed them (see roughRowHeight).
+      const exact = exactRowHeight(index, index >= items.length - EXACT_TAIL_ROWS);
+      return exact ?? roughRowHeight(item, { ...rowContext, speakerChanged });
+    },
+    [items, speakers, rowContext, exactRowHeight],
   );
 
   const rangeExtractor = useCallback(
@@ -20714,6 +20727,57 @@ const ChatStream = memo(function ChatStream({
     measuredMetricsVersionRef.current = metrics.version;
     remeasureChatRows(virtualizer, virtualContainerRef.current);
   }, [metrics.version, rowContext, virtualizer]);
+
+  // agentbox: after an open, fill the exact heights of the rough rows in idle
+  // time (newest first), then swap them in while the view still sits at the
+  // bottom. Without this, scrolling far up corrected each rough row on mount
+  // and the text jumped (~24 px on 1 in 5 steps on a phone).
+  const stickNowRef = useRef(stick);
+  stickNowRef.current = stick;
+  const exactRowHeightRef = useRef(exactRowHeight);
+  exactRowHeightRef.current = exactRowHeight;
+  const roughCount = rowContext ? Math.max(0, items.length - EXACT_TAIL_ROWS) : 0;
+  useEffect(() => {
+    if (!roughCount) return;
+    type Idle = { timeRemaining(): number };
+    const ric = (globalThis as { requestIdleCallback?: (cb: (d: Idle) => void, o?: { timeout: number }) => number })
+      .requestIdleCallback;
+    const cic = (globalThis as { cancelIdleCallback?: (h: number) => void }).cancelIdleCallback;
+    let i = roughCount - 1;
+    let computed = 0;
+    let handle = 0;
+    let cancelled = false;
+    const step = (deadline?: Idle) => {
+      const until = performance.now() + 8;
+      while (i >= 0 && (deadline ? deadline.timeRemaining() > 1 : performance.now() < until)) {
+        if (exactRowHeightRef.current(i, false) == null) {
+          exactRowHeightRef.current(i, true);
+          computed += 1;
+        }
+        i -= 1;
+      }
+      if (cancelled) return;
+      if (i >= 0) {
+        handle = ric ? ric(step, { timeout: 500 }) : window.setTimeout(step, 16);
+        return;
+      }
+      // Swap in only rows still on their rough guess: a row that has been on
+      // screen keeps its real DOM height, so nothing visible moves.
+      if (!computed || !stickNowRef.current) return;
+      for (let r = 0; r < roughCount; r += 1) {
+        const key = virtualizer.measurementsCache[r]?.key;
+        if (key == null || virtualizer.itemSizeCache.has(key)) continue;
+        const exact = exactRowHeightRef.current(r, false);
+        if (exact != null) virtualizer.resizeItem(r, exact);
+      }
+    };
+    handle = ric ? ric(step, { timeout: 500 }) : window.setTimeout(step, 16);
+    return () => {
+      cancelled = true;
+      if (ric && cic) cic(handle);
+      else window.clearTimeout(handle);
+    };
+  }, [sid, roughCount, metrics.version, virtualizer]);
 
   const virtualRows = virtualizer.getVirtualItems();
   const totalSize = virtualizer.getTotalSize();
