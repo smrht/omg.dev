@@ -84,13 +84,23 @@ def presentatie(arts: list[dict], at: float | None, text: str) -> list[dict]:
             soort = "audio" if mime.startswith("audio") else a.get("media") or "file"
             out.append({"soort": soort, "id": a["id"], "naam": a.get("name") or "",
                         "onderschrift": one_line(a.get("caption") or a.get("title") or "", 120)})
-    gezien = set()
-    for u in re.findall(r"https?://[^\s)<>`\"']+", text or ""):
+    # Sam (07-11): "presentatie" = de pagina waar de agent laat zien wat hij wil gaan doen.
+    # Eigen tailnet-pagina's zijn het voorstel (hoofdlink); overige links hooguit twee.
+    eigen, rest, gezien = [], [], set()
+    for u in re.findall(r"https?://[^\s)<>`\"'\]]+", text or ""):
         u = u.rstrip(".,;:!?*_")
-        if u in gezien or len(gezien) >= 3:
+        if u in gezien:
             continue
         gezien.add(u)
-        out.append({"soort": "link", "url": u, "naam": one_line(re.sub(r"^https?://(www\.)?", "", u), 60)})
+        if re.match(r"https?://[^/]*\.ts\.net(:\d+)?/", u):
+            pad = re.sub(r"^https?://[^/]+", "", u).strip("/") or "pagina"
+            eigen.append({"soort": "link", "hoofd": True, "url": u, "naam": one_line(pad.split("/")[0].replace("-", " "), 40)})
+        else:
+            rest.append({"soort": "link", "url": u, "naam": one_line(re.sub(r"^https?://(www\.)?", "", u), 60)})
+    for a in out:
+        if a["soort"] == "html":
+            a["hoofd"] = True
+    out += eigen[:3] + rest[:2]
     return out
 
 

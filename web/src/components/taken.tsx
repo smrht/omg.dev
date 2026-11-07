@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { agentboxConfig } from "@/lib/agentbox-config";
-import { Check, Clock, CornerDownRight, ExternalLink, Eye, Loader2, MessageSquare, RotateCcw, Sparkles } from "lucide-react";
+import { Check, ChevronDown, Clock, CornerDownRight, ExternalLink, Eye, Loader2, MessageSquare, Pause, Play, RotateCcw, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAskOptional, stripMd, type Question } from "@/components/ask-center";
 
@@ -32,8 +32,8 @@ export type Taak = {
   presentatie?: Presentatie[];
 };
 export type Presentatie =
-  | { soort: "image" | "video" | "audio" | "file" | "html"; id: string; naam: string; onderschrift?: string }
-  | { soort: "link"; url: string; naam: string };
+  | { soort: "image" | "video" | "audio" | "file" | "html"; id: string; naam: string; onderschrift?: string; hoofd?: boolean }
+  | { soort: "link"; url: string; naam: string; hoofd?: boolean };
 export type Beslis =
   | { vorm: "janee"; vraag?: string | null; ja?: string | null; eerst?: string | null }
   | { vorm: "ab"; vraag: string; opties: string[]; uitleg?: string[] | null; toelichting?: string | null }
@@ -257,6 +257,20 @@ function TaakRij({ taak, onOpenSession, zet, klein }: {
   );
 }
 
+/**
+ * Sam, 07-11: de keuze ook in de takenlijst. Een vraag met knoppen (ja/nee, A/B, taak)
+ * krijgt dezelfde kaart als in Bezos: voorstel, model en de keuze zelf. De rest blijft een
+ * gewone taakregel.
+ */
+function TaakOfKeuze({ taak, zet, verberg, onOpenSession }: {
+  taak: Taak; zet: (id: string, s: Taak["status"]) => void; verberg: (id: string) => void; onOpenSession?: (sid: string) => void;
+}) {
+  const ask = useAskOptional();
+  const vorm = taak.beslis?.vorm ?? "open";
+  if (taak.soort !== "vraag" || vorm === "open" || !taak.sessie) return <TaakRij taak={taak} zet={zet} onOpenSession={onOpenSession} />;
+  return <BezosRij inLijst k={{ soort: "vraag", id: taak.id, t: taak }} ask={ask} zet={zet} verberg={verberg} onOpenSession={onOpenSession} oplossenBezig={false} />;
+}
+
 function Kop({ children, aantal }: { children: string; aantal?: number }) {
   return <h3 className="taken-kop mt-4 mb-0.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground first:mt-1">
     {children}{aantal !== undefined ? <span className="ml-1.5 font-normal tabular-nums">{aantal}</span> : null}
@@ -275,16 +289,18 @@ function Bronregel({ data }: { data: TakenData }) {
 export function TakenLijst({ onOpenSession, onMeldingen = () => window.dispatchEvent(new Event(MELDINGEN_EVENT)), smal, zoek = "" }: { onOpenSession?: (sid: string) => void; onMeldingen?: () => void; smal?: boolean; zoek?: string }) {
   const { data, fout, zet } = useTaken();
   const [meldingenOpen, setMeldingenOpen] = useState(false);
+  const [weg, setWeg] = useState<Set<string>>(() => new Set());
+  const verberg = useCallback((id: string) => setWeg(w => new Set(w).add(id)), []);
   const delen = useMemo(() => {
     const naald = zoek.trim().toLowerCase();
-    const items = (data?.items ?? []).filter(t => !naald || [t.titel, t.wie, t.detail].some(v => (v ?? "").toLowerCase().includes(naald)));
+    const items = (data?.items ?? []).filter(t => !weg.has(t.id) && (!naald || [t.titel, t.wie, t.detail].some(v => (v ?? "").toLowerCase().includes(naald))));
     return deelTaken(items);
-  }, [data, zoek]);
+  }, [data, zoek, weg]);
   if (!data) return <p role="status" className="px-3 py-6 text-sm text-muted-foreground">{fout ? "Taken niet bereikbaar." : "Taken laden…"}</p>;
   return (
     <section aria-label="Taken" className="taken px-3 pb-4">
       <Kop aantal={delen.open.length}>Voor jou</Kop>
-      {delen.open.length ? <ul>{delen.open.map(t => <TaakRij key={t.id} taak={t} zet={zet} onOpenSession={onOpenSession} smal={smal} />)}</ul>
+      {delen.open.length ? <ul>{delen.open.map(t => <TaakOfKeuze key={t.id} taak={t} zet={zet} verberg={verberg} onOpenSession={onOpenSession} />)}</ul>
         : <p className="py-2 text-sm text-muted-foreground">Niets dat op jou wacht.</p>}
       {delen.meldingen.length > 0 && onMeldingen && (
         <button type="button" onClick={onMeldingen}
@@ -313,7 +329,9 @@ export function TakenLijst({ onOpenSession, onMeldingen = () => window.dispatchE
 /** Onder de composer op het lege scherm: de bovenste taken en wat er vandaag af is. */
 export function TakenVandaag({ onOpenSession, onAlles }: { onOpenSession?: (sid: string) => void; onAlles?: () => void }) {
   const { data, zet } = useTaken();
-  const delen = useMemo(() => deelTaken(data?.items ?? []), [data]);
+  const [weg, setWeg] = useState<Set<string>>(() => new Set());
+  const verberg = useCallback((id: string) => setWeg(w => new Set(w).add(id)), []);
+  const delen = useMemo(() => deelTaken((data?.items ?? []).filter(t => !weg.has(t.id))), [data, weg]);
   if (!data) return null;
   const top = delen.open.slice(0, 6);
   return (
@@ -322,7 +340,7 @@ export function TakenVandaag({ onOpenSession, onAlles }: { onOpenSession?: (sid:
         <h2 className="text-[15px] font-semibold tracking-tight">Voor jou <span className="ml-1 text-sm font-normal tabular-nums text-muted-foreground">{delen.open.length}</span></h2>
         {onAlles && delen.open.length > top.length ? <button type="button" onClick={onAlles} className="min-h-9 text-xs font-medium text-primary hover:underline">Alle {delen.open.length} taken</button> : null}
       </div>
-      {top.length ? <ul>{top.map(t => <TaakRij key={t.id} taak={t} zet={zet} onOpenSession={onOpenSession} />)}</ul>
+      {top.length ? <ul>{top.map(t => <TaakOfKeuze key={t.id} taak={t} zet={zet} verberg={verberg} onOpenSession={onOpenSession} />)}</ul>
         : <p className="py-3 text-sm text-muted-foreground">Niets dat op jou wacht.</p>}
       {delen.gedaan.length > 0 && (
         <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
@@ -399,17 +417,79 @@ type Kaart =
   | { soort: "melding"; id: string; t: Taak }
   | { soort: "bundel"; id: string; taken: Taak[] };
 
-function bezosAntwoord(id: string, antwoord: string) {
+function bezosAntwoord(id: string, antwoord: string, keus?: { model?: string; denk?: string }) {
   return fetch(`/api/taken/item/${encodeURIComponent(id)}/antwoord`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ antwoord }),
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ antwoord, ...keus }),
   }).then(async r => ({ ok: r.ok, ...(await r.json().catch(() => ({}))) as { error?: string; verouderd?: boolean } }));
+}
+
+/* ── Modelkeuze ──
+ * Sam, 07-11: "zien welk model die werkzaamheden uitvoert, en dat nog kunnen wijzigen,
+ * met het thinking-niveau." App levert de bron (sessies, catalogus, wat een nieuwe
+ * triage zou starten); de kaart toont het als één chip en wisselt alleen wat kan.
+ */
+export type ModelKeus = { agent: string; model: string; denk?: string };
+export type ModelBron = {
+  sessies: Record<string, ModelKeus>;
+  nieuw: ModelKeus;
+  /** Wat er te kiezen valt. `nieuw`: een nieuwe sessie, daar kan alles. */
+  opties: (agent: string, model: string, nieuw: boolean) => { modellen: string[]; niveaus: string[]; model: boolean; denk: boolean };
+  label: (model: string) => string;
+  denkLabel: (denk: string) => string;
+};
+let modelBron: ModelBron | null = null;
+const modelLuisteraars = new Set<() => void>();
+export function zetModelBron(b: ModelBron) { modelBron = b; modelLuisteraars.forEach(f => f()); }
+const modelAbonneer = (cb: () => void) => { modelLuisteraars.add(cb); return () => { modelLuisteraars.delete(cb); }; };
+function useModelBron(): ModelBron | null { return useSyncExternalStore(modelAbonneer, () => modelBron, () => null); }
+
+function ModelKeuze({ basis, keus, nieuw, zet, open, setOpen, deel }: {
+  basis: ModelKeus; keus: ModelKeus; nieuw: boolean; zet: (k: ModelKeus) => void;
+  open: boolean; setOpen: (f: (v: boolean) => boolean) => void; deel: "chip" | "paneel";
+}) {
+  const bron = useModelBron();
+  if (!bron) return null;
+  const o = bron.opties(keus.agent, keus.model, nieuw);
+  const modellen = o.modellen.includes(keus.model) ? o.modellen : [keus.model, ...o.modellen];
+  const anders = keus.model !== basis.model || keus.denk !== basis.denk;
+  const label = `${bron.label(keus.model)}${keus.denk && o.niveaus.length ? ` · ${bron.denkLabel(keus.denk)}` : ""}`;
+  const kies = (model: string) => {
+    const n = bron.opties(keus.agent, model, nieuw).niveaus;
+    const denk = !n.length ? undefined : keus.denk && n.includes(keus.denk) ? keus.denk : n.includes("high") ? "high" : n[0];
+    zet({ ...keus, model, denk });
+  };
+  const veld = "h-9 min-w-0 max-w-full rounded-md border border-border bg-background px-2 text-[13px] text-foreground disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-primary";
+  if (deel === "chip") return (
+      <button type="button" onClick={() => setOpen(v => !v)} aria-expanded={open}
+        title={nieuw ? "Model en denkwerk van de agent die dit oplost" : "Model en denkwerk van dit gesprek"}
+        className={cn("bezos-model inline-flex h-9 min-w-0 max-w-[13rem] shrink-0 items-center @[19rem]:shrink gap-1 rounded-md px-2 text-[13px] focus-visible:outline-2 focus-visible:outline-primary",
+          anders ? "font-medium text-primary" : "text-muted-foreground hover:text-foreground")}>
+        <span className="truncate">{label}</span><ChevronDown className={cn("size-3.5 shrink-0 transition-transform duration-150 motion-reduce:transition-none", open && "rotate-180")} aria-hidden="true" />
+      </button>
+  );
+  return open ? (
+        <div className="bezos-model-keus mt-1.5 flex w-full flex-wrap items-center gap-2">
+          <label className="sr-only" htmlFor={`m-${basis.agent}-${basis.model}`}>Model</label>
+          <select id={`m-${basis.agent}-${basis.model}`} value={keus.model} disabled={!o.model || modellen.length < 2} onChange={e => kies(e.target.value)} className={cn(veld, "flex-1")}>
+            {modellen.map(m => <option key={m} value={m}>{bron.label(m)}</option>)}
+          </select>
+          {o.niveaus.length ? <>
+            <label className="sr-only" htmlFor={`d-${basis.agent}-${basis.model}`}>Denkwerk</label>
+            <select id={`d-${basis.agent}-${basis.model}`} value={keus.denk ?? ""} disabled={!o.denk} onChange={e => zet({ ...keus, denk: e.target.value })} className={veld}>
+              {o.niveaus.map(n => <option key={n} value={n}>{bron.denkLabel(n)}</option>)}
+            </select>
+          </> : null}
+          {!nieuw && (!o.model || (o.niveaus.length > 0 && !o.denk)) ? <p className="w-full text-xs text-muted-foreground">
+            {!o.model ? `Dit gesprek houdt zijn model${o.denk ? "; het denkwerk kan wel om" : ""}.` : "Het denkwerk van dit gesprek ligt vast; het model kan wel om."}</p> : null}
+        </div>
+  ) : null;
 }
 
 export function BezosPagina({ onOpenSession, bevindingen = [], onBekijk, onOplossen, onWeg, oplossenBezig = false }: {
   onOpenSession?: (sid: string) => void;
   bevindingen?: BezosBevinding[];
   onBekijk?: (agentId: string) => void;
-  onOplossen?: (ids: string[]) => void;
+  onOplossen?: (ids: string[], keus?: ModelKeus) => void;
   onWeg?: (ids: string[]) => void;
   oplossenBezig?: boolean;
 }) {
@@ -480,10 +560,19 @@ function BezosKop({ children, aantal }: { children: string; aantal: number }) {
 
 type Knop = { label: string; hoofd?: boolean; doe: () => Promise<void> | void; titel?: string };
 
-function BezosRij({ k, ask, zet, verberg, onOpenSession, onBekijk, onOplossen, onWeg, oplossenBezig }: {
-  k: Kaart; ask: ReturnType<typeof useAskOptional>; zet: (id: string, s: Taak["status"]) => void; verberg: (id: string) => void;
-  onOpenSession?: (sid: string) => void; onBekijk?: (agentId: string) => void; onOplossen?: (ids: string[]) => void; onWeg?: (ids: string[]) => void; oplossenBezig: boolean;
+function BezosRij({ k, ask, zet, verberg, onOpenSession, onBekijk, onOplossen, onWeg, oplossenBezig, inLijst }: {
+  k: Kaart; inLijst?: boolean; ask: ReturnType<typeof useAskOptional>; zet: (id: string, s: Taak["status"]) => void; verberg: (id: string) => void;
+  onOpenSession?: (sid: string) => void; onBekijk?: (agentId: string) => void; onOplossen?: (ids: string[], keus?: ModelKeus) => void; onWeg?: (ids: string[]) => void; oplossenBezig: boolean;
 }) {
+  const bron = useModelBron();
+  // Welk model het werk doet: het model van het gesprek dat de vraag stelde, of bij een
+  // bevinding wat een nieuwe triage zou starten. Sam kan het hier per kaart omzetten.
+  const sid = k.soort === "vraag" || k.soort === "melding" ? k.t.sessie : undefined;
+  const basis: ModelKeus | null = !bron ? null : k.soort === "bevinding" ? (k.zelf ? null : bron.nieuw) : sid ? bron.sessies[sid] ?? null : null;
+  const [eigen, setEigen] = useState<ModelKeus | null>(null);
+  const [modelOpen, setModelOpen] = useState(false);
+  const keus = eigen && basis && eigen.agent === basis.agent ? eigen : basis;
+  const wissel = keus && basis ? { model: keus.model !== basis.model ? keus.model : undefined, denk: keus.denk !== basis.denk ? keus.denk : undefined } : undefined;
   const [bezig, setBezig] = useState<string | null>(null);
   const [klaar, setKlaar] = useState<string | null>(null);
   const [melding, setMelding] = useState<string | null>(null);
@@ -507,7 +596,7 @@ function BezosRij({ k, ask, zet, verberg, onOpenSession, onBekijk, onOplossen, o
   const stuur = (antwoord: string, label = antwoord) => async () => {
     if (k.soort !== "vraag" && k.soort !== "melding") return;
     setBezig(label); setMelding(null);
-    const r = await bezosAntwoord(k.id, antwoord).catch(() => ({ ok: false, error: "geen verbinding", verouderd: false }));
+    const r = await bezosAntwoord(k.id, antwoord, wissel).catch(() => ({ ok: false, error: "geen verbinding", verouderd: false }));
     setBezig(null);
     if (r.ok) { setKlaar(label); laad().catch(() => undefined); }
     else setMelding(r.verouderd ? "De vraag is veranderd. Open het gesprek." : `Niet verstuurd: ${r.error ?? "onbekende fout"}.`);
@@ -561,7 +650,7 @@ function BezosRij({ k, ask, zet, verberg, onOpenSession, onBekijk, onOplossen, o
     knoppen = k.zelf
       ? [{ label: "Gedaan", hoofd: true, doe: () => { onWeg?.([b.id]); setKlaar("Gedaan"); } },
          { label: "Niet nodig", doe: () => { onWeg?.([b.id]); setKlaar("Weggezet"); } }]
-      : [{ label: "Laat oplossen", hoofd: true, titel: "Een agent voert het voorstel uit", doe: () => { onOplossen?.([b.id]); setKlaar("Agent gestart"); } },
+      : [{ label: "Laat oplossen", hoofd: true, titel: "Een agent voert het voorstel uit", doe: () => { onOplossen?.([b.id], keus ?? undefined); setKlaar(keus && bron ? `Agent gestart op ${bron.label(keus.model)}` : "Agent gestart"); } },
          { label: "Niet nodig", doe: () => { onWeg?.([b.id]); setKlaar("Weggezet"); } }];
   } else if (k.soort === "bundel") {
     const ts = k.taken, eerste = ts[0]!;
@@ -598,23 +687,25 @@ function BezosRij({ k, ask, zet, verberg, onOpenSession, onBekijk, onOplossen, o
     }
   }
 
+  const vorm = k.soort === "vraag" ? k.t.beslis?.vorm ?? "open" : "";
+  const toonModel = !!keus && (k.soort === "bevinding" ? !k.zelf : k.soort === "vraag" ? vorm !== "open" : k.soort === "melding" && knoppen[0]?.label === "Ga verder");
   return (
-    <li className="bezos-rij" data-dicht={dicht ? "" : undefined}>
+    <li className={cn("bezos-rij", inLijst && "bezos-rij-lijst")} data-dicht={dicht ? "" : undefined}>
       <div className="bezos-rij-binnen">
-        <div className="flex items-start gap-3 py-4">
-          <span aria-hidden="true" className={cn("mt-[9px] size-2 shrink-0 rounded-full", stip)} />
-          <div className="min-w-0 flex-1">
+        <div className={cn("flex items-start", inLijst ? "gap-3 py-2.5" : "gap-2.5 py-3")}>
+          <span aria-hidden="true" className={cn("mt-[7px] size-2 shrink-0 rounded-full", stip)} />
+          <div className="@container min-w-0 flex-1">
             <p className="truncate text-xs text-muted-foreground">{meta}</p>
-            <p className="mt-0.5 text-base font-semibold leading-snug text-foreground">{vraag}</p>
-            {uitleg.length ? <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm leading-relaxed">
+            <p className={cn("mt-0.5 leading-snug text-foreground", inLijst ? "text-sm font-medium" : "text-[15px] font-semibold")}>{vraag}</p>
+            {uitleg.length ? <dl className="mt-1.5 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[13px] leading-relaxed">
               {uitleg.map(([l, u]) => <div key={l} className="contents"><dt className="font-semibold tabular-nums text-foreground">{l}</dt><dd className="text-foreground/80">{u}</dd></div>)}
             </dl> : null}
-            {ja ? <p className="mt-1 text-sm leading-relaxed text-foreground/80">{ja}</p> : null}
-            {context ? <p className="mt-1 line-clamp-2 text-sm leading-relaxed text-muted-foreground">{context}</p> : null}
+            {ja ? <p className="mt-0.5 text-[13px] leading-relaxed text-foreground/80">{ja}</p> : null}
+            {context ? <p className="mt-0.5 line-clamp-2 text-[13px] leading-relaxed text-muted-foreground">{context}</p> : null}
             {pres.length ? <PresentatieBlok items={pres} /> : null}
             {bundelTaken.length ? <>
               <button type="button" onClick={() => setLijstOpen(o => !o)} aria-expanded={lijstOpen}
-                className="mt-1 inline-flex min-h-9 items-center text-sm font-medium text-primary hover:underline focus-visible:outline-2 focus-visible:outline-primary">
+                className="mt-0.5 inline-flex min-h-8 items-center text-[13px] font-medium text-primary hover:underline focus-visible:outline-2 focus-visible:outline-primary">
                 {lijstOpen ? "Verberg de lijst" : `Bekijk alle ${bundelTaken.length}`}
               </button>
               {lijstOpen && <ul className="mt-1 border-l-2 border-border pl-3">{bundelTaken.map(t => (
@@ -624,24 +715,26 @@ function BezosRij({ k, ask, zet, verberg, onOpenSession, onBekijk, onOplossen, o
                 </li>))}</ul>}
             </> : null}
             {klaar ? (
-              <p role="status" className="bezos-verstuurd mt-3 inline-flex h-10 items-center gap-1.5 text-sm font-medium text-primary">
+              <p role="status" className="bezos-verstuurd mt-2 inline-flex h-9 items-center gap-1.5 text-[13px] font-medium text-primary">
                 <Check className="size-4" aria-hidden="true" />{k.soort === "vraag" || k.soort === "ask" ? `Verstuurd: ${klaar}` : klaar}
               </p>
             ) : (
-              <div className="mt-3 flex flex-wrap items-center gap-2">
+              <div className={cn("mt-2 flex items-center gap-1.5", toonModel && knoppen.length <= 3 ? "flex-wrap @[19rem]:flex-nowrap" : "flex-wrap")}>
                 {knoppen.map((kn, i) => (
                   <button key={i} type="button" title={kn.titel} disabled={!!bezig || (oplossenBezig && kn.label === "Laat oplossen")}
                     onClick={() => void kn.doe()}
-                    className={cn("bezos-knop inline-flex h-10 min-w-[4.5rem] items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-4 text-sm font-medium disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary",
+                    className={cn("bezos-knop inline-flex h-9 min-w-[3.5rem] shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-3 text-[13px] font-medium disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary",
                       kn.hoofd ? "bezos-knop-hoofd" : "bezos-knop-neven")}>
                     {bezig && (bezig === kn.label || bezig === kn.titel || (kn.label.startsWith("Zeker") && bezig.startsWith("Alle"))) ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : null}{kn.label}
                   </button>
                 ))}
-                {open ? <button type="button" onClick={open} className="ml-auto inline-flex h-10 min-w-10 items-center justify-center gap-1 rounded-md px-2 text-sm text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary">
+                {toonModel && keus && basis ? <ModelKeuze deel="chip" basis={basis} keus={keus} nieuw={k.soort === "bevinding"} zet={setEigen} open={modelOpen} setOpen={setModelOpen} /> : null}
+                {open ? <button type="button" onClick={open} className="ml-auto inline-flex h-9 min-w-9 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-[13px] text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary">
                   {k.soort === "bevinding" ? <Eye className="size-4" aria-hidden="true" /> : k.soort === "melding" && !k.t.sessie ? <ExternalLink className="size-4" aria-hidden="true" /> : <MessageSquare className="size-4" aria-hidden="true" />}<span className="max-sm:sr-only">{k.soort === "bevinding" ? "Bekijken" : k.soort === "melding" && !k.t.sessie ? "Openen" : "Gesprek"}</span>
                 </button> : null}
               </div>
             )}
+            {!klaar && toonModel && keus && basis ? <ModelKeuze deel="paneel" basis={basis} keus={keus} nieuw={k.soort === "bevinding"} zet={setEigen} open={modelOpen} setOpen={setModelOpen} /> : null}
             {melding ? <p role="alert" className="mt-2 text-sm text-destructive">{melding}</p> : null}
           </div>
         </div>
@@ -650,34 +743,81 @@ function BezosRij({ k, ask, zet, verberg, onOpenSession, onBekijk, onOplossen, o
   );
 }
 
-/** Wat de agent liet zien, direct speelbaar in de kaart: beeld, video, audio, bestand, link. */
-function PresentatieBlok({ items }: { items: Presentatie[] }) {
-  const media = items.filter((p): p is Exclude<Presentatie, { soort: "link" }> => p.soort !== "link");
-  const links = items.filter((p): p is Extract<Presentatie, { soort: "link" }> => p.soort === "link");
-  const bron = (id: string, preview = "") => `/api/artifacts/${encodeURIComponent(id)}${preview ? `?preview=${preview}` : ""}`;
+/** Eén audio tegelijk: een tweede afspelen zet de eerste op pauze. */
+let speeltNu: HTMLAudioElement | null = null;
+const klok = (t: number) => Number.isFinite(t) ? `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}` : "";
+
+/** Compacte audioregel: speelknop, naam, tijd en een dunne balk om te spoelen. */
+function AudioRegel({ src, naam }: { src: string; naam: string }) {
+  const ref = useRef<HTMLAudioElement>(null);
+  const [aan, setAan] = useState(false);
+  const [pos, setPos] = useState(0);
+  const [duur, setDuur] = useState(0);
+  const wissel = () => {
+    const a = ref.current;
+    if (!a) return;
+    if (a.paused) { if (speeltNu && speeltNu !== a) speeltNu.pause(); speeltNu = a; void a.play().catch(() => undefined); }
+    else a.pause();
+  };
   return (
-    <div className="bezos-presentatie mt-3 flex flex-col gap-2.5">
-      {media.map(p => (
+    <div className="flex min-h-9 items-center gap-2">
+      <button type="button" onClick={wissel} aria-label={`${aan ? "Pauzeer" : "Speel"} ${naam}`}
+        className="bezos-speel inline-flex size-8 shrink-0 items-center justify-center rounded-full focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">
+        {aan ? <Pause className="size-3.5" aria-hidden="true" /> : <Play className="size-3.5 translate-x-px" aria-hidden="true" />}
+      </button>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-baseline gap-2">
+          <span className="truncate text-[13px] text-foreground">{naam}</span>
+          <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">{duur ? `${klok(pos)} / ${klok(duur)}` : ""}</span>
+        </div>
+        {duur ? <input type="range" min={0} max={duur} step={0.1} value={pos} aria-label={`Spoelen in ${naam}`}
+          onChange={e => { const a = ref.current; if (a) a.currentTime = Number(e.target.value); }}
+          className="bezos-spoel block w-full cursor-pointer" /> : null}
+      </div>
+      <audio ref={ref} src={src} preload="metadata" onPlay={() => setAan(true)} onPause={() => setAan(false)} onEnded={() => setAan(false)}
+        onTimeUpdate={e => setPos(e.currentTarget.currentTime)} onLoadedMetadata={e => setDuur(e.currentTarget.duration || 0)} />
+    </div>
+  );
+}
+
+/** Wat de agent liet zien, direct in de kaart: voorstel-link, beeld, video, audio, bestand, links. */
+function PresentatieBlok({ items }: { items: Presentatie[] }) {
+  const bron = (id: string, preview = "") => `/api/artifacts/${encodeURIComponent(id)}${preview ? `?preview=${preview}` : ""}`;
+  // Het voorstel zelf (een eigen pagina op het tailnet of een html-artifact) is één knop bovenaan.
+  const hoofd = items.find(p => p.hoofd && (p.soort === "link" || p.soort === "html"));
+  const rest = items.filter(p => p !== hoofd);
+  const media = rest.filter((p): p is Exclude<Presentatie, { soort: "link" }> => p.soort !== "link");
+  const links = rest.filter((p): p is Extract<Presentatie, { soort: "link" }> => p.soort === "link");
+  const audio = media.filter(p => p.soort === "audio");
+  const beeld = media.filter(p => p.soort !== "audio");
+  const hoofdUrl = hoofd ? (hoofd.soort === "link" ? hoofd.url : bron(hoofd.id)) : "";
+  return (
+    <div className="bezos-presentatie mt-2 flex flex-col gap-1.5">
+      {hoofd ? (
+        <a href={hoofdUrl} target="_blank" rel="noopener" className="bezos-voorstel inline-flex h-9 max-w-full items-center gap-1.5 self-start rounded-md px-3 text-[13px] font-medium focus-visible:outline-2 focus-visible:outline-primary">
+          <ExternalLink className="size-3.5 shrink-0" aria-hidden="true" />Bekijk voorstel<span className="truncate font-normal opacity-75">{hoofd.naam}</span>
+        </a>
+      ) : null}
+      {beeld.map(p => (
         <figure key={p.id} className="m-0">
           {p.soort === "image" ? (
             <a href={bron(p.id)} target="_blank" rel="noopener" className="block">
-              <img src={bron(p.id, "1")} alt={p.onderschrift || p.naam} loading="lazy" className="max-h-72 w-auto max-w-full rounded-md bg-muted object-contain" />
+              <img src={bron(p.id, "1")} alt={p.onderschrift || p.naam} loading="lazy" className="max-h-48 w-auto max-w-full rounded-md bg-muted object-contain" />
             </a>
           ) : p.soort === "video" ? (
-            <video src={bron(p.id)} poster={bron(p.id, "1")} controls playsInline preload="none" className="max-h-80 w-full rounded-md bg-black" />
-          ) : p.soort === "audio" ? (
-            <audio src={bron(p.id)} controls preload="none" className="w-full" />
+            <video src={bron(p.id)} poster={bron(p.id, "1")} controls playsInline preload="none" className="max-h-56 w-full rounded-md bg-black" />
           ) : (
-            <a href={bron(p.id)} target="_blank" rel="noopener" className="inline-flex min-h-9 items-center gap-1.5 text-sm font-medium text-primary hover:underline">
-              <ExternalLink className="size-4" aria-hidden="true" />{p.naam || "Bestand openen"}
+            <a href={bron(p.id)} target="_blank" rel="noopener" className="inline-flex min-h-8 items-center gap-1.5 text-[13px] font-medium text-primary hover:underline">
+              <ExternalLink className="size-3.5" aria-hidden="true" />{p.naam || "Bestand openen"}
             </a>
           )}
-          {p.onderschrift || (p.soort === "audio" && p.naam) ? <figcaption className="mt-1 text-xs text-muted-foreground">{p.onderschrift || p.naam}</figcaption> : null}
+          {p.onderschrift ? <figcaption className="mt-0.5 text-xs text-muted-foreground">{p.onderschrift}</figcaption> : null}
         </figure>
       ))}
-      {links.length ? <div className="flex flex-wrap gap-x-4 gap-y-1">{links.map(l => (
-        <a key={l.url} href={l.url} target="_blank" rel="noopener" className="inline-flex min-h-9 max-w-full items-center gap-1.5 text-sm font-medium text-primary hover:underline">
-          <ExternalLink className="size-4 shrink-0" aria-hidden="true" /><span className="truncate">{l.naam}</span>
+      {audio.length ? <div className="flex flex-col">{audio.map(p => <AudioRegel key={p.id} src={bron(p.id)} naam={p.onderschrift || p.naam || "Audio"} />)}</div> : null}
+      {links.length ? <div className="flex flex-wrap gap-x-3">{links.map(l => (
+        <a key={l.url} href={l.url} target="_blank" rel="noopener" className="inline-flex min-h-8 max-w-full items-center gap-1 text-[13px] font-medium text-primary hover:underline">
+          <ExternalLink className="size-3.5 shrink-0" aria-hidden="true" /><span className="truncate">{l.naam}</span>
         </a>))}</div> : null}
     </div>
   );

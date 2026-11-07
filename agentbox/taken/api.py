@@ -16,7 +16,7 @@ draad; de Executor-pauze wordt alleen hervat als adres, draad en labels kloppen.
 Nooit verwijderen, nooit andere labels.
 """
 from __future__ import annotations
-import json, os, re, subprocess, sys, threading, time, urllib.parse, urllib.request
+import json, os, re, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -148,7 +148,24 @@ def antwoord_tekst(antwoord: str, vraag: str) -> str:
     return f"{antwoord}\n\n(Gekozen in Bezos, op je vraag: \"{vraag}\")"
 
 
-def beantwoord(iid: str, antwoord: str) -> tuple[int, dict]:
+def _omg_post(path: str, body: dict, timeout: int = 30) -> None:
+    req = urllib.request.Request(f"{OMG}{path}", method="POST", headers={"Content-Type": "application/json"},
+                                 data=json.dumps(body).encode())
+    try:
+        urllib.request.urlopen(req, timeout=timeout).read()
+    except urllib.error.HTTPError as e:
+        try:
+            fout = json.loads(e.read().decode() or "{}").get("error") or ""
+        except Exception:
+            fout = ""
+        raise RuntimeError(fout[:160] or f"HTTP {e.code}") from None
+
+
+MODEL_RE = re.compile(r"[A-Za-z0-9._:/@+-]{1,80}")
+DENK_RE = re.compile(r"[a-z]{2,12}")
+
+
+def beantwoord(iid: str, antwoord: str, model: str | None = None, denk: str | None = None) -> tuple[int, dict]:
     """Bezos-knop. Drie sloten: de vraag moet nog precies zo in de chat staan (geen laat 'Ja'
     op een nieuwe vraag), één antwoord per vraag (dubbel tikken, tweede toestel), en pas
     daarna versturen."""
@@ -157,6 +174,8 @@ def beantwoord(iid: str, antwoord: str) -> tuple[int, dict]:
     if not m or not antwoord or len(antwoord) > 160:
         return 400, {"error": "ongeldige vraag of antwoord"}
     sid, key = m.groups()
+    if (model and not MODEL_RE.fullmatch(model)) or (denk and not DENK_RE.fullmatch(denk)):
+        return 400, {"error": "ongeldig model of denkniveau"}
     item = next((i for i in load("items.json", {}).get("items", []) if i["id"] == iid), None)
     if not item:
         return 404, {"error": "vraag niet gevonden"}
@@ -182,22 +201,33 @@ def beantwoord(iid: str, antwoord: str) -> tuple[int, dict]:
         now = datetime.now(timezone.utc).isoformat()
         st[iid] = {"status": "gedaan", "om": now, "beantwoord": {"antwoord": antwoord, "om": now, "dry": DRY}}
         save_status(st)
-    text = antwoord_tekst(antwoord, item.get("titel") or "")
+    b = item.get("beslis") or {}
+    text = antwoord_tekst(antwoord, b.get("vraag") or b.get("ja") or item.get("titel") or "")
+    # Sam (07-11): in de kaart kiest hij welk model en denkniveau het uitvoert. Pas wisselen
+    # na de versheidscontrole en de reservering, zodat een verouderde vraag niets omzet.
+    model = model if model and model != sess.get("model") else None
+    denk = denk if denk and denk != sess.get("thinkingLevel") else None
+    stap = "versturen"
     try:
         if DRY:
             with open(STATE / "antwoorden-dry.jsonl", "a") as f:
-                f.write(json.dumps({"sessie": sid, "text": text, "om": now}, ensure_ascii=False) + "\n")
+                f.write(json.dumps({"sessie": sid, "text": text, "model": model, "denk": denk, "om": now}, ensure_ascii=False) + "\n")
         else:
-            req = urllib.request.Request(f"{OMG}/api/sessions/{sid}/send", method="POST",
-                                         headers={"Content-Type": "application/json"},
-                                         data=json.dumps({"text": text, "mode": "steer", "user": OMG_USER}).encode())
-            urllib.request.urlopen(req, timeout=30).read()
+            if model:
+                stap = "model wisselen"
+                _omg_post(f"/api/sessions/{sid}/model", {"model": model}, 60)
+            if denk:
+                stap = "denkniveau wisselen"
+                _omg_post(f"/api/sessions/{sid}/thinking-level", {"thinkingLevel": denk})
+            stap = "versturen"
+            _omg_post(f"/api/sessions/{sid}/send", {"text": text, "mode": "steer", "user": OMG_USER})
     except Exception as e:
         with LOCK:  # niet aangekomen: vraag weer open, zodat Sam het opnieuw kan doen
             st = load("status.json", {})
             st.pop(iid, None)
             save_status(st)
-        return 502, {"error": f"versturen mislukt: {type(e).__name__}"}
+        reden = str(e) if isinstance(e, RuntimeError) else type(e).__name__
+        return 502, {"error": f"{stap} mislukt: {reden}"}
     print(f"bezos {iid}: {antwoord}{' (dry)' if DRY else ''}", file=sys.stderr, flush=True)
     return 200, {"ok": True, "id": iid, "antwoord": antwoord, "dry": DRY}
 
@@ -261,7 +291,8 @@ class H(BaseHTTPRequestHandler):
             if path == "/api/taken/alles-gezien":
                 return self._send(*alles_gezien(body.get("ids") or []))
             iid = urllib.parse.unquote(path[len("/api/taken/item/"):-len("/antwoord")])
-            return self._send(*beantwoord(iid, str(body.get("antwoord") or "")))
+            return self._send(*beantwoord(iid, str(body.get("antwoord") or ""),
+                                          str(body.get("model") or "") or None, str(body.get("denk") or "") or None))
         if path.startswith("/api/taken/item/"):
             iid = urllib.parse.unquote(path[len("/api/taken/item/"):])
             try:

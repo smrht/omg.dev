@@ -382,6 +382,7 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
 .bezos-lijst { border-top: 1px solid color-mix(in oklab, var(--border) 70%, transparent); }
 .bezos-rij { display: grid; grid-template-rows: 1fr; border-bottom: 1px solid color-mix(in oklab, var(--border) 70%, transparent); transition: grid-template-rows 260ms cubic-bezier(.2, 0, 0, 1), opacity 200ms ease; }
 .bezos-rij > .bezos-rij-binnen { overflow: hidden; min-height: 0; }
+.bezos-rij.bezos-rij-lijst { border-bottom: 0; }
 .bezos-rij[data-dicht] { grid-template-rows: 0fr; opacity: 0; }
 .bezos-verstuurd { animation: bezos-in 180ms ease-out both; }
 @keyframes bezos-in { from { opacity: 0; transform: translateY(4px); } }
@@ -389,7 +390,16 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
 .bezos-knop-hoofd:hover { background: color-mix(in oklab, var(--primary) 86%, black); }
 .bezos-knop-neven { background: color-mix(in oklab, var(--foreground) 6%, transparent); color: var(--foreground); transition: background-color 150ms ease; }
 .bezos-knop-neven:hover { background: color-mix(in oklab, var(--foreground) 11%, transparent); }
+.bezos-voorstel { background: color-mix(in oklab, var(--primary) 12%, transparent); color: var(--primary); transition: background-color 150ms ease; }
+.bezos-voorstel:hover { background: color-mix(in oklab, var(--primary) 20%, transparent); }
+.bezos-speel { background: color-mix(in oklab, var(--primary) 14%, transparent); color: var(--primary); transition: background-color 150ms ease; }
+.bezos-speel:hover { background: color-mix(in oklab, var(--primary) 24%, transparent); }
+.bezos-spoel { -webkit-appearance: none; appearance: none; height: 14px; background: transparent; }
+.bezos-spoel::-webkit-slider-runnable-track { height: 3px; border-radius: 999px; background: color-mix(in oklab, var(--foreground) 16%, transparent); }
+.bezos-spoel::-moz-range-track { height: 3px; border-radius: 999px; background: color-mix(in oklab, var(--foreground) 16%, transparent); }
+.bezos-spoel::-webkit-slider-thumb { -webkit-appearance: none; width: 11px; height: 11px; margin-top: -4px; border-radius: 50%; background: var(--primary); }
+.bezos-spoel::-moz-range-thumb { width: 11px; height: 11px; border: 0; border-radius: 50%; background: var(--primary); }
 @media (prefers-reduced-motion: reduce) {
-  .bezos-rij { transition: none; }
+  .bezos-rij, .bezos-knop-hoofd, .bezos-knop-neven, .bezos-voorstel, .bezos-speel { transition: none; }
   .bezos-verstuurd { animation: none; }
 }

@@ -1,7 +1,7 @@
 import { OverviewToolbar, useOverviewPreferences, buildOverviewGroups, flattenOverview } from "./components/session-overview";
 import { agentboxConfig, greetingName } from "./lib/agentbox-config";
 import { applyStopOverrides, clearStopped, markStopped, useStopOverrideVersion } from "./lib/stop-override";
-import { TakenLijst, TakenVandaag, BezosPagina, zetBevindingenAantal, MELDINGEN_EVENT, OPDRACHT_EVENT, neemOpdracht, opdrachtVerstuurd } from "./components/taken";
+import { TakenLijst, TakenVandaag, BezosPagina, zetBevindingenAantal, zetModelBron, type ModelKeus, MELDINGEN_EVENT, OPDRACHT_EVENT, neemOpdracht, opdrachtVerstuurd } from "./components/taken";
 import { type WorkspaceSummary } from "./components/desktop-workspace";
 import { SessionUsageControls } from "./components/session-usage-controls";
 import { WorkspaceFindingsMenu } from "./components/workspace-findings";
@@ -8472,7 +8472,24 @@ export function App() {
     patch: { agent: AutoAgentBackend; model?: string; claudeAccountId?: string | null },
   ) => patchAutoAgent(id, patch);
 
-  async function launchAutoTriage(scopeFindings: AutoFinding[]) {
+  // Same order the composer uses: this browser, then the box's memory of the
+  // last agent someone launched, then the box default, then the host's.
+  function triageLaunchKeus(): ModelKeus {
+    const agent =
+      knownAgentKind(localStorage.getItem("lfg_v2_agent")) ??
+      knownAgentKind(settings.lastAgent) ??
+      resolveInitialAgent(settings.defaultAgent, defaultAgent);
+    const model =
+      localStorage.getItem(`lfg_model_${agent}`) ||
+      (agent === settings.lastAgent ? settings.lastModel : "") ||
+      (agent === settings.defaultAgent ? settings.defaultModel : "") ||
+      localStorage.getItem("lfg_model") ||
+      modelCatalog.defaults[agent] ||
+      AGENT_DEFAULT_MODEL[agent];
+    return { agent, model, denk: thinkingLevelsForSelection(modelCatalog, agent, model).length ? savedThinkingLevel() : undefined };
+  }
+
+  async function launchAutoTriage(scopeFindings: AutoFinding[], keus?: ModelKeus) {
     if (!scopeFindings.length || autoTriageBusy) return;
     setAutoTriageBusy(true);
 
@@ -8491,19 +8508,10 @@ export function App() {
       repos: repos.map((repo) => ({ cwd: repo.cwd, project: repoProject(repo) })),
       fallbackCwd: localStorage.getItem("lfg_v2_repo"),
     });
-    // Same order the composer uses: this browser, then the box's memory of the
-    // last agent someone launched, then the box default, then the host's.
-    const launchAgent =
-      knownAgentKind(localStorage.getItem("lfg_v2_agent")) ??
-      knownAgentKind(settings.lastAgent) ??
-      resolveInitialAgent(settings.defaultAgent, defaultAgent);
-    const launchModel =
-      localStorage.getItem(`lfg_model_${launchAgent}`) ||
-      (launchAgent === settings.lastAgent ? settings.lastModel : "") ||
-      (launchAgent === settings.defaultAgent ? settings.defaultModel : "") ||
-      localStorage.getItem("lfg_model") ||
-      modelCatalog.defaults[launchAgent] ||
-      AGENT_DEFAULT_MODEL[launchAgent];
+    // agentbox: Bezos geeft het model en denkwerk mee dat Sam in de kaart koos.
+    const launch = keus ?? triageLaunchKeus();
+    const launchAgent = launch.agent as AgentKind;
+    const launchModel = launch.model;
     const owner =
       userFilter === "__unassigned"
         ? ""
@@ -8524,7 +8532,7 @@ export function App() {
           agent: launchAgent,
           model: launchModel,
           thinkingLevel: thinkingLevelsForSelection(modelCatalog, launchAgent, launchModel).length
-            ? savedThinkingLevel()
+            ? launch.denk || savedThinkingLevel()
             : undefined,
         }),
       });
@@ -9182,6 +9190,36 @@ export function App() {
   );
   const bevindingenTotaal = findings.length;
   useEffect(() => zetBevindingenAantal(bevindingenTotaal), [bevindingenTotaal]);
+  // agentbox: Bezos en Taken tonen per kaart welk model het werk doet (Sam, 07-11-2026).
+  // Alleen bijwerken als een sessiemodel, de catalogus of de startkeuze echt verandert.
+  const modelBronSleutel = sessions
+    .map((s) => `${s.sessionId}|${s.agent}|${s.model}|${s.thinkingLevel}`)
+    .join(",");
+  const triageKeusNu = triageLaunchKeus();
+  const triageSleutel = `${triageKeusNu.agent}|${triageKeusNu.model}|${triageKeusNu.denk}`;
+  useEffect(() => {
+    const sessies: Record<string, ModelKeus> = {};
+    for (const s of sessions) {
+      if (s.sessionId && s.agent && s.model) sessies[s.sessionId] = { agent: s.agent, model: s.model, denk: s.thinkingLevel || undefined };
+    }
+    zetModelBron({
+      sessies,
+      nieuw: triageLaunchKeus(),
+      opties: (agent, model, nieuw) => {
+        const kind = agent as AgentKind;
+        const niveaus = agentSupportsThinking(kind) ? thinkingLevelsForSelection(modelCatalog, kind, model) : [];
+        return {
+          modellen: modelCatalog.models[kind] ?? [],
+          niveaus,
+          model: nieuw || BEZOS_MODEL_WISSEL.has(agent),
+          denk: niveaus.length > 0 && (nieuw || LIVE_THINKING_AGENTS.has(agent)),
+        };
+      },
+      label: (m) => pickerModelDisplay(m).label || m,
+      denkLabel: (d) => pickerThinkingLabel(thinkingLevelLabel(d)),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelBronSleutel, modelCatalog, triageSleutel]);
 
   // Reuses the existing setup handlers and shared auth dialog for every row.
   // Once opened, it stays mounted through the tools page; a connected agent
@@ -9374,7 +9412,7 @@ export function App() {
       onOpenSession={(sid) => openHistoricalSession({ sessionId: sid, reviewLabel: "Bezos" })}
       bevindingen={bezosBevindingen}
       onBekijk={(agentId) => setOpenReport(agentId)}
-      onOplossen={(ids) => void launchAutoTriage(findings.filter((f) => ids.includes(f.id)))}
+      onOplossen={(ids, keus) => void launchAutoTriage(findings.filter((f) => ids.includes(f.id)), keus)}
       onWeg={(ids) => void clearAllFindings(findings.filter((f) => ids.includes(f.id)))}
       oplossenBezig={autoTriageBusy}
     />
@@ -18913,6 +18951,9 @@ function RailSessionContextMenu({
     </>
   );
 }
+
+// Agents whose model can change mid-session (POST /api/sessions/:sid/model).
+const BEZOS_MODEL_WISSEL = new Set(["claude", "opencode", "omg", "jcode", "copilot", "zcode"]);
 
 const LIVE_THINKING_AGENTS = new Set([
   "claude",
