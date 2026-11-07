@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { applyStopOverrides, clearStopped, useStopOverrideVersion } from "./lib/stop-override";
 import type { MessageAuthorRef } from "../../src/conversation-contract";
 import { visibilityRecoveryAction } from "./live-visibility";
 import { evlog } from "./lib/evlog";
@@ -1127,6 +1128,7 @@ export function useLiveSocket(
         message,
       ]),
     }));
+    clearStopped(sid);
     setBusyBySid((prev) => ({ ...prev, [sid]: true }));
   }, []);
 
@@ -1286,7 +1288,12 @@ export function useLiveSocket(
     };
   }, [enabled, subscribeChannels, unsubscribeChannels]);
 
-  const mergedBusy = useMemo(() => ({ ...listBusy, ...busyBySid }), [listBusy, busyBySid]);
+  const stopVersion = useStopOverrideVersion();
+  const mergedBusy = useMemo(
+    () => applyStopOverrides({ ...listBusy, ...busyBySid }, listBusy),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [listBusy, busyBySid, stopVersion],
+  );
 
   return {
     messagesBySid,

@@ -1,4 +1,5 @@
 import { OverviewToolbar, useOverviewPreferences, buildOverviewGroups, flattenOverview } from "./components/session-overview";
+import { applyStopOverrides, clearStopped, markStopped, useStopOverrideVersion } from "./lib/stop-override";
 import { TakenLijst, TakenVandaag, MeldingenPagina, zetBevindingenAantal, MELDINGEN_EVENT, OPDRACHT_EVENT, neemOpdracht, opdrachtVerstuurd } from "./components/taken";
 import { type WorkspaceSummary } from "./components/desktop-workspace";
 import { SessionUsageControls } from "./components/session-usage-controls";
@@ -5526,6 +5527,7 @@ function useLiveSessionStream(sessions: Session[], streamIds: string[]) {
         message,
       ]),
     }));
+    clearStopped(sid);
     setBusyBySid((prev) => ({ ...prev, [sid]: true }));
   }, []);
 
@@ -5657,9 +5659,11 @@ function useLiveSessionStream(sessions: Session[], streamIds: string[]) {
   // cards are currently streamed (expanded). Pruning of `busyBySid` to active
   // stream ids (above) means a card that just collapsed cleanly hands its busy
   // state back to the list baseline.
+  const stopVersion = useStopOverrideVersion();
   const mergedBusy = useMemo(
-    () => ({ ...listBusy, ...busyBySid }),
-    [listBusy, busyBySid],
+    () => applyStopOverrides({ ...listBusy, ...busyBySid }, listBusy),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [listBusy, busyBySid, stopVersion],
   );
 
   return {
@@ -13773,10 +13777,12 @@ function RailStage({
       if (!sid) return;
       const sess = bySid.get(sid);
       if (!sess || !canDriveSession(sess)) return;
+      markStopped(sid);
       try {
         await api(`/api/sessions/${sid}/interrupt`, { method: "POST" });
         await onRefresh();
       } catch {
+        clearStopped(sid);
         // Best-effort: a failed interrupt shouldn't surface as a hard error.
       }
     },
@@ -17755,10 +17761,12 @@ function SessionChatBody({
 
   async function interrupt() {
     if (!sid) return;
+    markStopped(sid);
     try {
       await api(`/api/sessions/${sid}/interrupt`, { method: "POST" });
       await onRefresh();
     } catch (err) {
+      clearStopped(sid);
       onError(err instanceof Error ? err.message : String(err));
     }
   }
@@ -18316,10 +18324,12 @@ function useSessionActions({
   async function interrupt() {
     if (!sid) return;
     onError(null);
+    markStopped(sid);
     try {
       await api(`/api/sessions/${sid}/interrupt`, { method: "POST" });
       await onRefresh();
     } catch (err) {
+      clearStopped(sid);
       onError(err instanceof Error ? err.message : String(err));
     }
   }
