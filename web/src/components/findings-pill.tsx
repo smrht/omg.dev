@@ -64,7 +64,7 @@ export function FindingsPill({
         onClick={onOpen}
         data-testid="findings-pill"
         aria-label={`${label} van auto-agents. Openen`}
-        className="pointer-events-auto flex h-7 items-center gap-1.5 rounded-full border border-border/70 bg-card/90 px-2.5 text-xs font-medium text-muted-foreground shadow-sm backdrop-blur-xl transition-colors hover:text-foreground"
+        className="pointer-events-auto flex h-7 items-center gap-1.5 rounded-full border border-border bg-card px-2.5 text-xs font-medium text-muted-foreground shadow-md transition-colors hover:text-foreground"
       >
         <span className="tabular-nums">{label}</span>
         <ChevronUp className="size-3 shrink-0 opacity-70" />

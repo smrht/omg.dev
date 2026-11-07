@@ -322,3 +322,8 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
 .taken .taak-knop-hoofd:hover { background: color-mix(in oklab, var(--primary) 12%, transparent); color: var(--primary); }
 @media (pointer: coarse) { .taken .taak-knop { height: 36px; padding: 0 10px; font-size: 13px; } .taken .taak-knop-hoofd { margin-left: -10px; } }
 @media (prefers-reduced-motion: reduce) { .taken .taak-knop { transition: none; } }
+
+/* Mobiel: de zwevende bevindingenpil mag de laatste rij niet afdekken. */
+@media (max-width: 767px) {
+  .session-overview, .taken { padding-bottom: 3.25rem; }
+}
