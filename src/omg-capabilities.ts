@@ -27,7 +27,7 @@ export const OMG_CAPABILITIES = [
   },
   {
     tool: "omg_ship",
-    useWhen: "Never on this box: the Shipped feed is disabled (Sam, 2026-10-06).",
+    useWhen: "Never on this box: the Shipped feed is disabled.",
     guidance:
       "Disabled. Do not call omg_ship. Finished work reaches the human through the chat reply plus a commit and push in the project repo and the box's own records.",
   },
