@@ -24,6 +24,8 @@ export type Taak = {
   ongelezen?: boolean;
   status: "open" | "later" | "gedaan";
   afgevinkt?: string | null;
+  /** Id van het laatste bericht in het gesprek toen de collector keek. */
+  bericht?: string | null;
   /** Bezos: welke knoppen de vraag krijgt (agentbox/taken/beslis.py). */
   beslis?: Beslis;
   /** Wat er gebeurde, in één zin uit het laatste bericht. */
@@ -137,7 +139,21 @@ export function useTaken() {
     return () => { dood = true; window.clearInterval(t); document.removeEventListener("visibilitychange", zicht); window.removeEventListener(EVENT, opWijziging); };
   }, []);
   const zet = useCallback((id: string, status: Taak["status"]) => zetTaak(id, status), []);
-  return { data, fout, zet };
+  // De collector loopt elke 10 min; wat sindsdien in het gesprek gebeurde zie je hier meteen
+  // (Sam, 07-11: "die heb ik al opgelost maar hij blijft staan").
+  const bron = useModelBron();
+  const vers = useMemo(() => data && bron ? { ...data, items: data.items.filter(i => !verouderd(i, bron)) } : data, [data, bron]);
+  return { data: vers, fout, zet };
+}
+
+/** Een gespreksitem is achterhaald zodra dat gesprek verder ging dan de collector zag. */
+function verouderd(t: Taak, bron: ModelBron): boolean {
+  if (t.bron !== "gesprek" || !t.sessie || t.status !== "open") return false;
+  const st = bron.stand[t.sessie];
+  if (!st) return false;
+  if (t.soort === "vast") return !st.vast;
+  if (st.bezig || st.mens) return true;
+  return !!t.bericht && !!st.bericht && st.bericht !== t.bericht;
 }
 
 function isVandaag(iso?: string | null) {
@@ -165,6 +181,15 @@ export const isMelding = (i: Taak) => i.soort === "melding" || (!!i.machine && i
    App zet het aantal (de lijst zelf leeft daar); de tab leest het hier. */
 let bevindingenAantal = 0;
 const bevindingenLuisteraars = new Set<() => void>();
+/** Bevinding die alleen ter info is (laag, of het voorstel zegt dat er niks hoeft). */
+export function bevindingIsInfo(b: { ernst: string; voorstel?: string }): boolean {
+  return b.ernst === "low" || NIKS_TE_DOEN.test((b.voorstel ?? "").trim());
+}
+/** Melding die een keuze vraagt (storing, klacht, vers vastgelopen gesprek); de rest is ter info. */
+function meldingVraagtActie(t: Taak): boolean {
+  const vers = !t.tijd || Date.now() - new Date(t.tijd).getTime() < 48 * 3600_000;
+  return t.soort === "vast" ? vers : MELDING_ACTIE.test(`${t.titel} ${t.wie ?? ""}`);
+}
 export function zetBevindingenAantal(n: number) {
   if (n === bevindingenAantal) return;
   bevindingenAantal = n;
@@ -183,7 +208,8 @@ export function useTakenTelling(): { voorJou: number; meldingen: number } {
   const bevindingen = useBevindingenAantal();
   return useMemo(() => {
     const d = deelTaken(data?.items ?? []);
-    return { voorJou: d.open.length, meldingen: d.meldingen.length + bevindingen };
+    // Alleen wat Bezos onder Beslis en Zelf doen zet: ter-info-mails tellen niet mee.
+    return { voorJou: d.open.length, meldingen: bundel(d.meldingen.filter(meldingVraagtActie)).length + bevindingen };
   }, [data, bevindingen]);
 }
 
@@ -431,6 +457,8 @@ function bezosAntwoord(id: string, antwoord: string, keus?: { model?: string; de
 export type ModelKeus = { agent: string; model: string; denk?: string };
 export type ModelBron = {
   sessies: Record<string, ModelKeus>;
+  /** Hoe elk gesprek er nu voor staat: laatste activiteit (ms), bezig, laatste bericht van Sam, vastgelopen. */
+  stand: Record<string, { bericht?: string; bezig: boolean; mens: boolean; vast: boolean }>;
   nieuw: ModelKeus;
   /** Wat er te kiezen valt. `nieuw`: een nieuwe sessie, daar kan alles. */
   opties: (agent: string, model: string, nieuw: boolean) => { modellen: string[]; niveaus: string[]; model: boolean; denk: boolean };
@@ -509,17 +537,13 @@ export function BezosPagina({ onOpenSession, bevindingen = [], onBekijk, onOplos
     }
     for (const b of bevindingen) {
       if (weg.has(b.id)) continue;
-      if (b.ernst === "low" || NIKS_TE_DOEN.test((b.voorstel ?? "").trim())) info.push({ soort: "bevinding", id: b.id, b, zelf: false });
+      if (bevindingIsInfo(b)) info.push({ soort: "bevinding", id: b.id, b, zelf: false });
       else if (SAM_ZELF.test(b.voorstel ?? "")) zelf.push({ soort: "bevinding", id: b.id, b, zelf: true });
       else beslis.push({ soort: "bevinding", id: b.id, b, zelf: false });
     }
     const actieM: Taak[] = [], infoM: Taak[] = [];
-    for (const t of items.filter(isMelding)) {
-      // Een bot die al dagen vastzit is geen besluit meer van vandaag: ter info.
-      const vers = !t.tijd || Date.now() - new Date(t.tijd).getTime() < 48 * 3600_000;
-      const actie = t.soort === "vast" ? vers : MELDING_ACTIE.test(`${t.titel} ${t.wie ?? ""}`);
-      (actie ? actieM : infoM).push(t);
-    }
+    // Een bot die al dagen vastzit is geen besluit meer van vandaag: ter info.
+    for (const t of items.filter(isMelding)) (meldingVraagtActie(t) ? actieM : infoM).push(t);
     // Gelijke meldingen worden één kaart met één keuze voor allemaal.
     for (const [lijst, doel] of [[actieM, beslis], [infoM, info]] as const)
       for (const b of bundel(lijst))

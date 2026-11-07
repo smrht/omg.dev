@@ -119,8 +119,12 @@ def sessions() -> list[dict]:
         at = (s.get("lastActivityAt") or 0) / 1000 or None
         machine = bool(s.get("botName")) or title.startswith(("Mailtaak", "Mail-intake"))
         jij = laatste_jij(text)
-        base = {"sessie": sid, "tijd": iso(at), "machine": machine}
+        # bericht: id van het laatste bericht; de UI ziet zo meteen dat het gesprek verder ging.
+        base = {"sessie": sid, "tijd": iso(at), "machine": machine, "bericht": last.get("id")}
         if s.get("status") == "blocked":
+            # Een gesprek dat al een week vastzit is geen taak meer, alleen ruis in Ter info.
+            if at and time.time() - at > 7 * 86400:
+                continue
             out.append({**base, "id": f"gesprek:{sid}:vast", "bron": "gesprek", "soort": "vast",
                         "titel": title, "detail": vast_detail(text)})
             continue

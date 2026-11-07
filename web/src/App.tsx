@@ -1,7 +1,7 @@
 import { OverviewToolbar, useOverviewPreferences, buildOverviewGroups, flattenOverview } from "./components/session-overview";
 import { agentboxConfig, greetingName } from "./lib/agentbox-config";
 import { applyStopOverrides, clearStopped, markStopped, useStopOverrideVersion } from "./lib/stop-override";
-import { TakenLijst, TakenVandaag, BezosPagina, zetBevindingenAantal, zetModelBron, type ModelKeus, MELDINGEN_EVENT, OPDRACHT_EVENT, neemOpdracht, opdrachtVerstuurd } from "./components/taken";
+import { TakenLijst, TakenVandaag, BezosPagina, zetBevindingenAantal, bevindingIsInfo, zetModelBron, type ModelKeus, MELDINGEN_EVENT, OPDRACHT_EVENT, neemOpdracht, opdrachtVerstuurd } from "./components/taken";
 import { type WorkspaceSummary } from "./components/desktop-workspace";
 import { SessionUsageControls } from "./components/session-usage-controls";
 import { WorkspaceFindingsMenu } from "./components/workspace-findings";
@@ -9188,22 +9188,26 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [findings, autoAgents],
   );
-  const bevindingenTotaal = findings.length;
+  // Teller = bevindingen die een keuze vragen; ter-info-bevindingen tellen niet mee.
+  const bevindingenTotaal = bezosBevindingen.filter((b) => !bevindingIsInfo(b)).length;
   useEffect(() => zetBevindingenAantal(bevindingenTotaal), [bevindingenTotaal]);
   // agentbox: Bezos en Taken tonen per kaart welk model het werk doet (Sam, 07-11-2026).
   // Alleen bijwerken als een sessiemodel, de catalogus of de startkeuze echt verandert.
   const modelBronSleutel = sessions
-    .map((s) => `${s.sessionId}|${s.agent}|${s.model}|${s.thinkingLevel}`)
+    .map((s) => `${s.sessionId}|${s.agent}|${s.model}|${s.thinkingLevel}|${(s.last as { id?: string } | undefined)?.id}|${s.busy}|${s.last?.role}|${s.status}`)
     .join(",");
   const triageKeusNu = triageLaunchKeus();
   const triageSleutel = `${triageKeusNu.agent}|${triageKeusNu.model}|${triageKeusNu.denk}`;
   useEffect(() => {
     const sessies: Record<string, ModelKeus> = {};
+    const stand: Record<string, { bericht?: string; bezig: boolean; mens: boolean; vast: boolean }> = {};
     for (const s of sessions) {
+      if (s.sessionId) stand[s.sessionId] = { bericht: (s.last as { id?: string } | undefined)?.id, bezig: !!s.busy, mens: s.last?.role === "user", vast: s.status === "blocked" };
       if (s.sessionId && s.agent && s.model) sessies[s.sessionId] = { agent: s.agent, model: s.model, denk: s.thinkingLevel || undefined };
     }
     zetModelBron({
       sessies,
+      stand,
       nieuw: triageLaunchKeus(),
       opties: (agent, model, nieuw) => {
         const kind = agent as AgentKind;
