@@ -1,6 +1,8 @@
 [Unit]
-Description=Taken-collector (mail, gesprekken, bestellingen; alleen lezen)
+Description=Taken-collector (mail, gesprekken, bestellingen) + auto-archief vaste automatische mails
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/python3 /home/agent/omg-agentbox/agentbox/taken/collect.py
+# Sam 07-11 "Ja": previews, DMARC en LinkedIn vanzelf uit de inbox; "-" = mislukt archief breekt de ronde niet
+ExecStartPost=-/usr/bin/python3 /home/agent/omg-agentbox/agentbox/taken/auto_archief.py
 TimeoutStartSec=420
