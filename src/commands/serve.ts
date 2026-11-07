@@ -4569,6 +4569,26 @@ export async function cmdServe() {
         );
       }
 
+      // agentbox: the Taken tab reads a separate local API (agentbox/taken/api.py,
+      // taken-api.service on 127.0.0.1:8790). Same-origin proxy so the tailnet
+      // gate above covers it; the API itself only listens on loopback.
+      if (path === "/api/taken" || path.startsWith("/api/taken/")) {
+        const target = (process.env.AGENTBOX_TAKEN_TARGET ?? "http://127.0.0.1:8790") + path + url.search;
+        try {
+          const headers = new Headers();
+          const ct = req.headers.get("content-type");
+          if (ct) headers.set("content-type", ct);
+          const body = req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer();
+          const upstream = await fetch(target, { method: req.method, headers, body, signal: AbortSignal.timeout(15_000) });
+          return new Response(upstream.body, {
+            status: upstream.status,
+            headers: { "content-type": upstream.headers.get("content-type") ?? "application/json", "cache-control": "no-store" },
+          });
+        } catch {
+          return err(502, "taken api unavailable");
+        }
+      }
+
       if (path === "/api/connect/reconcile" && req.method === "POST") {
         return json(await connectManager.reconcile());
       }
