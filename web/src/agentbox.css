@@ -394,6 +394,8 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
 .bezos-voorstel:hover { background: color-mix(in oklab, var(--primary) 20%, transparent); }
 .bezos-speel { background: color-mix(in oklab, var(--primary) 14%, transparent); color: var(--primary); transition: background-color 150ms ease; }
 .bezos-speel:hover { background: color-mix(in oklab, var(--primary) 24%, transparent); }
+/* Licht: oranje tekst op oranje waas haalt geen AA; daar een donkerder oranje. */
+:root:not(.dark) .bezos-voorstel, :root:not(.dark) .bezos-speel, :root:not(.dark) .bezos-model.text-primary { color: color-mix(in oklab, var(--primary) 72%, black); }
 .bezos-spoel { -webkit-appearance: none; appearance: none; height: 14px; background: transparent; }
 .bezos-spoel::-webkit-slider-runnable-track { height: 3px; border-radius: 999px; background: color-mix(in oklab, var(--foreground) 16%, transparent); }
 .bezos-spoel::-moz-range-track { height: 3px; border-radius: 999px; background: color-mix(in oklab, var(--foreground) 16%, transparent); }

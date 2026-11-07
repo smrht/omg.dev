@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { agentboxConfig } from "@/lib/agentbox-config";
 import { Check, ChevronDown, Clock, CornerDownRight, ExternalLink, Eye, Loader2, MessageSquare, Pause, Play, RotateCcw, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -448,6 +448,7 @@ function ModelKeuze({ basis, keus, nieuw, zet, open, setOpen, deel }: {
   open: boolean; setOpen: (f: (v: boolean) => boolean) => void; deel: "chip" | "paneel";
 }) {
   const bron = useModelBron();
+  const uid = useId();
   if (!bron) return null;
   const o = bron.opties(keus.agent, keus.model, nieuw);
   const modellen = o.modellen.includes(keus.model) ? o.modellen : [keus.model, ...o.modellen];
@@ -469,13 +470,13 @@ function ModelKeuze({ basis, keus, nieuw, zet, open, setOpen, deel }: {
   );
   return open ? (
         <div className="bezos-model-keus mt-1.5 flex w-full flex-wrap items-center gap-2">
-          <label className="sr-only" htmlFor={`m-${basis.agent}-${basis.model}`}>Model</label>
-          <select id={`m-${basis.agent}-${basis.model}`} value={keus.model} disabled={!o.model || modellen.length < 2} onChange={e => kies(e.target.value)} className={cn(veld, "flex-1")}>
+          <label className="sr-only" htmlFor={`m${uid}`}>Model</label>
+          <select id={`m${uid}`} value={keus.model} disabled={!o.model || modellen.length < 2} onChange={e => kies(e.target.value)} className={cn(veld, "flex-1")}>
             {modellen.map(m => <option key={m} value={m}>{bron.label(m)}</option>)}
           </select>
           {o.niveaus.length ? <>
-            <label className="sr-only" htmlFor={`d-${basis.agent}-${basis.model}`}>Denkwerk</label>
-            <select id={`d-${basis.agent}-${basis.model}`} value={keus.denk ?? ""} disabled={!o.denk} onChange={e => zet({ ...keus, denk: e.target.value })} className={veld}>
+            <label className="sr-only" htmlFor={`d${uid}`}>Denkwerk</label>
+            <select id={`d${uid}`} value={keus.denk ?? ""} disabled={!o.denk} onChange={e => zet({ ...keus, denk: e.target.value })} className={veld}>
               {o.niveaus.map(n => <option key={n} value={n}>{bron.denkLabel(n)}</option>)}
             </select>
           </> : null}
