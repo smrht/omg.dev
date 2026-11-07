@@ -367,6 +367,14 @@ export function MeldingenPagina({ onOpenSession, bevindingen = [], onBekijk, onO
 }
 
 function BevindingRij({ b, onBekijk, onOplossen, onWegzetten, bezig }: { b: BevindingGroep; onBekijk?: (id: string) => void; onOplossen?: (id?: string) => void; onWegzetten?: (id: string) => void; bezig: boolean }) {
+  // Wegzetten wist alle bevindingen van deze agent en kent geen ongedaan maken:
+  // eerste tik vraagt "Zeker?", tweede tik binnen 4 s voert uit.
+  const [zeker, setZeker] = useState(false);
+  useEffect(() => {
+    if (!zeker) return;
+    const t = window.setTimeout(() => setZeker(false), 4000);
+    return () => window.clearTimeout(t);
+  }, [zeker]);
   return (
     <li className="taak melding-rij flex flex-col gap-2 py-3.5 sm:flex-row sm:items-start sm:gap-4" data-soort="bevinding">
       <div className="flex min-w-0 flex-1 items-start gap-3">
@@ -380,7 +388,7 @@ function BevindingRij({ b, onBekijk, onOplossen, onWegzetten, bezig }: { b: Bevi
           </p>
         </div>
       </div>
-      <div className="flex shrink-0 items-center gap-1.5 pl-5 sm:pl-0">
+      <div className="flex shrink-0 flex-wrap items-center gap-1.5 pl-5 sm:flex-nowrap sm:pl-0">
         {onOplossen ? <button type="button" onClick={() => onOplossen(b.id)} disabled={bezig}
           title="Een agent zoekt uit wat ervan klopt en lost het op"
           className="melding-opdracht inline-flex h-9 items-center whitespace-nowrap gap-1.5 rounded-md px-3 text-sm font-medium disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">
@@ -390,9 +398,12 @@ function BevindingRij({ b, onBekijk, onOplossen, onWegzetten, bezig }: { b: Bevi
           className="inline-flex h-9 items-center gap-1.5 whitespace-nowrap rounded-md px-3 text-sm text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary">
           <Eye className="size-4" aria-hidden="true" />Bekijken
         </button> : null}
-        {onWegzetten ? <button type="button" onClick={() => onWegzetten(b.id)} title="Wegzetten" aria-label={`Wegzetten: ${b.naam}`}
-          className="flex size-9 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary">
-          <Check className="size-4" />
+        {onWegzetten ? <button type="button" onClick={() => (zeker ? onWegzetten(b.id) : setZeker(true))}
+          title={zeker ? "Nog een keer tikken om weg te zetten" : "Wegzetten"}
+          aria-label={zeker ? `Zeker wegzetten: ${b.naam}, ${b.aantal} ${b.aantal === 1 ? "bevinding" : "bevindingen"}` : `Wegzetten: ${b.naam}`}
+          className={cn("flex h-9 items-center justify-center gap-1.5 whitespace-nowrap rounded-md text-sm focus-visible:outline-2 focus-visible:outline-primary",
+            zeker ? "bg-destructive/10 px-3 font-medium text-destructive" : "w-9 text-muted-foreground hover:bg-muted hover:text-foreground")}>
+          <Check className="size-4" aria-hidden="true" />{zeker ? "Zeker?" : null}
         </button> : null}
       </div>
     </li>
@@ -419,7 +430,7 @@ function MeldingRij({ taak, zet, onOpenSession }: { taak: Taak; zet: (id: string
           {taak.detail ? <p className="mt-1 line-clamp-2 text-sm leading-relaxed text-muted-foreground">{taak.detail}</p> : null}
         </div>
       </div>
-      <div className="flex shrink-0 items-center gap-1.5 pl-5 sm:pl-0">
+      <div className="flex shrink-0 flex-wrap items-center gap-1.5 pl-5 sm:flex-nowrap sm:pl-0">
         <button type="button" onClick={() => geefOpdracht(taak)}
           className="melding-opdracht inline-flex h-9 items-center whitespace-nowrap gap-1.5 rounded-md px-3 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">
           <CornerDownRight className="size-4" aria-hidden="true" />Opdracht geven

@@ -15,7 +15,7 @@ const { result: { targetId } } = await send("Target.createTarget", { url: "about
 const { result: { sessionId: s } } = await send("Target.attachToTarget", { targetId, flatten: true });
 await send("Page.enable", {}, s); await send("Runtime.enable", {}, s);
 const ev = async (expr: string) => (await send("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true }, s)).result?.result?.value;
-for (const [naam, w, h, mobiel] of [["desktop", 1440, 900, false], ["mobiel", 390, 844, true]] as const) {
+for (const [naam, w, h, mobiel] of [["desktop", 1440, 900, false], ["mobiel", Number(process.env.MOBIEL_W ?? 390), 844, true]] as const) {
   await send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: mobiel ? 2 : 1, mobile: mobiel }, s);
   await send("Emulation.setTouchEmulationEnabled", { enabled: mobiel }, s);
   await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: scheme }, { name: "prefers-reduced-motion", value: process.env.MOTION ? "no-preference" : "reduce" }] }, s);

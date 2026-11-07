@@ -9167,7 +9167,8 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [findings, autoAgents],
   );
-  useEffect(() => zetBevindingenAantal(findings.length), [findings.length]);
+  const bevindingenTotaal = bevindingGroepen.reduce((n, g) => n + g.aantal, 0);
+  useEffect(() => zetBevindingenAantal(bevindingenTotaal), [bevindingenTotaal]);
 
   // Reuses the existing setup handlers and shared auth dialog for every row.
   // Once opened, it stays mounted through the tools page; a connected agent
