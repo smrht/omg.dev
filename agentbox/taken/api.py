@@ -13,7 +13,7 @@ draad; de Executor-pauze wordt alleen hervat als adres, draad en labels kloppen.
 Nooit verwijderen, nooit andere labels.
 """
 from __future__ import annotations
-import json, os, re, subprocess, sys, threading, time, urllib.parse
+import json, os, re, subprocess, sys, threading, time, urllib.parse, urllib.request
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -85,8 +85,30 @@ def save_status(st: dict) -> None:
     tmp.replace(STATE / "status.json")
 
 
+OMG = os.environ.get("OMG_API", "http://127.0.0.1:8766")
+_sessies = {"om": 0.0, "ids": None}
+
+
+def live_sessies() -> set[str] | None:
+    """Sessie-ids die omg nu toont (15 s cache). None = onbekend, dan niets wegfilteren."""
+    if time.time() - _sessies["om"] > 15:
+        try:
+            data = json.load(urllib.request.urlopen(f"{OMG}/api/sessions", timeout=5))["sessions"]
+            _sessies["ids"] = {s["sessionId"] for s in data}
+        except Exception:
+            _sessies["ids"] = None
+        _sessies["om"] = time.time()
+    return _sessies["ids"]
+
+
 def merged() -> dict:
     data = load("items.json", {"items": [], "bronnen": {}})
+    # Een chat die sinds de laatste collectorronde is gearchiveerd of gesloten, is geen
+    # open vraag meer; een tik erop opende niets (Sam, 07-11-2026). Direct weglaten.
+    live = live_sessies()
+    if live is not None:
+        data["items"] = [i for i in data.get("items", [])
+                         if not (i.get("sessie") and i.get("soort") in ("vraag", "vast") and i["sessie"] not in live)]
     st = load("status.json", {})
     now = datetime.now(timezone.utc)
     items = []
