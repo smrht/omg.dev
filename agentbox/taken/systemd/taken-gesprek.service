@@ -1,0 +1,6 @@
+[Unit]
+Description=Taken-collector, alleen gesprekken (lokaal, alleen lezen)
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/agent/omg-agentbox/agentbox/taken/collect.py gesprek
+TimeoutStartSec=120

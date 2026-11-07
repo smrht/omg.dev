@@ -242,7 +242,13 @@ def orders() -> list[dict]:
 
 
 def main() -> int:
+    """`collect.py` = alle bronnen (elke 10 min); `collect.py gesprek` = alleen de omg-gesprekken
+    (lokaal, goedkoop, elke 2 min), de mail- en bestelitems van de vorige ronde blijven staan."""
+    import fcntl
+    alleen = set(sys.argv[1:])
     STATE.mkdir(parents=True, exist_ok=True)
+    slot = open(STATE / "collect.lock", "w")
+    fcntl.flock(slot, fcntl.LOCK_EX)  # twee timers: nooit gelijktijdig items.json herschrijven
     prev = {}
     f = STATE / "items.json"
     if f.exists():
@@ -252,6 +258,11 @@ def main() -> int:
             prev = {}
     result = {"bijgewerkt": iso(NOW), "bronnen": {}, "items": []}
     for name, fn in (("gesprek", sessions), ("mail", mails), ("bestelling", orders)):
+        if alleen and name not in alleen:
+            result["items"] += [i for i in prev.get("items", []) if i["bron"] == name]
+            if name in prev.get("bronnen", {}):
+                result["bronnen"][name] = prev["bronnen"][name]
+            continue
         try:
             items = fn()
             result["items"] += items
