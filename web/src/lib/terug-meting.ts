@@ -18,6 +18,11 @@ type Meting = {
   klikken: number[];
   paden: { t: number; p: string }[];
   lang: { t: number; d: number }[];
+  // Ronde 4: tijd die eerdere popstate-listeners (router) al kostten vóór t0, en
+  // wanneer een MessageChannel-bericht van t0 aankomt. Bericht vroeg + frame laat =
+  // de main thread is vrij en WebKit houdt de frames vast (terugveeg-snapshot).
+  voorT0?: number;
+  bericht?: number;
 };
 
 // Per aanraking: start/eind (ms na t0), max beweging (px), doel, of het doel bij
@@ -51,7 +56,7 @@ function rond(n: number) {
   return Math.round(n);
 }
 
-function start(soort: Meting["soort"], van = location.pathname) {
+function start(soort: Meting["soort"], van = location.pathname, evTijd?: number) {
   if (bezig) return;
   const t0 = performance.now();
   const m: Meting = {
@@ -68,8 +73,14 @@ function start(soort: Meting["soort"], van = location.pathname) {
     klikken: [],
     paden: [],
     lang: [],
+    voorT0: evTijd !== undefined ? rond(t0 - evTijd) : undefined,
   };
   bezig = m;
+  try {
+    const mc = new MessageChannel();
+    mc.port1.onmessage = () => { m.bericht = rond(performance.now() - t0); mc.port1.close(); };
+    mc.port2.postMessage(0);
+  } catch {}
   let vorig = t0;
   let pad = location.pathname;
   const frame = (now: number) => {
@@ -128,8 +139,8 @@ export function installTerugMeting() {
       laatstePad = location.pathname;
     };
   }
-  window.addEventListener("popstate", () => {
-    if (laatstePad.startsWith("/sessions/") && !location.pathname.startsWith("/sessions/")) start("terug", laatstePad);
+  window.addEventListener("popstate", (e) => {
+    if (laatstePad.startsWith("/sessions/") && !location.pathname.startsWith("/sessions/")) start("terug", laatstePad, e.timeStamp);
     laatstePad = location.pathname;
   });
   document.addEventListener(
