@@ -18308,6 +18308,15 @@ const STANDALONE_TOUCH = (() => {
 })();
 const SHEET_MS = 420;
 const CLOSE_MS = 260;
+// agentbox: push/pop zoals iOS (transitions.dev "page side-by-side", --ease-smooth-out).
+const SLIDE_IN_MS = 320;
+const SLIDE_OUT_MS = 260;
+const SLIDE_EASE = "cubic-bezier(0.22, 1, 0.36, 1)";
+const SHEET_PARALLAX = 0.25; // hoe ver het overzicht meeschuift (deel van de breedte)
+const SHEET_DIM = 0.4; // backdrop is bg-black/50, dus 0.4 = 20% donkerder
+function sheetReduceMotion() {
+  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+}
 
 // The session title in the details sheet header, pinned to a single line. If
 // the title is too wide to fit and the sheet has stayed open for 10s, a gentle
@@ -19123,6 +19132,9 @@ function SessionTitleSheet({
   const bodyRef = useRef<HTMLDivElement>(null);
   const closingRef = useRef(false);
   const switchDirRef = useRef<1 | -1 | null>(null);
+  // agentbox: de chat mount pas als het paneel er staat. Die mount kost op de testbox
+  // ~200 ms main thread (rijhoogtes schatten); ervóór hield hij de hele inschuif tegen.
+  const [chatKlaar, setChatKlaar] = useState(false);
 
   // Per-session live data, selected for whichever session is active right now.
   const busy = !!busyBySid[sid];
@@ -19237,12 +19249,18 @@ function SessionTitleSheet({
     if (!panel) return;
     const st = { aan: false, beslist: false, x0: 0, y0: 0, dx: 0, t0: 0 };
     const backdrop = () => backdropRef.current;
+    const root = () => document.getElementById("root");
+    // Het overzicht volgt de vinger: van -25% (onder de chat) naar 0 (helemaal terug).
     const zet = (px: number) => {
+      const vw = window.innerWidth || 1;
       panel.style.transition = "none";
       panel.style.transform = px ? `translateX(${px}px)` : "";
       const b = backdrop();
-      if (b) b.style.opacity = String(Math.max(0, 1 - px / (window.innerWidth || 1)));
+      if (b) { b.style.transition = "none"; b.style.opacity = String(SHEET_DIM * Math.max(0, 1 - px / vw)); }
+      const r = root();
+      if (r) { r.style.transition = "none"; r.style.transform = `translateX(${-SHEET_PARALLAX * Math.max(0, vw - px)}px)`; }
     };
+    const rootLos = (ms: number) => window.setTimeout(() => { const r = root(); if (r) { r.style.transition = ""; r.style.transform = ""; } }, ms);
     const onStart = (e: TouchEvent) => {
       if (closingRef.current || e.touches.length !== 1) return;
       const p = e.touches[0];
@@ -19251,6 +19269,8 @@ function SessionTitleSheet({
       // hun eindstand is de rusttoestand, dus opheffen verandert niets aan het beeld.
       panel.getAnimations().forEach((a) => a.cancel());
       backdrop()?.getAnimations().forEach((a) => a.cancel());
+      root()?.getAnimations().forEach((a) => a.finish());
+      if (sheetReduceMotion()) return;
       Object.assign(st, { aan: true, beslist: false, x0: p.clientX, y0: p.clientY, dx: 0, t0: performance.now() });
       e.stopPropagation();
     };
@@ -19280,19 +19300,28 @@ function SessionTitleSheet({
         closingRef.current = true;
         haptic("selection");
         meetVeegSluiten();
-        panel.style.transition = "transform 200ms cubic-bezier(0.22,1,0.36,1)";
+        // Restafstand met dezelfde curve; korter naarmate de vinger al verder was.
+        const ms = Math.round(Math.max(140, SLIDE_OUT_MS * (1 - st.dx / vw)));
+        const t = `${ms}ms ${SLIDE_EASE}`;
+        panel.style.transition = `transform ${t}`;
         panel.style.transform = `translateX(${vw}px)`;
         const b = backdrop();
-        if (b) { b.style.transition = "opacity 200ms ease-out"; b.style.opacity = "0"; }
+        if (b) { b.style.transition = `opacity ${t}`; b.style.opacity = "0"; }
+        const r = root();
+        if (r) { r.style.transition = `transform ${t}`; r.style.transform = "translateX(0px)"; }
         let klaar = false;
-        const sluit = () => { if (!klaar) { klaar = true; onClose(); } };
+        const sluit = () => { if (!klaar) { klaar = true; rootLos(0); onClose(); } };
         panel.addEventListener("transitionend", sluit, { once: true });
-        window.setTimeout(sluit, 260);
+        window.setTimeout(sluit, ms + 80);
       } else {
-        panel.style.transition = "transform 180ms cubic-bezier(0.22,1,0.36,1)";
+        const t = `220ms ${SLIDE_EASE}`;
+        panel.style.transition = `transform ${t}`;
         panel.style.transform = "";
         const b = backdrop();
-        if (b) { b.style.transition = "opacity 180ms ease-out"; b.style.opacity = ""; }
+        if (b) { b.style.transition = `opacity ${t}`; b.style.opacity = String(SHEET_DIM); }
+        const r = root();
+        if (r) { r.style.transition = `transform ${t}`; r.style.transform = `translateX(${-SHEET_PARALLAX * 100}%)`; }
+        rootLos(240);
       }
     };
     panel.addEventListener("touchstart", onStart, { capture: true, passive: true });
@@ -19406,48 +19435,40 @@ function SessionTitleSheet({
     };
   }, [go, navigationPrefs.swipeBetweenChats, prevSid, nextSid]);
 
-  // The transform that maps the full-screen panel onto the title's rect.
-  // transform-origin is the top-left corner, so scale shrinks toward (0,0) and
-  // the translate then drops it onto the title.
-  const flipTransform = useCallback(() => {
-    const vw = window.innerWidth || 1;
-    const vh = window.innerHeight || 1;
-    const sx = Math.max(origin.width / vw, 0.0001);
-    const sy = Math.max(origin.height / vh, 0.0001);
-    return `translate(${origin.left}px, ${origin.top}px) scale(${sx}, ${sy})`;
-  }, [origin]);
-
-  // Enter morph — runs once on mount.
+  // agentbox (08-11-2026, Sam: "houtje touwtje"): één ruimtelijk model zoals iOS.
+  // De chat schuift van rechts naar binnen terwijl het overzicht (#root, de sheet zit
+  // in een portal ernaast) een kwart mee naar links schuift en iets donkerder wordt.
+  // Sluiten (knop, Escape, randveeg) is exact het omgekeerde. Alleen transform en
+  // opacity, dus het draait op de compositor; #root houdt na afloop geen transform.
   useLayoutEffect(() => {
     const panel = panelRef.current;
     const backdrop = backdropRef.current;
-    const body = bodyRef.current;
     if (!panel) return;
-    const from = flipTransform();
-    panel.animate(
-      [
-        // agentbox: no borderRadius here. It is not compositor-animatable, so
-        // every frame repainted the whole full-screen chat on the main thread.
-        { transform: from, opacity: 0.55 },
-        { transform: "translate(0px,0px) scale(1,1)", opacity: 1 },
-      ],
-      { duration: SHEET_MS, easing: SHEET_EASE, fill: "both" },
+    if (sheetReduceMotion()) {
+      setChatKlaar(true);
+      panel.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 150, easing: "ease-out", fill: "both" });
+      backdrop?.animate([{ opacity: 0 }, { opacity: SHEET_DIM }], { duration: 150, easing: "ease-out", fill: "both" });
+      return;
+    }
+    const inAnim = panel.animate([{ transform: "translateX(100%)" }, { transform: "translateX(0px)" }],
+      { duration: SLIDE_IN_MS, easing: SLIDE_EASE, fill: "both" });
+    let gezet = false;
+    const klaar = () => { if (!gezet) { gezet = true; setChatKlaar(true); } };
+    inAnim.onfinish = klaar;
+    inAnim.oncancel = klaar;
+    const vangnet = window.setTimeout(klaar, SLIDE_IN_MS + 150);
+    backdrop?.animate([{ opacity: 0 }, { opacity: SHEET_DIM }], { duration: SLIDE_IN_MS, easing: SLIDE_EASE, fill: "both" });
+    document.getElementById("root")?.animate(
+      [{ transform: "translateX(0px)" }, { transform: `translateX(${-SHEET_PARALLAX * 100}%)` }],
+      { duration: SLIDE_IN_MS, easing: SLIDE_EASE },
     );
-    backdrop?.animate([{ opacity: 0 }, { opacity: 1 }], {
-      duration: SHEET_MS,
-      easing: SHEET_EASE,
-      fill: "both",
-    });
-    body?.animate(
-      [
-        { opacity: 0, transform: "translateY(12px)" },
-        { opacity: 0, transform: "translateY(12px)", offset: 0.45 },
-        { opacity: 1, transform: "translateY(0px)" },
-      ],
-      { duration: SHEET_MS, easing: "ease-out", fill: "both" },
-    );
+    return () => window.clearTimeout(vangnet);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  // Chat zachtjes laten verschijnen in plaats van ineens.
+  useLayoutEffect(() => {
+    if (chatKlaar && !sheetReduceMotion()) bodyRef.current?.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 140, easing: "ease-out" });
+  }, [chatKlaar]);
 
   const requestClose = useCallback(() => {
     if (closingRef.current) return;
@@ -19455,44 +19476,30 @@ function SessionTitleSheet({
     haptic("selection");
     const panel = panelRef.current;
     const backdrop = backdropRef.current;
-    const body = bodyRef.current;
-    const to = flipTransform();
     let done = false;
     const finish = () => {
       if (done) return;
       done = true;
       onClose();
     };
-    if (panel) {
-      // agentbox: dissolve into the row instead of landing on it at 55%
-      // opacity. The ease puts nearly all movement in the first ~150 ms; the
-      // old tail left a smeared half-transparent chat over the row for another
-      // ~300 ms before the overview came back sharp (frame capture 07-11).
-      const anim = panel.animate(
-        [{ transform: "translate(0px,0px) scale(1,1)" }, { transform: to }],
-        { duration: CLOSE_MS, easing: SHEET_EASE, fill: "both" },
+    if (!panel) return finish();
+    const reduce = sheetReduceMotion();
+    const ms = reduce ? 150 : SLIDE_OUT_MS;
+    const ease = reduce ? "ease-out" : SLIDE_EASE;
+    const anim = reduce
+      ? panel.animate([{ opacity: 1 }, { opacity: 0 }], { duration: ms, easing: ease, fill: "both" })
+      : panel.animate([{ transform: "translateX(0px)" }, { transform: "translateX(100%)" }], { duration: ms, easing: ease, fill: "both" });
+    backdrop?.animate([{ opacity: SHEET_DIM }, { opacity: 0 }], { duration: ms, easing: ease, fill: "both" });
+    if (!reduce) {
+      document.getElementById("root")?.animate(
+        [{ transform: `translateX(${-SHEET_PARALLAX * 100}%)` }, { transform: "translateX(0px)" }],
+        { duration: ms, easing: ease },
       );
-      panel.animate([{ opacity: 1 }, { opacity: 0.6, offset: 0.4 }, { opacity: 0 }], {
-        duration: CLOSE_MS,
-        easing: "linear",
-        fill: "both",
-      });
-      anim.onfinish = finish;
-      anim.oncancel = finish;
-    } else {
-      finish();
     }
-    backdrop?.animate([{ opacity: 1 }, { opacity: 0 }], {
-      duration: CLOSE_MS,
-      easing: SHEET_EASE,
-      fill: "both",
-    });
-    body?.animate([{ opacity: 1 }, { opacity: 0 }], {
-      duration: SHEET_MS * 0.4,
-      easing: "ease-in",
-      fill: "both",
-    });
-  }, [flipTransform, onClose]);
+    anim.onfinish = finish;
+    anim.oncancel = finish;
+    window.setTimeout(finish, ms + 120);
+  }, [onClose]);
 
   // Escape-to-close, arrow-keys-to-switch + lock background scroll while open.
   useEffect(() => {
@@ -19559,7 +19566,7 @@ function SessionTitleSheet({
             onClick={requestClose}
             className="shrink-0"
           >
-            <ChevronDown />
+            <ChevronLeft />
           </Button>
           {/* Mobile's full-screen session sheet: same bot-aware identity mark
               as the session card header (see SessionHeaderIdentity), so a
@@ -19617,7 +19624,7 @@ function SessionTitleSheet({
           />
         </div>
         <div ref={bodyRef} className="flex min-h-0 flex-1 flex-col">
-          <SessionChat
+          {chatKlaar ? <SessionChat
             session={session}
             busy={busy}
             prompt={prompt}
@@ -19627,7 +19634,7 @@ function SessionTitleSheet({
             onError={setError}
             onSubscribeTranscript={onSubscribeTranscript}
             onRefresh={onRefresh}
-          />
+          /> : null}
         </div>
       </div>
     </div>,
