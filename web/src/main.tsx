@@ -40,6 +40,12 @@ import { applyFont, FONT_CHANGE_EVENT, FONT_STORAGE_KEY } from "./lib/font";
 // Installed first so an early-boot throw is still caught.
 installErrorReporting();
 installTerugMeting();
+// agentbox (08-11-2026), proef: na de iOS-terugswipe werden tikken seconden lang
+// geen klik. De app scrollt in eigen containers (scrollY = 0), dus het browser-
+// scrollherstel heeft hier niets te doen. Meting in lib/terug-meting.ts.
+try {
+  history.scrollRestoration = "manual";
+} catch {}
 
 // Runtime extension host. We expose the host's React (so external extension
 // bundles share ONE React instead of bundling their own — hooks break with two)

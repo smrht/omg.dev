@@ -14,13 +14,18 @@ type Meting = {
   maxGat: number;
   gaten: number[];
   paneelWeg: number | null;
-  tikken: number[];
+  tikken: Tik[];
   klikken: number[];
   paden: { t: number; p: string }[];
   lang: { t: number; d: number }[];
 };
 
+// Per aanraking: start/eind (ms na t0), max beweging (px), doel, of het doel bij
+// touchend nog in de DOM zat, en na hoeveel ms een echte (isTrusted) klik volgde.
+type Tik = { s: number; e?: number; mv: number; doel: string; los?: boolean; klik?: number };
+
 let bezig: Meting | null = null;
+let tik: { t: Tik; x: number; y: number; el: Element | null } | null = null;
 
 function rond(n: number) {
   return Math.round(n);
@@ -70,6 +75,7 @@ function start(soort: Meting["soort"], van = location.pathname) {
 
 function verstuur(m: Meting) {
   bezig = null;
+  tik = null;
   const sa = window.matchMedia?.("(display-mode: standalone)").matches || (navigator as { standalone?: boolean }).standalone;
   const body = JSON.stringify({
     ...m,
@@ -114,12 +120,49 @@ export function installTerugMeting() {
     },
     true,
   );
-  const tik = (lijst: "tikken" | "klikken") => () => {
+  const soortDoel = (el: Element | null) =>
+    !el ? "geen" : el.closest("[data-overview-row]") ? "rij" : el.closest("button,[role=button]") ? "knop" : el.closest("a[href]") ? "link" : "anders";
+  window.addEventListener(
+    "touchstart",
+    (e) => {
+      const m = bezig;
+      const p = e.touches[0];
+      if (!m || !p || m.tikken.length >= 12) return;
+      const el = e.target instanceof Element ? e.target : null;
+      const t: Tik = { s: rond(performance.now() - m.t0), mv: 0, doel: soortDoel(el) };
+      m.tikken.push(t);
+      tik = { t, x: p.clientX, y: p.clientY, el };
+    },
+    { capture: true, passive: true },
+  );
+  window.addEventListener(
+    "touchmove",
+    (e) => {
+      const p = e.touches[0];
+      if (tik && p) tik.t.mv = Math.max(tik.t.mv, rond(Math.hypot(p.clientX - tik.x, p.clientY - tik.y)));
+    },
+    { capture: true, passive: true },
+  );
+  const eind = () => {
     const m = bezig;
-    if (m && m[lijst].length < 12) m[lijst].push(rond(performance.now() - m.t0));
+    if (!tik || !m) return;
+    tik.t.e = rond(performance.now() - m.t0);
+    tik.t.los = tik.el ? !tik.el.isConnected : undefined;
   };
-  window.addEventListener("touchstart", tik("tikken"), { capture: true, passive: true });
-  window.addEventListener("click", tik("klikken"), { capture: true, passive: true });
+  window.addEventListener("touchend", eind, { capture: true, passive: true });
+  window.addEventListener("touchcancel", eind, { capture: true, passive: true });
+  window.addEventListener(
+    "click",
+    (e) => {
+      const m = bezig;
+      if (!m || !e.isTrusted) return;
+      const nu = rond(performance.now() - m.t0);
+      if (m.klikken.length < 12) m.klikken.push(nu);
+      const t = tik?.t;
+      if (t && t.e !== undefined && t.klik === undefined && nu - t.e < 400) t.klik = nu - t.e;
+    },
+    { capture: true, passive: true },
+  );
   try {
     new PerformanceObserver((list) => {
       const m = bezig;
