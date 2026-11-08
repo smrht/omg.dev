@@ -50,5 +50,18 @@ await tik("touchStart", 6, 420); for (let x = 20; x <= 80; x += 20) { await tik(
 await sleep(600);
 console.log("terugveer", await ev(`JSON.stringify({open:!!document.querySelector('[role=dialog][aria-modal=true]'), paneel:document.querySelector('[role=dialog][aria-modal=true]')?.getBoundingClientRect().x, root:document.getElementById('root').style.transform})`));
 await shot("terugveer");
+
+// Tik -> eerste berichtrij in beeld (inhoud), en snel open-en-terug (mis getikt).
+const opnieuw = async () => { await ev(`document.querySelector('[role=dialog] button[aria-label="Close session details"]')?.click()`); await sleep(900); };
+await opnieuw();
+const inhoud = [];
+for (let k = 0; k < 3; k++) {
+  inhoud.push(await ev(`new Promise(res=>{const t0=performance.now();const r=[...document.querySelectorAll("[data-overview-row]")].filter(e=>e.offsetParent)[2];r.click();(function f(){const d=document.querySelector('[role=dialog][aria-modal=true] [data-index]');if(d)return res(Math.round(performance.now()-t0));if(performance.now()-t0>4000)return res(-1);requestAnimationFrame(f)})()})`));
+  await sleep(1200); await opnieuw();
+}
+console.log("tik->inhoud ms", JSON.stringify(inhoud));
+await ev(volg.replace(';1', '') + `;(()=>{const r=[...document.querySelectorAll("[data-overview-row]")].filter(e=>e.offsetParent)[2]; r.click(); setTimeout(()=>document.querySelector('[role=dialog] button[aria-label="Close session details"]').click(),120); return 1})()`);
+await sleep(1100);
+{ const a = JSON.parse(await ev(`JSON.stringify(window.__spoor)`)); console.log("snel", a.map((x: any) => x.join("/")).join("  ").slice(0, 900)); let g = 0, terug = 0, piek = -1; for (let i = 1; i < a.length; i++) { g = Math.max(g, a[i][0] - a[i-1][0]); } const ix = a.filter((x: any) => x[0] > 125 && x[1] !== null).map((x: any) => x[1]); for (let i = 1; i < ix.length; i++) if (ix[i] < ix[i-1] - 1) terug++; console.log("snel maxGat", g, "terugsprongen", terug, "chat gemount", await ev(`!!document.querySelector('[data-index]')`), "root", await ev(`getComputedStyle(document.getElementById('root')).transform`)); }
 await send("Target.closeTarget", { targetId });
 process.exit(0);

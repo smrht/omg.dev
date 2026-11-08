@@ -2,7 +2,7 @@ import { OverviewToolbar, useOverviewPreferences, buildOverviewGroups, flattenOv
 import { agentboxConfig, greetingName } from "./lib/agentbox-config";
 import { applyStopOverrides, clearStopped, markStopped, useStopOverrideVersion } from "./lib/stop-override";
 import { TakenLijst, TakenVandaag, BezosPagina, zetBevindingenAantal, bevindingIsInfo, zetModelBron, type ModelKeus, MELDINGEN_EVENT, OPDRACHT_EVENT, neemOpdracht, heeftOpdracht, opdrachtVerstuurd } from "./components/taken";
-import { meetVeegSluiten } from "./lib/terug-meting";
+import { meetOpenen, meetVeegSluiten } from "./lib/terug-meting";
 import { type WorkspaceSummary } from "./components/desktop-workspace";
 import { SessionUsageControls } from "./components/session-usage-controls";
 import { WorkspaceFindingsMenu } from "./components/workspace-findings";
@@ -19135,6 +19135,15 @@ function SessionTitleSheet({
   // agentbox: de chat mount pas als het paneel er staat. Die mount kost op de testbox
   // ~200 ms main thread (rijhoogtes schatten); ervóór hield hij de hele inschuif tegen.
   const [chatKlaar, setChatKlaar] = useState(false);
+  const sleeptRef = useRef(false); // randveeg bezig: chat-mount even uitstellen
+  // #root is globaal: wat de sheet erop zet, ruimt hij bij unmount altijd op.
+  useEffect(() => () => {
+    const r = document.getElementById("root");
+    if (!r) return;
+    r.getAnimations().forEach((a) => a.cancel());
+    r.style.transition = "";
+    r.style.transform = "";
+  }, []);
 
   // Per-session live data, selected for whichever session is active right now.
   const busy = !!busyBySid[sid];
@@ -19267,11 +19276,15 @@ function SessionTitleSheet({
       if (!p || p.clientX >= 24) return;
       // De open-animaties staan op fill:both en zouden de inline transform overschrijven;
       // hun eindstand is de rusttoestand, dus opheffen verandert niets aan het beeld.
+      if (sheetReduceMotion()) return;
+      // Loopt de inschuif nog, dan pakt de vinger het paneel op waar het nu is.
+      const basis = Math.max(0, new DOMMatrix(getComputedStyle(panel).transform).m41);
       panel.getAnimations().forEach((a) => a.cancel());
       backdrop()?.getAnimations().forEach((a) => a.cancel());
-      root()?.getAnimations().forEach((a) => a.finish());
-      if (sheetReduceMotion()) return;
-      Object.assign(st, { aan: true, beslist: false, x0: p.clientX, y0: p.clientY, dx: 0, t0: performance.now() });
+      root()?.getAnimations().forEach((a) => a.cancel());
+      zet(basis);
+      sleeptRef.current = true;
+      Object.assign(st, { aan: true, beslist: false, x0: p.clientX - basis, y0: p.clientY, dx: basis, t0: performance.now() });
       e.stopPropagation();
     };
     const onMove = (e: TouchEvent) => {
@@ -19283,7 +19296,7 @@ function SessionTitleSheet({
       if (!st.beslist) {
         if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
         st.beslist = true;
-        if (Math.abs(dy) > Math.abs(dx) || dx < 0) { st.aan = false; return; }
+        if (Math.abs(dy) > Math.abs(dx) || dx < 0) { st.aan = false; sleeptRef.current = false; if (st.dx) zet(0); rootLos(0); return; }
       }
       e.preventDefault();
       e.stopPropagation();
@@ -19293,7 +19306,8 @@ function SessionTitleSheet({
     const onEnd = () => {
       if (!st.aan) return;
       st.aan = false;
-      if (!st.beslist) return;
+      sleeptRef.current = false;
+      if (!st.beslist) { if (st.dx) zet(0); rootLos(0); return; }
       const vw = window.innerWidth || 1;
       const vaart = st.dx / Math.max(1, performance.now() - st.t0);
       if (st.dx > vw * 0.33 || (st.dx > 40 && vaart > 0.5)) {
@@ -19444,6 +19458,7 @@ function SessionTitleSheet({
     const panel = panelRef.current;
     const backdrop = backdropRef.current;
     if (!panel) return;
+    meetOpenen();
     if (sheetReduceMotion()) {
       setChatKlaar(true);
       panel.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 150, easing: "ease-out", fill: "both" });
@@ -19453,7 +19468,14 @@ function SessionTitleSheet({
     const inAnim = panel.animate([{ transform: "translateX(100%)" }, { transform: "translateX(0px)" }],
       { duration: SLIDE_IN_MS, easing: SLIDE_EASE, fill: "both" });
     let gezet = false;
-    const klaar = () => { if (!gezet) { gezet = true; setChatKlaar(true); } };
+    // Niet mounten tijdens sluiten (dan valt de ~200 ms midden in de uitschuif) of
+    // tijdens een randveeg (dan stokt de vinger); bij terugveren alsnog.
+    const klaar = () => {
+      if (gezet || closingRef.current) return;
+      if (sleeptRef.current) { window.setTimeout(klaar, 200); return; }
+      gezet = true;
+      setChatKlaar(true);
+    };
     inAnim.onfinish = klaar;
     inAnim.oncancel = klaar;
     const vangnet = window.setTimeout(klaar, SLIDE_IN_MS + 150);
@@ -19484,15 +19506,25 @@ function SessionTitleSheet({
     };
     if (!panel) return finish();
     const reduce = sheetReduceMotion();
-    const ms = reduce ? 150 : SLIDE_OUT_MS;
+    // Vanaf waar alles nú staat (ook als de inschuif nog loopt), anders springt het eerst terug.
+    const vw = window.innerWidth || 1;
+    const root = document.getElementById("root");
+    const px = new DOMMatrix(getComputedStyle(panel).transform).m41;
+    const rx = root ? new DOMMatrix(getComputedStyle(root).transform).m41 : 0;
+    const bo = backdrop ? Number(getComputedStyle(backdrop).opacity) : SHEET_DIM;
+    const binnen = px < 1; // inschuif al klaar: overzicht ligt (onzichtbaar) op -25%
+    panel.getAnimations().forEach((a) => a.cancel());
+    backdrop?.getAnimations().forEach((a) => a.cancel());
+    root?.getAnimations().forEach((a) => a.cancel());
+    const ms = reduce ? 150 : Math.round(Math.max(120, SLIDE_OUT_MS * (1 - px / vw)));
     const ease = reduce ? "ease-out" : SLIDE_EASE;
     const anim = reduce
       ? panel.animate([{ opacity: 1 }, { opacity: 0 }], { duration: ms, easing: ease, fill: "both" })
-      : panel.animate([{ transform: "translateX(0px)" }, { transform: "translateX(100%)" }], { duration: ms, easing: ease, fill: "both" });
-    backdrop?.animate([{ opacity: SHEET_DIM }, { opacity: 0 }], { duration: ms, easing: ease, fill: "both" });
-    if (!reduce) {
-      document.getElementById("root")?.animate(
-        [{ transform: `translateX(${-SHEET_PARALLAX * 100}%)` }, { transform: "translateX(0px)" }],
+      : panel.animate([{ transform: `translateX(${px}px)` }, { transform: "translateX(100%)" }], { duration: ms, easing: ease, fill: "both" });
+    backdrop?.animate([{ opacity: bo }, { opacity: 0 }], { duration: ms, easing: ease, fill: "both" });
+    if (!reduce && root) {
+      root.animate(
+        [{ transform: `translateX(${binnen ? -SHEET_PARALLAX * vw : rx}px)` }, { transform: "translateX(0px)" }],
         { duration: ms, easing: ease },
       );
     }

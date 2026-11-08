@@ -5,7 +5,7 @@
 // binnenkomt. Eén regel per keer naar /api/taken/perf. Alleen op aanraakschermen.
 
 type Meting = {
-  soort: "terug" | "knop" | "veeg";
+  soort: "terug" | "knop" | "veeg" | "open";
   van: string;
   t0: number;
   nodes: number;
@@ -23,6 +23,8 @@ type Meting = {
   // de main thread is vrij en WebKit houdt de frames vast (terugveeg-snapshot).
   voorT0?: number;
   bericht?: number;
+  // Openen (08-11 avond): ms tot de eerste berichtrij in de chat staat.
+  inhoud?: number;
 };
 
 // Per aanraking: start/eind (ms na t0), max beweging (px), doel, of het doel bij
@@ -91,14 +93,16 @@ function start(soort: Meting["soort"], van = location.pathname, evTijd?: number)
     if (gat > m.maxGat) m.maxGat = rond(gat);
     if (gat > 100 && m.gaten.length < 20) m.gaten.push(rond(now - t0), rond(gat));
     vorig = now;
-    if (m.paneelWeg === null && !document.querySelector('[role="dialog"][aria-modal="true"]')) {
+    if (m.soort === "open") {
+      if (m.inhoud === undefined && document.querySelector('[role="dialog"][aria-modal="true"] [data-index]')) m.inhoud = rond(now - t0);
+    } else if (m.paneelWeg === null && !document.querySelector('[role="dialog"][aria-modal="true"]')) {
       m.paneelWeg = rond(now - t0);
     }
     if (location.pathname !== pad) {
       pad = location.pathname;
       if (m.paden.length < 10) m.paden.push({ t: rond(now - t0), p: pad.slice(0, 40) });
     }
-    if (now - t0 < 5000) requestAnimationFrame(frame);
+    if (now - t0 < (m.soort === "open" ? 1500 : 5000)) requestAnimationFrame(frame);
     else verstuur(m);
   };
   requestAnimationFrame(frame);
@@ -124,6 +128,13 @@ function verstuur(m: Meting) {
       void fetch("/api/taken/perf", { method: "POST", body, headers: { "content-type": "application/json" }, keepalive: true });
     }
   } catch {}
+}
+
+let laatsteTik = -1;
+/** Chat opent (sheet mount): frame-gaten en tijd tot berichten, vanaf de tik. */
+export function meetOpenen() {
+  if (typeof window === "undefined" || !window.matchMedia?.("(pointer: coarse)").matches) return;
+  start("open", location.pathname, laatsteTik >= 0 && performance.now() - laatsteTik < 1000 ? laatsteTik : undefined);
 }
 
 /** Eigen randveeg sluit de chat (standalone, zonder history-stap): zelfde meting. */
@@ -194,6 +205,7 @@ export function installTerugMeting() {
     { passive: true },
   );
   const eind = () => {
+    laatsteTik = performance.now();
     const m = bezig;
     if (!tik || !m) return;
     const h = tik;
