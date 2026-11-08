@@ -2,7 +2,6 @@ import { OverviewToolbar, useOverviewPreferences, buildOverviewGroups, flattenOv
 import { agentboxConfig, greetingName } from "./lib/agentbox-config";
 import { applyStopOverrides, clearStopped, markStopped, useStopOverrideVersion } from "./lib/stop-override";
 import { TakenLijst, TakenVandaag, BezosPagina, zetBevindingenAantal, bevindingIsInfo, zetModelBron, type ModelKeus, MELDINGEN_EVENT, OPDRACHT_EVENT, neemOpdracht, heeftOpdracht, opdrachtVerstuurd } from "./components/taken";
-import { meetOpenen, meetVeegSluiten } from "./lib/terug-meting";
 import { type WorkspaceSummary } from "./components/desktop-workspace";
 import { SessionUsageControls } from "./components/session-usage-controls";
 import { WorkspaceFindingsMenu } from "./components/workspace-findings";
@@ -19321,7 +19320,6 @@ function SessionTitleSheet({
       if (st.dx > vw * 0.33 || (st.dx > 40 && vaart > 0.5)) {
         closingRef.current = true;
         haptic("selection");
-        meetVeegSluiten();
         // Restafstand met dezelfde curve; korter naarmate de vinger al verder was.
         const ms = Math.round(Math.max(140, SLIDE_OUT_MS * (1 - st.dx / vw)));
         const t = `${ms}ms ${SLIDE_EASE}`;
@@ -19476,7 +19474,6 @@ function SessionTitleSheet({
     const panel = panelRef.current;
     const backdrop = backdropRef.current;
     if (!panel) return;
-    meetOpenen();
     if (sheetReduceMotion()) {
       setChatKlaar(true);
       panel.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 150, easing: "ease-out", fill: "both" });

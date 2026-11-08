@@ -2,7 +2,6 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExtern
 import { agentboxConfig } from "@/lib/agentbox-config";
 import { Check, ChevronDown, Clock, CornerDownRight, ExternalLink, Eye, Loader2, MessageSquare, Pause, Play, RotateCcw, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { meldOpdrachtKlik } from "@/lib/terug-meting";
 import { useAskOptional, stripMd, type Question } from "@/components/ask-center";
 
 // Taken: wat er voor Sam ligt, automatisch verzameld uit mail, gesprekken en
@@ -93,34 +92,14 @@ export function opdrachtTekst(t: Taak): string {
   return `${regels.join("\n")}\n\nOpdracht: `;
 }
 
-// Meting (08-11-2026, Firefox-desktop "Opdracht geven doet niks"): welke composer
-// pakte de tekst, en stond die na 2,5 s nog in een zichtbaar veld.
-let geclaimd: { door: string; t: number } | null = null;
-function meetOpdracht() {
-  const t0 = performance.now();
-  geclaimd = null;
-  window.setTimeout(() => {
-    const velden = [...document.querySelectorAll("textarea")].map(v => ({
-      ph: v.placeholder.slice(0, 24), zichtbaar: v.getClientRects().length > 0, len: v.value.length, focus: document.activeElement === v,
-    }));
-    const body = JSON.stringify({
-      soort: "opdracht", door: geclaimd?.door ?? null, na: geclaimd ? Math.round(geclaimd.t - t0) : null,
-      nogWachtend: wachtend !== null, velden, pad: location.pathname, breed: window.innerWidth, ua: navigator.userAgent.slice(0, 160),
-    });
-    try { navigator.sendBeacon?.("/api/taken/perf", new Blob([body], { type: "application/json" })); } catch {}
-  }, 2500);
-}
-
 export function geefOpdracht(t: Taak) {
-  meldOpdrachtKlik("handler", { id: t.id.slice(0, 40) });
   try {
     wachtend = { ids: [t.id], tekst: opdrachtTekst(t) };
   } catch (e) {
     // Mag nooit stil falen: zonder tijd/label toch de opdracht klaarzetten.
-    meldOpdrachtKlik("fout", { fout: String(e).slice(0, 200) });
+    console.warn("opdrachtTekst faalde", e);
     wachtend = { ids: [t.id], tekst: `${t.titel}\n${t.link ?? ""}\n\nOpdracht: ` };
   }
-  meetOpdracht();
   window.dispatchEvent(new Event(OPDRACHT_EVENT));
 }
 
@@ -128,7 +107,6 @@ export function geefOpdracht(t: Taak) {
 export function geefBundelOpdracht(taken: Taak[], naam: string) {
   const regels = taken.slice(0, 40).map(t => `- ${t.titel}${t.wie ? ` (${t.wie})` : ""}${t.tijd ? `, ${new Date(t.tijd).toLocaleString("nl-NL", { dateStyle: "short", timeStyle: "short" })}` : ""}${t.link ? ` ${t.link}` : ""}`);
   wachtend = { ids: taken.map(t => t.id), tekst: `Meldingen (${taken.length}x): ${naam}\n${regels.join("\n")}\n\nOpdracht: ` };
-  meetOpdracht();
   window.dispatchEvent(new Event(OPDRACHT_EVENT));
 }
 
@@ -141,7 +119,6 @@ export function heeftOpdracht(): boolean {
 export function neemOpdracht(door = "?"): string | null {
   const w = wachtend;
   wachtend = null;
-  if (w) geclaimd = { door, t: performance.now() };
   if (!w) return null;
   lopend = w;
   return w.tekst;
