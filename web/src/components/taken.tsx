@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { agentboxConfig } from "@/lib/agentbox-config";
+import { agentboxConfig, beslisNaam } from "@/lib/agentbox-config";
 import { Check, ChevronDown, Clock, CornerDownRight, ExternalLink, Eye, Loader2, MessageSquare, Pause, Play, RotateCcw, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAskOptional, stripMd, type Question } from "@/components/ask-center";
@@ -569,9 +569,9 @@ export function BezosPagina({ onOpenSession, bevindingen = [], onBekijk, onOplos
 
   const totaal = delen.beslis.length + delen.zelf.length;
   return (
-    <section aria-label="Bezos" className="taken bezos mx-auto w-full max-w-2xl px-4 pb-16 pt-8 md:px-8">
+    <section aria-label={beslisNaam()} className="taken bezos mx-auto w-full max-w-2xl px-4 pb-16 pt-8 md:px-8">
       <header className="mb-6">
-        <h1 className="text-[22px] font-semibold tracking-tight">Bezos {totaal > 0 ? <span className="ml-1 text-base font-normal tabular-nums text-muted-foreground">{totaal}</span> : null}</h1>
+        <h1 className="text-[22px] font-semibold tracking-tight">{beslisNaam()} {totaal > 0 ? <span className="ml-1 text-base font-normal tabular-nums text-muted-foreground">{totaal}</span> : null}</h1>
         <p className="mt-1 text-sm text-muted-foreground">Jij kiest, de agents voeren uit.</p>
       </header>
       {!data && !ask ? <p role="status" className="py-6 text-sm text-muted-foreground">{fout ? "Niet bereikbaar." : "Laden…"}</p> : null}

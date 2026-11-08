@@ -1,5 +1,5 @@
 import { OverviewToolbar, useOverviewPreferences, buildOverviewGroups, flattenOverview } from "./components/session-overview";
-import { agentboxConfig, greetingName } from "./lib/agentbox-config";
+import { agentboxConfig, beslisNaam, greetingName } from "./lib/agentbox-config";
 import { applyStopOverrides, clearStopped, markStopped, useStopOverrideVersion } from "./lib/stop-override";
 import { TakenLijst, TakenVandaag, BezosPagina, zetBevindingenAantal, bevindingIsInfo, zetModelBron, type ModelKeus, MELDINGEN_EVENT, OPDRACHT_EVENT, neemOpdracht, heeftOpdracht, opdrachtVerstuurd } from "./components/taken";
 import { type WorkspaceSummary } from "./components/desktop-workspace";
@@ -9422,7 +9422,7 @@ export function App() {
   // het beslisscherm (Sam, 07-11-2026). Bevindingen gaan er los in, één per rij.
   const notificationsPage = (_active: boolean) => (
     <BezosPagina
-      onOpenSession={(sid) => openHistoricalSession({ sessionId: sid, reviewLabel: "Bezos" })}
+      onOpenSession={(sid) => openHistoricalSession({ sessionId: sid, reviewLabel: beslisNaam() })}
       bevindingen={bezosBevindingen}
       onBekijk={(agentId) => setOpenReport(agentId)}
       onOplossen={(ids, keus) => void launchAutoTriage(findings.filter((f) => ids.includes(f.id)), keus)}
@@ -11006,7 +11006,7 @@ function PagesMenu({
           {hiddenPages.includes("notifications") ? null : (
             <DropdownMenuRadioItem value="notifications">
               <Bell className="size-5 shrink-0 text-muted-foreground" />
-              Bezos
+              {beslisNaam()}
             </DropdownMenuRadioItem>
           )}
           {hiddenPages.includes("artifacts") ? null : (

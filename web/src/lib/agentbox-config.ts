@@ -22,3 +22,8 @@ export function agentboxConfig(): AgentboxWebConfig {
 export function greetingName(fallback: string): string {
   return agentboxConfig().ownerName ?? fallback;
 }
+
+/** Name of the decision page: "Bezos" is Sam's own; other boxes keep "Meldingen". */
+export function beslisNaam(): string {
+  return agentboxConfig().profile === "neutral" ? "Meldingen" : "Bezos";
+}
