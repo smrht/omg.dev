@@ -40,9 +40,9 @@ import { applyFont, FONT_CHANGE_EVENT, FONT_STORAGE_KEY } from "./lib/font";
 // Installed first so an early-boot throw is still caught.
 installErrorReporting();
 installTerugMeting();
-// agentbox (08-11-2026), proef: na de iOS-terugswipe werden tikken seconden lang
-// geen klik. De app scrollt in eigen containers (scrollY = 0), dus het browser-
-// scrollherstel heeft hier niets te doen. Meting in lib/terug-meting.ts.
+// agentbox (08-11-2026): de app scrollt in eigen containers (scrollY = 0), dus het
+// browser-scrollherstel heeft niets te doen. Blijft staan; of dit de iOS-terugswipe-
+// hapering oploste is niet los bewezen (zie lib/terug-meting.ts, ronde 1-3).
 try {
   history.scrollRestoration = "manual";
 } catch {}
