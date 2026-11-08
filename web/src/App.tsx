@@ -1,7 +1,7 @@
 import { OverviewToolbar, useOverviewPreferences, buildOverviewGroups, flattenOverview } from "./components/session-overview";
 import { agentboxConfig, greetingName } from "./lib/agentbox-config";
 import { applyStopOverrides, clearStopped, markStopped, useStopOverrideVersion } from "./lib/stop-override";
-import { TakenLijst, TakenVandaag, BezosPagina, zetBevindingenAantal, bevindingIsInfo, zetModelBron, type ModelKeus, MELDINGEN_EVENT, OPDRACHT_EVENT, neemOpdracht, opdrachtVerstuurd } from "./components/taken";
+import { TakenLijst, TakenVandaag, BezosPagina, zetBevindingenAantal, bevindingIsInfo, zetModelBron, type ModelKeus, MELDINGEN_EVENT, OPDRACHT_EVENT, neemOpdracht, heeftOpdracht, opdrachtVerstuurd } from "./components/taken";
 import { type WorkspaceSummary } from "./components/desktop-workspace";
 import { SessionUsageControls } from "./components/session-usage-controls";
 import { WorkspaceFindingsMenu } from "./components/workspace-findings";
@@ -24829,8 +24829,20 @@ export function NewSessionDialog({
   const setPromptRef = useRef(setPrompt);
   setPromptRef.current = setPrompt;
   useEffect(() => {
-    const pak = () => {
-      const tekst = neemOpdracht();
+    // Er staan tot vier composers tegelijk in de boom (stage, workspace, mobiel,
+    // drawer). Alleen de zichtbare mag de opdracht pakken; anders verdween hij op
+    // desktop in een dichte drawer (Sam 08-11: "Opdracht geven doet niks"). Een
+    // composer die net opengaat (drawer na onNew) krijgt ~2 s om zichtbaar te worden.
+    let timer = 0;
+    const zichtbaar = () => !!fieldRef.current && fieldRef.current.getClientRects().length > 0;
+    const pak = (poging = 0) => {
+      window.clearTimeout(timer);
+      if (!heeftOpdracht()) return;
+      if (!zichtbaar()) {
+        if (poging < 40) timer = window.setTimeout(() => pak(poging + 1), 50);
+        return;
+      }
+      const tekst = neemOpdracht(variant);
       if (tekst == null) return;
       setPromptRef.current(tekst);
       window.setTimeout(() => {
@@ -24841,9 +24853,13 @@ export function NewSessionDialog({
         }
       }, 60);
     };
+    const bijEvent = () => pak();
     pak();
-    window.addEventListener(OPDRACHT_EVENT, pak);
-    return () => window.removeEventListener(OPDRACHT_EVENT, pak);
+    window.addEventListener(OPDRACHT_EVENT, bijEvent);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener(OPDRACHT_EVENT, bijEvent);
+    };
   }, []);
 
   function openProjectSheet() {
