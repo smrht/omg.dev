@@ -22,10 +22,30 @@ type Meting = {
 
 // Per aanraking: start/eind (ms na t0), max beweging (px), doel, of het doel bij
 // touchend nog in de DOM zat, en na hoeveel ms een echte (isTrusted) klik volgde.
-type Tik = { s: number; e?: number; mv: number; doel: string; los?: boolean; klik?: number };
+// Ronde 3: richting (dx/dy), of de dichtstbijzijnde scroller echt meeschoof
+// (sc = scrollTop-verschil bij touchend, sc2 = 300 ms later), hoeveel touchmoves
+// een handler tegenhield (pd) en body-overflow bij de start (bo).
+type Tik = {
+  s: number; e?: number; mv: number; doel: string; los?: boolean; klik?: number;
+  dx?: number; dy?: number; sc?: number; sc2?: number; scr?: string; pd?: number; bo?: string;
+};
+
+function scroller(el: Element | null): HTMLElement | null {
+  for (let n = el; n; n = n.parentElement) {
+    const st = getComputedStyle(n);
+    if (/(auto|scroll)/.test(st.overflowY) && n.scrollHeight > n.clientHeight + 1) return n as HTMLElement;
+  }
+  return (document.scrollingElement as HTMLElement | null) ?? null;
+}
+
+function naam(el: Element | null) {
+  if (!el) return "geen";
+  const c = (el.getAttribute("class") ?? "").split(/\s+/).filter(Boolean).slice(0, 3).join(".");
+  return (el.tagName.toLowerCase() + (c ? "." + c : "")).slice(0, 60);
+}
 
 let bezig: Meting | null = null;
-let tik: { t: Tik; x: number; y: number; el: Element | null } | null = null;
+let tik: { t: Tik; x: number; y: number; el: Element | null; sc: HTMLElement | null; top: number } | null = null;
 
 function rond(n: number) {
   return Math.round(n);
@@ -129,9 +149,10 @@ export function installTerugMeting() {
       const p = e.touches[0];
       if (!m || !p || m.tikken.length >= 12) return;
       const el = e.target instanceof Element ? e.target : null;
-      const t: Tik = { s: rond(performance.now() - m.t0), mv: 0, doel: soortDoel(el) };
+      const sc = scroller(el);
+      const t: Tik = { s: rond(performance.now() - m.t0), mv: 0, doel: soortDoel(el), scr: naam(sc), pd: 0, bo: document.body.style.overflow || "-" };
       m.tikken.push(t);
-      tik = { t, x: p.clientX, y: p.clientY, el };
+      tik = { t, x: p.clientX, y: p.clientY, el, sc, top: sc?.scrollTop ?? 0 };
     },
     { capture: true, passive: true },
   );
@@ -139,15 +160,34 @@ export function installTerugMeting() {
     "touchmove",
     (e) => {
       const p = e.touches[0];
-      if (tik && p) tik.t.mv = Math.max(tik.t.mv, rond(Math.hypot(p.clientX - tik.x, p.clientY - tik.y)));
+      if (tik && p) {
+        tik.t.mv = Math.max(tik.t.mv, rond(Math.hypot(p.clientX - tik.x, p.clientY - tik.y)));
+        tik.t.dx = rond(p.clientX - tik.x);
+        tik.t.dy = rond(p.clientY - tik.y);
+      }
     },
     { capture: true, passive: true },
+  );
+  // Bubble-fase: hier is defaultPrevented van de app-handlers al gezet.
+  window.addEventListener(
+    "touchmove",
+    (e) => {
+      if (tik && e.defaultPrevented) tik.t.pd = (tik.t.pd ?? 0) + 1;
+    },
+    { passive: true },
   );
   const eind = () => {
     const m = bezig;
     if (!tik || !m) return;
-    tik.t.e = rond(performance.now() - m.t0);
-    tik.t.los = tik.el ? !tik.el.isConnected : undefined;
+    const h = tik;
+    h.t.e = rond(performance.now() - m.t0);
+    h.t.los = h.el ? !h.el.isConnected : undefined;
+    if (h.sc) {
+      h.t.sc = rond(h.sc.scrollTop - h.top);
+      setTimeout(() => {
+        if (h.sc) h.t.sc2 = rond(h.sc.scrollTop - h.top);
+      }, 300);
+    }
   };
   window.addEventListener("touchend", eind, { capture: true, passive: true });
   window.addEventListener("touchcancel", eind, { capture: true, passive: true });

@@ -22,7 +22,11 @@ await ev(`(async()=>{const rows=[...document.querySelectorAll("[data-overview-ro
 if (process.env.TIKTEST) {
   await ev(`history.back(); 1`); await sleep(1000);
   const pos = await ev(`(()=>{const r=[...document.querySelectorAll("[data-overview-row]")].filter(e=>e.offsetParent)[1].getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2}})()`);
-  await send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [pos] }, s); await sleep(80);
+  if (process.env.TIKTEST === "veeg") {
+    await send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [pos] }, s);
+    for (let i = 1; i <= 10; i++) { await sleep(20); await send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: pos.x, y: pos.y - i * 15 }] }, s); }
+  } else { await send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [pos] }, s); }
+  await sleep(80);
   await send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] }, s); await sleep(5000);
   console.log("tiktest klaar", JSON.stringify(pos)); await send("Target.closeTarget", { targetId }); process.exit(0);
 }
