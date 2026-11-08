@@ -348,6 +348,7 @@ function Bronregel({ data }: { data: TakenData }) {
 /** De Taken-tab in de zijbalk: alles, gegroepeerd. */
 export function TakenLijst({ onOpenSession, onMeldingen = () => window.dispatchEvent(new Event(MELDINGEN_EVENT)), smal, zoek = "" }: { onOpenSession?: (sid: string) => void; onMeldingen?: () => void; smal?: boolean; zoek?: string }) {
   const { data, fout, zet } = useTaken();
+  const telling = useTakenTelling();
   const [meldingenOpen, setMeldingenOpen] = useState(false);
   const [weg, setWeg] = useState<Set<string>>(() => new Set());
   const verberg = useCallback((id: string) => setWeg(w => new Set(w).add(id)), []);
@@ -362,11 +363,12 @@ export function TakenLijst({ onOpenSession, onMeldingen = () => window.dispatchE
       <Kop aantal={delen.open.length}>Voor jou</Kop>
       {delen.open.length ? <ul>{delen.open.map(t => <TaakOfKeuze key={t.id} taak={t} zet={zet} verberg={verberg} onOpenSession={onOpenSession} />)}</ul>
         : <p className="py-2 text-sm text-muted-foreground">Niets dat op jou wacht.</p>}
-      {delen.meldingen.length > 0 && onMeldingen && (
+      {(delen.meldingen.length > 0 || telling.meldingen > 0) && onMeldingen && (
         <button type="button" onClick={onMeldingen}
           className="taken-meldingen-link mt-3 flex min-h-10 w-full items-center gap-2 rounded-md border border-border/70 px-3 text-left text-sm hover:bg-muted focus-visible:outline-2 focus-visible:outline-primary">
           <span className="font-medium">Bezos</span>
-          <span className="tabular-nums text-muted-foreground">{delen.meldingen.length}</span>
+          {/* Zelfde getal als de Taken-teller: alleen wat een keuze vraagt, niet ter info. */}
+          {telling.meldingen > 0 ? <span className="tabular-nums text-muted-foreground">{telling.meldingen}</span> : null}
           <span className="ml-auto text-xs text-muted-foreground">openen</span>
         </button>
       )}

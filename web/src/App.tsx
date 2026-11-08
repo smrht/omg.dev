@@ -8537,8 +8537,17 @@ export function App() {
         }),
       });
       if (res.sessionId) markCreatedSid(res.sessionId);
+      // agentbox (08-11-2026): zonder dit bleef de bevinding open op de server. Bezos
+      // verborg de kaart alleen lokaal en de Taken-teller bleef hem meetellen.
+      const ids = new Set(scopeFindings.map((f) => f.id));
+      setFindings((prev) => prev.filter((x) => !ids.has(x.id)));
+      await Promise.all(scopeFindings.map((f) => api(`/api/auto/findings/${f.id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "session", ...(res.sessionId ? { sessionId: res.sessionId } : {}) }),
+      }).catch(() => undefined)));
       setTab("live");
-      await refreshSessions();
+      await Promise.all([refreshSessions(), refreshAuto()]);
       toast.success(
         `Started triage & execute for ${scopeFindings.length} finding${scopeFindings.length === 1 ? "" : "s"}`,
       );
