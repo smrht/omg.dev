@@ -277,6 +277,17 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?")[0]
+        if path == "/api/taken/perf":
+            # Meting van de terugswipe op Sams iPhone (08-11-2026): alleen aanvullen, max 8 KB per regel.
+            raw = self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 8192))
+            try:
+                rec = json.loads(raw or b"{}")
+            except Exception:
+                return self._send(400, {"error": "geen geldige json"})
+            rec["ontvangen"] = datetime.now(timezone.utc).isoformat()
+            with open(STATE / "perf.jsonl", "a") as f:
+                f.write(json.dumps(rec, ensure_ascii=False)[:8192] + "\n")
+            return self._send(200, {"ok": True})
         if path == "/api/taken/verversen":
             with LOCK:
                 if running["p"] is None or running["p"].poll() is not None:

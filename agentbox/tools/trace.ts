@@ -31,7 +31,10 @@ const evs: any[] = [];
 ws.addEventListener("message", e => { const m = JSON.parse(String(e.data)); if (m.method === "Tracing.dataCollected") evs.push(...m.params.value); });
 const klaar = new Promise(r => ws.addEventListener("message", e => { if (JSON.parse(String(e.data)).method === "Tracing.tracingComplete") r(0); }));
 await send("Tracing.start", { categories: "devtools.timeline,disabled-by-default-devtools.timeline,blink", transferMode: "ReportEvents" });
-await ev(`(async()=>{ document.querySelector('[role=dialog] button[aria-label="Close session details"]').click(); await new Promise(r=>setTimeout(r,${process.env.WACHT ?? 3000})); })()`);
+// CLOSE=back: zoals terugswipen op iOS (history.back -> popstate) in plaats van de sluitknop.
+const sluit = process.env.CLOSE === "back" ? "history.back()" : `document.querySelector('[role=dialog] button[aria-label="Close session details"]').click()`;
+await ev(`(async()=>{ window.__t0=performance.now(); ${sluit}; await new Promise(r=>setTimeout(r,${process.env.WACHT ?? 3000})); })()`);
+console.log("rij-zichtbaar", await ev(`(()=>{const r=[...document.querySelectorAll("[data-overview-row]")].filter(e=>e.offsetParent).length; const d=!!document.querySelector("[data-session-ready=true]"); return {rijen:r, chatNogOpen:d, url:location.pathname+location.hash}})()`));
 await send("Tracing.end"); await klaar;
 const agg = new Map<string, [number, number]>();
 for (const e of evs) if (e.ph === "X" && e.dur) { const k = e.name; const v = agg.get(k) ?? [0, 0]; v[0] += e.dur; v[1]++; agg.set(k, v); }

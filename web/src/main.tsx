@@ -18,6 +18,7 @@ import { configureOmgTransport } from "./lib/omg-client";
 import { activeMachine, isLocalMachine, machineTransport } from "./lib/machines";
 import { registerExtension } from "./lib/extensions";
 import { installErrorReporting } from "./lib/report-error";
+import { installTerugMeting } from "./lib/terug-meting";
 import { AppDialogProvider } from "@/components/ui/app-dialog";
 import {
   applyTheme,
@@ -38,6 +39,7 @@ import { applyFont, FONT_CHANGE_EVENT, FONT_STORAGE_KEY } from "./lib/font";
 // backend (which surfaces a finding/push and dispatches an auto-fix agent).
 // Installed first so an early-boot throw is still caught.
 installErrorReporting();
+installTerugMeting();
 
 // Runtime extension host. We expose the host's React (so external extension
 // bundles share ONE React instead of bundling their own — hooks break with two)

@@ -19229,6 +19229,9 @@ function SessionTitleSheet({
     };
     const onStart = (e: TouchEvent) => {
       if (closingRef.current || e.touches.length !== 1) return;
+      // agentbox: a pan from the left edge is iOS's own swipe-back. Leave it to
+      // the browser instead of also dragging the transcript toward prevSid.
+      if ((e.touches[0]?.clientX ?? 99) < 24) return;
       const target = e.target instanceof Element ? e.target : null;
       const startedInComposer = !!target?.closest("form");
       if (startedInComposer) {
@@ -19282,13 +19285,19 @@ function SessionTitleSheet({
     };
     body.addEventListener("touchstart", onStart, { passive: true });
     body.addEventListener("touchmove", onMove, { passive: false });
+    // agentbox: a cancelled touch (the OS took the gesture over) never commits a switch.
+    const onCancel = () => {
+      if (!st.active) return;
+      st.active = false;
+      if (st.horizontal) release(true);
+    };
     body.addEventListener("touchend", onEnd, { passive: true });
-    body.addEventListener("touchcancel", onEnd, { passive: true });
+    body.addEventListener("touchcancel", onCancel, { passive: true });
     return () => {
       body.removeEventListener("touchstart", onStart);
       body.removeEventListener("touchmove", onMove);
       body.removeEventListener("touchend", onEnd);
-      body.removeEventListener("touchcancel", onEnd);
+      body.removeEventListener("touchcancel", onCancel);
     };
   }, [go, navigationPrefs.swipeBetweenChats, prevSid, nextSid]);
 
