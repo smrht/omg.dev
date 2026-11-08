@@ -12,7 +12,7 @@ const { result: { targetId } } = await send("Target.createTarget", { url: "about
 const { result: { sessionId: s } } = await send("Target.attachToTarget", { targetId, flatten: true });
 await send("Page.enable", {}, s); await send("Runtime.enable", {}, s);
 const ev = async (expr: string) => { const r = await send("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true }, s); return r.result?.result?.value ?? r.result?.exceptionDetails?.exception?.description; };
-await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
+await send("Emulation.setDeviceMetricsOverride", { width: Number(process.env.BREED ?? 1440), height: 900, deviceScaleFactor: 1, mobile: false }, s);
 await send("Page.navigate", { url }, s); await sleep(2500);
 await ev(`localStorage.setItem("lfg_user","contactexpertly@gmail.com");localStorage.setItem("lfg_v2_user_filter","contactexpertly@gmail.com");1`);
 await send("Page.navigate", { url }, s); await sleep(7000);
@@ -26,10 +26,14 @@ if (process.env.VIA_SESSIE) {
   await sleep(2500);
   console.log("tussen", await ev(ta));
 }
+if (process.env.RAILTAKEN) {
+  console.log("railtab", await ev(`(()=>{const b=[...document.querySelectorAll("button,[role=tab]")].find(b=>/^Taken/.test(b.textContent.trim())&&b.offsetParent); b&&b.click(); return b?b.textContent.trim():null})()`));
+  await sleep(2000);
+}
 console.log("knoppen", await ev(`[...document.querySelectorAll('button[aria-label^="Opdracht geven"]')].filter(b=>b.offsetParent).length`));
-await ev(`(()=>{ window.__fouten=[]; window.addEventListener('error',e=>window.__fouten.push(String(e.message))); const b=[...document.querySelectorAll('button[aria-label^="Opdracht geven"]')].filter(b=>b.offsetParent)[0]; b && b.click(); return !!b })()`);
+console.log("geklikt", await ev(`(()=>{ window.__fouten=[]; window.__ev=0; window.addEventListener('agentbox-opdracht',()=>window.__ev++); window.addEventListener('click',e=>{window.__klik=(e.target.closest('button')||{}).outerHTML?.slice(0,160)},true); window.addEventListener('error',e=>window.__fouten.push(String(e.message))); const b=[...document.querySelectorAll('button[aria-label^="Opdracht geven"]')].filter(b=>b.offsetParent)[${Number(process.env.KNOP ?? 0)}]; b && b.click(); return b ? b.getAttribute("aria-label")+" | "+b.className.slice(0,40) : "geen" })()`));
 await sleep(3200);
-console.log("na", await ev(ta), await ev(`location.pathname`), await ev(`JSON.stringify(window.__fouten)`));
+console.log("na", await ev(`JSON.stringify({ev:window.__ev, klik:window.__klik, dialoog:!!document.querySelector("[role=dialog]"), drawer:[...document.querySelectorAll("[data-vaul-drawer]")].length})`), await ev(ta), await ev(`location.pathname`), await ev(`JSON.stringify(window.__fouten)`));
 await send("Page.captureScreenshot", { format: "png" }, s).then(r => Bun.write("/home/agent/.cache/agent-tmp/opdracht-desktop.png", Buffer.from(r.result.data, "base64")));
 await send("Target.closeTarget", { targetId });
 process.exit(0);

@@ -18,7 +18,7 @@ import { configureOmgTransport } from "./lib/omg-client";
 import { activeMachine, isLocalMachine, machineTransport } from "./lib/machines";
 import { registerExtension } from "./lib/extensions";
 import { installErrorReporting } from "./lib/report-error";
-import { installTerugMeting } from "./lib/terug-meting";
+import { installOpdrachtKlikMeting, installTerugMeting } from "./lib/terug-meting";
 import { AppDialogProvider } from "@/components/ui/app-dialog";
 import {
   applyTheme,
@@ -40,6 +40,7 @@ import { applyFont, FONT_CHANGE_EVENT, FONT_STORAGE_KEY } from "./lib/font";
 // Installed first so an early-boot throw is still caught.
 installErrorReporting();
 installTerugMeting();
+installOpdrachtKlikMeting();
 // agentbox (08-11-2026): de app scrollt in eigen containers (scrollY = 0), dus het
 // browser-scrollherstel heeft niets te doen. Blijft staan; of dit de iOS-terugswipe-
 // hapering oploste is niet los bewezen (zie lib/terug-meting.ts, ronde 1-3).

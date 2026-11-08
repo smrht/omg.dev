@@ -211,3 +211,28 @@ export function installTerugMeting() {
     }).observe({ type: "longtask", buffered: false });
   } catch {}
 }
+
+// agentbox (08-11-2026): "Opdracht geven doet niks" in Sams desktop-Firefox, terwijl een
+// schone Firefox 159 het wel doet. Meldt per druk op die knop: welke build, of pointerdown
+// en click aankomen, en of er iets bovenop de knop ligt dat de klik opvangt.
+const BUILD = (() => { try { return new URL(import.meta.url).pathname.split("/").pop() ?? "?"; } catch { return "?"; } })();
+export function meldOpdrachtKlik(fase: string, extra: Record<string, unknown> = {}) {
+  const body = JSON.stringify({ soort: "opdrachtklik", fase, build: BUILD, breed: window.innerWidth, pad: location.pathname, ua: navigator.userAgent.slice(0, 160), ...extra });
+  try { navigator.sendBeacon?.("/api/taken/perf", new Blob([body], { type: "application/json" })); } catch {}
+}
+export function installOpdrachtKlikMeting() {
+  if (typeof window === "undefined") return;
+  const label = (el: Element | null) => (el?.getAttribute("aria-label") ?? "").slice(0, 60);
+  window.addEventListener("pointerdown", (e) => {
+    const el = e.target instanceof Element ? e.target : null;
+    const knop = el?.closest('[aria-label^="Opdracht geven"]') ?? null;
+    if (knop) return meldOpdrachtKlik("pointerdown", { knop: label(knop), stage: !!knop.closest("[data-testid='new-session-stage']") });
+    // Ligt er een Opdracht-knop onder het element dat de klik kreeg? Dan vangt iets hem af.
+    const onder = document.elementsFromPoint(e.clientX, e.clientY).find(n => n.closest('[aria-label^="Opdracht geven"]'));
+    if (onder) meldOpdrachtKlik("bedekt", { knop: label(onder.closest('[aria-label^="Opdracht geven"]')), boven: naam(el), boven2: naam(el?.parentElement ?? null) });
+  }, true);
+  window.addEventListener("click", (e) => {
+    const knop = e.target instanceof Element ? e.target.closest('[aria-label^="Opdracht geven"]') : null;
+    if (knop) meldOpdrachtKlik("click", { knop: label(knop), trusted: e.isTrusted });
+  }, true);
+}

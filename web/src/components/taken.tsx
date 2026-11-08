@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExtern
 import { agentboxConfig } from "@/lib/agentbox-config";
 import { Check, ChevronDown, Clock, CornerDownRight, ExternalLink, Eye, Loader2, MessageSquare, Pause, Play, RotateCcw, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { meldOpdrachtKlik } from "@/lib/terug-meting";
 import { useAskOptional, stripMd, type Question } from "@/components/ask-center";
 
 // Taken: wat er voor Sam ligt, automatisch verzameld uit mail, gesprekken en
@@ -111,7 +112,14 @@ function meetOpdracht() {
 }
 
 export function geefOpdracht(t: Taak) {
-  wachtend = { ids: [t.id], tekst: opdrachtTekst(t) };
+  meldOpdrachtKlik("handler", { id: t.id.slice(0, 40) });
+  try {
+    wachtend = { ids: [t.id], tekst: opdrachtTekst(t) };
+  } catch (e) {
+    // Mag nooit stil falen: zonder tijd/label toch de opdracht klaarzetten.
+    meldOpdrachtKlik("fout", { fout: String(e).slice(0, 200) });
+    wachtend = { ids: [t.id], tekst: `${t.titel}\n${t.link ?? ""}\n\nOpdracht: ` };
+  }
   meetOpdracht();
   window.dispatchEvent(new Event(OPDRACHT_EVENT));
 }
