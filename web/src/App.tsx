@@ -2,6 +2,7 @@ import { OverviewToolbar, useOverviewPreferences, buildOverviewGroups, flattenOv
 import { agentboxConfig, greetingName } from "./lib/agentbox-config";
 import { applyStopOverrides, clearStopped, markStopped, useStopOverrideVersion } from "./lib/stop-override";
 import { TakenLijst, TakenVandaag, BezosPagina, zetBevindingenAantal, bevindingIsInfo, zetModelBron, type ModelKeus, MELDINGEN_EVENT, OPDRACHT_EVENT, neemOpdracht, heeftOpdracht, opdrachtVerstuurd } from "./components/taken";
+import { meetVeegSluiten } from "./lib/terug-meting";
 import { type WorkspaceSummary } from "./components/desktop-workspace";
 import { SessionUsageControls } from "./components/session-usage-controls";
 import { WorkspaceFindingsMenu } from "./components/workspace-findings";
@@ -6271,7 +6272,7 @@ export function App() {
   const openSessionPage = useCallback(
     (sid: string) => {
       if (!sid) return;
-      void navigate({ to: sessionToPath(sid), search: keepHostSearch });
+      void navigate({ to: sessionToPath(sid), search: keepHostSearch, replace: STANDALONE_TOUCH });
     },
     [navigate, keepHostSearch],
   );
@@ -6301,7 +6302,7 @@ export function App() {
     return () => registerSessionRefHandlers(null);
   }, [openSessionPage]);
   const closeSessionPage = useCallback(() => {
-    void navigate({ to: "/", search: keepHostSearch });
+    void navigate({ to: "/", search: keepHostSearch, replace: STANDALONE_TOUCH });
   }, [navigate, keepHostSearch]);
   const selectedBotConversationId = selectedBotId ? routeSearch.conversation ?? null : null;
   // A terminal is on screen — as the Terminal tab, or pulled up over any tab.
@@ -18290,6 +18291,21 @@ function SessionTitleInlineEditor({
 // close). The body content cross-fades in once the panel has mostly expanded so
 // the squished mid-morph layout is never seen.
 const SHEET_EASE = "cubic-bezier(0.32, 0.72, 0, 1)";
+// agentbox (08-11-2026): in de iPhone-app (standalone) toont iOS bij terugvegen een
+// stilstaande schermafbeelding die ~400 ms tot seconden blijft staan, terwijl de app
+// eronder al klaar is (terugmeting ronde 4: bericht 1-2 ms, eerste frame 380-410 ms,
+// lijst scrolde onder het bevroren beeld). Daarom opent een chat daar zonder eigen
+// history-stap (niets voor iOS om terug te vegen) en sluit een veeg vanaf de rand
+// de chat met onze eigen animatie.
+const STANDALONE_TOUCH = (() => {
+  try {
+    const sa = window.matchMedia("(display-mode: standalone)").matches || !!(navigator as { standalone?: boolean }).standalone
+      || localStorage.getItem("ab_test_standalone") === "1"; // alleen voor agentbox/tools/randveeg-test.ts
+    return sa && window.matchMedia("(pointer: coarse)").matches;
+  } catch {
+    return false;
+  }
+})();
 const SHEET_MS = 420;
 const CLOSE_MS = 260;
 
@@ -19211,6 +19227,86 @@ function SessionTitleSheet({
       { duration: 150, easing: "ease-out" },
     );
   }, [sid]);
+
+  // agentbox: veeg vanaf de linkerrand sluit de chat (alleen standalone, zie
+  // STANDALONE_TOUCH). Het paneel volgt de vinger; los na genoeg afstand of vaart
+  // schuift het weg en sluit, anders veert het terug.
+  useEffect(() => {
+    if (!STANDALONE_TOUCH) return;
+    const panel = panelRef.current;
+    if (!panel) return;
+    const st = { aan: false, beslist: false, x0: 0, y0: 0, dx: 0, t0: 0 };
+    const backdrop = () => backdropRef.current;
+    const zet = (px: number) => {
+      panel.style.transition = "none";
+      panel.style.transform = px ? `translateX(${px}px)` : "";
+      const b = backdrop();
+      if (b) b.style.opacity = String(Math.max(0, 1 - px / (window.innerWidth || 1)));
+    };
+    const onStart = (e: TouchEvent) => {
+      if (closingRef.current || e.touches.length !== 1) return;
+      const p = e.touches[0];
+      if (!p || p.clientX >= 24) return;
+      // De open-animaties staan op fill:both en zouden de inline transform overschrijven;
+      // hun eindstand is de rusttoestand, dus opheffen verandert niets aan het beeld.
+      panel.getAnimations().forEach((a) => a.cancel());
+      backdrop()?.getAnimations().forEach((a) => a.cancel());
+      Object.assign(st, { aan: true, beslist: false, x0: p.clientX, y0: p.clientY, dx: 0, t0: performance.now() });
+      e.stopPropagation();
+    };
+    const onMove = (e: TouchEvent) => {
+      if (!st.aan) return;
+      const p = e.touches[0];
+      if (!p) return;
+      const dx = p.clientX - st.x0;
+      const dy = p.clientY - st.y0;
+      if (!st.beslist) {
+        if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+        st.beslist = true;
+        if (Math.abs(dy) > Math.abs(dx) || dx < 0) { st.aan = false; return; }
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      st.dx = Math.max(0, dx);
+      zet(st.dx);
+    };
+    const onEnd = () => {
+      if (!st.aan) return;
+      st.aan = false;
+      if (!st.beslist) return;
+      const vw = window.innerWidth || 1;
+      const vaart = st.dx / Math.max(1, performance.now() - st.t0);
+      if (st.dx > vw * 0.33 || (st.dx > 40 && vaart > 0.5)) {
+        closingRef.current = true;
+        haptic("selection");
+        meetVeegSluiten();
+        panel.style.transition = "transform 200ms cubic-bezier(0.22,1,0.36,1)";
+        panel.style.transform = `translateX(${vw}px)`;
+        const b = backdrop();
+        if (b) { b.style.transition = "opacity 200ms ease-out"; b.style.opacity = "0"; }
+        let klaar = false;
+        const sluit = () => { if (!klaar) { klaar = true; onClose(); } };
+        panel.addEventListener("transitionend", sluit, { once: true });
+        window.setTimeout(sluit, 260);
+      } else {
+        panel.style.transition = "transform 180ms cubic-bezier(0.22,1,0.36,1)";
+        panel.style.transform = "";
+        const b = backdrop();
+        if (b) { b.style.transition = "opacity 180ms ease-out"; b.style.opacity = ""; }
+      }
+    };
+    panel.addEventListener("touchstart", onStart, { capture: true, passive: true });
+    panel.addEventListener("touchmove", onMove, { capture: true, passive: false });
+    panel.addEventListener("touchend", onEnd, { capture: true, passive: true });
+    panel.addEventListener("touchcancel", onEnd, { capture: true, passive: true });
+    return () => {
+      panel.removeEventListener("touchstart", onStart, { capture: true });
+      panel.removeEventListener("touchmove", onMove, { capture: true });
+      panel.removeEventListener("touchend", onEnd, { capture: true });
+      panel.removeEventListener("touchcancel", onEnd, { capture: true });
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Swipe the session body or composer left/right to switch sessions. Horizontal
   // drags move the whole transcript with the finger; releasing past the threshold

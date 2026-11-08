@@ -1,0 +1,36 @@
+// iPhone-app (standalone) nabootsen: chat openen zonder history-stap, sluiten met randveeg.
+const cdp = process.env.AGENTBOX_TEST_CDP!;
+const [url] = process.argv.slice(2);
+const list = await (await fetch(`${cdp}/json/version`)).json();
+const ws = new WebSocket(list.webSocketDebuggerUrl);
+await new Promise(r => ws.addEventListener("open", r, { once: true }));
+let id = 0; const wait = new Map<number, (v: any) => void>();
+ws.addEventListener("message", e => { const m = JSON.parse(String(e.data)); if (m.id && wait.has(m.id)) { wait.get(m.id)!(m); wait.delete(m.id); } });
+const send = (method: string, params: any = {}, sessionId?: string) => new Promise<any>(r => { const i = ++id; wait.set(i, r); ws.send(JSON.stringify({ id: i, method, params, sessionId })); });
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+const { result: { targetId } } = await send("Target.createTarget", { url: "about:blank" });
+const { result: { sessionId: s } } = await send("Target.attachToTarget", { targetId, flatten: true });
+await send("Page.enable", {}, s); await send("Runtime.enable", {}, s);
+const ev = async (expr: string) => { const r = await send("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true }, s); return r.result?.result?.value ?? r.result?.exceptionDetails?.exception?.description; };
+await send("Emulation.setDeviceMetricsOverride", { width: 402, height: 874, deviceScaleFactor: 3, mobile: true }, s);
+await send("Emulation.setTouchEmulationEnabled", { enabled: true }, s);
+const sa = process.env.GEEN_SA ? [] : [{ name: "display-mode", value: "standalone" }];
+await send("Emulation.setEmulatedMedia", { features: [...sa, { name: "pointer", value: "coarse" }] }, s);
+await send("Page.navigate", { url }, s); await sleep(2500);
+await ev(`localStorage.setItem("lfg_user","contactexpertly@gmail.com");localStorage.setItem("lfg_v2_user_filter","contactexpertly@gmail.com");${process.env.GEEN_SA ? 'localStorage.removeItem("ab_test_standalone")' : 'localStorage.setItem("ab_test_standalone","1")'};1`);
+await send("Page.navigate", { url }, s); await sleep(7000);
+const stand = `JSON.stringify({pad:location.pathname, hist:history.length, dialoog:!!document.querySelector('[role=dialog][aria-modal=true]'), sa:localStorage.getItem('ab_test_standalone')})`;
+console.log("start", await ev(stand));
+await ev(`(()=>{const r=[...document.querySelectorAll("[data-overview-row]")].filter(e=>e.offsetParent)[2]; r&&r.click(); return !!r})()`);
+await sleep(2500);
+console.log("open", await ev(stand));
+const tik = (type: string, x: number, y: number) => send("Input.dispatchTouchEvent", { type, touchPoints: type === "touchEnd" ? [] : [{ x, y }] }, s);
+await tik("touchStart", 6, 420);
+for (let x = 20; x <= 260; x += 20) { await tik("touchMove", x, 424); await sleep(16); }
+console.log("tijdens", await ev(`(document.querySelector('[role=dialog][aria-modal=true]')||{style:{}}).style.transform`));
+await tik("touchEnd", 260, 424);
+await sleep(700);
+console.log("na", await ev(stand));
+await sleep(5200);
+await send("Target.closeTarget", { targetId });
+process.exit(0);

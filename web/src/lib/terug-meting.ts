@@ -5,7 +5,7 @@
 // binnenkomt. Eén regel per keer naar /api/taken/perf. Alleen op aanraakschermen.
 
 type Meting = {
-  soort: "terug" | "knop";
+  soort: "terug" | "knop" | "veeg";
   van: string;
   t0: number;
   nodes: number;
@@ -124,6 +124,12 @@ function verstuur(m: Meting) {
       void fetch("/api/taken/perf", { method: "POST", body, headers: { "content-type": "application/json" }, keepalive: true });
     }
   } catch {}
+}
+
+/** Eigen randveeg sluit de chat (standalone, zonder history-stap): zelfde meting. */
+export function meetVeegSluiten() {
+  if (typeof window === "undefined" || !window.matchMedia?.("(pointer: coarse)").matches) return;
+  start("veeg");
 }
 
 export function installTerugMeting() {
