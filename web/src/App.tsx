@@ -19154,6 +19154,7 @@ function SessionTitleSheet({
   const idx = order.indexOf(sid);
   const prevSid = idx > 0 ? order[idx - 1] : null;
   const nextSid = idx >= 0 && idx < order.length - 1 ? order[idx + 1] : null;
+  const goVangnetRef = useRef(0);
   const go = useCallback(
     (target: string | null) => {
       if (!target || closingRef.current) return;
@@ -19171,7 +19172,8 @@ function SessionTitleSheet({
         body.style.transform = "";
         body.style.opacity = "0";
         // Vangnet: wisselt de sessie om wat voor reden ook niet, nooit leeg laten staan.
-        window.setTimeout(() => { if (body.style.opacity === "0") body.style.opacity = ""; }, 800);
+        window.clearTimeout(goVangnetRef.current);
+        goVangnetRef.current = window.setTimeout(() => { if (body.style.opacity === "0") body.style.opacity = ""; }, 800);
       }
       onSwitch(target);
     },
@@ -19494,9 +19496,10 @@ function SessionTitleSheet({
     };
     inAnim.onfinish = klaar;
     inAnim.oncancel = klaar;
-    // Op ~55% van de tijd staat het paneel al ~95% binnen (ease-out); vanaf daar mag de
-    // mount de main thread pakken. Eerder = berichten sneller, later = gegarandeerd vloeiend.
-    const vroeg = window.setTimeout(klaar, Math.round(SLIDE_IN_MS * 0.55));
+    // Op 85% van de tijd staat het paneel nog ~3 px van de rand; een stilstand van de
+    // main thread is daar onzichtbaar. Op 55% (20 px) stokte de inschuif op de testbox
+    // 180-230 ms zichtbaar, dus niet eerder.
+    const vroeg = window.setTimeout(klaar, Math.round(SLIDE_IN_MS * 0.85));
     const vangnet = window.setTimeout(klaar, SLIDE_IN_MS + 150);
     backdrop?.animate([{ opacity: 0 }, { opacity: SHEET_DIM }], { duration: SLIDE_IN_MS, easing: SLIDE_EASE, fill: "both" });
     document.getElementById("root")?.animate(

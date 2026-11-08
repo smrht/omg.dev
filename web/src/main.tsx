@@ -132,7 +132,9 @@ requestAnimationFrame(() => {
 //
 // Update policy: never hard-reload an active session. Reload only when the user
 // taps Reload on the toast, or automatically on cold open when a worker is
-// already waiting from a previous visit.
+// already waiting from a previous visit. agentbox: plus, in a plain browser tab
+// only, a silent reload while the tab is hidden and no field holds text
+// (herlaadStilBijVerbergen).
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     void registerServiceWorker();
@@ -155,7 +157,44 @@ function activateUpdate(worker: ServiceWorker) {
   window.location.reload();
 }
 
+// agentbox (08-11-2026, weekretro): een gewone browsertab (geen geïnstalleerde app)
+// bleef dagen op een oude bundle met alleen deze toast; "Opdracht geven" deed daardoor
+// niks in Sams Firefox. Zo'n tab herlaadt zichzelf nu zodra hij verborgen is én er
+// geen tekst in een invoerveld staat. Zichtbaar blijft de toast; dan gebeurt het bij
+// de eerstvolgende keer verbergen. De iOS-app (standalone) houdt cold-open adopt:
+// daar zou herladen op de achtergrond bij terugkeer midden in gebruik vallen.
+function isStandalone(): boolean {
+  return (
+    window.matchMedia?.("(display-mode: standalone)").matches === true ||
+    (navigator as { standalone?: boolean }).standalone === true
+  );
+}
+
+function heeftOnverzondenTekst(): boolean {
+  for (const el of document.querySelectorAll<HTMLTextAreaElement | HTMLInputElement>("textarea, input[type=text], input:not([type])")) {
+    if (el.value.trim()) return true;
+  }
+  for (const el of document.querySelectorAll<HTMLElement>("[contenteditable=true], [contenteditable='']")) {
+    if ((el.textContent ?? "").trim()) return true;
+  }
+  return false;
+}
+
+let stilHerladenAan = false;
+function herlaadStilBijVerbergen(worker: ServiceWorker) {
+  if (stilHerladenAan || isStandalone()) return;
+  stilHerladenAan = true;
+  const probeer = () => {
+    if (!document.hidden || heeftOnverzondenTekst()) return;
+    document.removeEventListener("visibilitychange", probeer);
+    activateUpdate(worker);
+  };
+  document.addEventListener("visibilitychange", probeer);
+  probeer();
+}
+
 function promptUpdate(worker: ServiceWorker) {
+  herlaadStilBijVerbergen(worker);
   toast("A new version of omg is available", {
     description: "Reload to get the latest.",
     duration: Infinity,
