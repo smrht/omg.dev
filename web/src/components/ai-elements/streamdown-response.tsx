@@ -13,55 +13,63 @@ export { CopyableMarkdownLink } from "./markdown-links";
 
 type StreamdownPlugins = NonNullable<ComponentProps<typeof Streamdown>["plugins"]>;
 
-let extraPlugins: Partial<StreamdownPlugins> | null = null;
-let extraPluginsPromise: Promise<void> | null = null;
+// agentbox (08-11-2026): math en mermaid apart laden. Samen in één Promise.all
+// haalde elke chat met een "\(" of een regel die met "graph"/"pie"/"timeline"
+// begint ook de mermaid-chunk binnen (download + ~50 ms parse op de testbox),
+// terwijl Streamdown alleen een ```mermaid-blok als diagram tekent.
+type Extra = "math" | "mermaid";
+const extraLoaded: Partial<StreamdownPlugins> = {};
+const extraPromises: Partial<Record<Extra, Promise<void>>> = {};
 const extraPluginsListeners = new Set<() => void>();
 
-function needsExtraPlugins(value: unknown): boolean {
-  if (typeof value !== "string") return false;
-  return /```(?:mermaid|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|journey|gantt|pie|gitGraph|mindmap|timeline|quadrantChart|xychart|block-beta|architecture-beta|packet-beta)\b/i.test(value)
-    || /(^|\n)\s*(?:graph|flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|journey|gantt|pie|gitGraph|mindmap|timeline|quadrantChart)\b/.test(value)
-    || /(^|[^\\])(\$\$|\\\(|\\\[)/.test(value);
+function neededExtras(value: unknown): Extra[] {
+  if (typeof value !== "string") return [];
+  const out: Extra[] = [];
+  if (/(^|[^\\])(\$\$|\\\(|\\\[)/.test(value)) out.push("math");
+  if (/```mermaid\b/i.test(value)) out.push("mermaid");
+  return out;
 }
 
-function loadExtraPlugins(): Promise<void> {
-  if (!extraPluginsPromise) {
-    extraPluginsPromise = Promise.all([
-      import("@streamdown/math"),
-      import("@streamdown/mermaid"),
-    ])
-      .then(([mathMod, mermaidMod]) => {
-        extraPlugins = { math: mathMod.math, mermaid: mermaidMod.mermaid };
-        for (const notify of extraPluginsListeners) notify();
-      })
-      .catch(() => {
-        extraPluginsPromise = null;
-      });
+function loadExtra(name: Extra): Promise<void> {
+  if (!extraPromises[name]) {
+    const imp = name === "math"
+      ? import("@streamdown/math").then((m) => { extraLoaded.math = m.math; })
+      : import("@streamdown/mermaid").then((m) => { extraLoaded.mermaid = m.mermaid; });
+    extraPromises[name] = imp
+      .then(() => { for (const notify of extraPluginsListeners) notify(); })
+      .catch(() => { delete extraPromises[name]; });
   }
-  return extraPluginsPromise;
+  return extraPromises[name]!;
+}
+
+function pickExtras(names: Extra[]): Partial<StreamdownPlugins> | null {
+  const out: Partial<StreamdownPlugins> = {};
+  let any = false;
+  for (const n of names) if (extraLoaded[n]) { (out as Record<string, unknown>)[n] = extraLoaded[n]; any = true; }
+  return any ? out : null;
 }
 
 function useStreamdownPlugins(children: unknown): StreamdownPlugins {
-  const shouldLoadExtra = needsExtraPlugins(children);
-  const [extra, setExtra] = useState<Partial<StreamdownPlugins> | null>(
-    shouldLoadExtra ? extraPlugins : null,
-  );
+  const names = neededExtras(children);
+  const sleutel = names.join(",");
+  const [extra, setExtra] = useState<Partial<StreamdownPlugins> | null>(() => pickExtras(names));
   useEffect(() => {
-    if (!shouldLoadExtra) {
+    const lijst = sleutel ? (sleutel.split(",") as Extra[]) : [];
+    if (!lijst.length) {
       setExtra(null);
       return;
     }
-    if (extraPlugins) {
-      setExtra(extraPlugins);
+    const notify = () => setExtra(pickExtras(lijst));
+    if (lijst.every((n) => extraLoaded[n])) {
+      notify();
       return;
     }
-    const notify = () => setExtra(extraPlugins);
     extraPluginsListeners.add(notify);
-    void loadExtraPlugins();
+    for (const n of lijst) void loadExtra(n);
     return () => {
       extraPluginsListeners.delete(notify);
     };
-  }, [shouldLoadExtra]);
+  }, [sleutel]);
   return { cjk, code, ...(extra ?? {}) };
 }
 

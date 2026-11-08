@@ -19163,10 +19163,15 @@ function SessionTitleSheet({
       haptic("selection");
       const body = bodyRef.current;
       if (body) {
+        // agentbox: verborgen houden tot de nieuwe chat er staat; de crossfade
+        // (layout effect op sid) maakt hem weer zichtbaar. Anders zag je de oude
+        // chat terugspringen en ~100-170 ms stilstaan terwijl de nieuwe rendert.
         body.getAnimations().forEach((animation) => animation.cancel());
         body.style.transition = "";
         body.style.transform = "";
-        body.style.opacity = "";
+        body.style.opacity = "0";
+        // Vangnet: wisselt de sessie om wat voor reden ook niet, nooit leeg laten staan.
+        window.setTimeout(() => { if (body.style.opacity === "0") body.style.opacity = ""; }, 800);
       }
       onSwitch(target);
     },
@@ -19222,19 +19227,20 @@ function SessionTitleSheet({
   // Slide the newly selected session in from the side its card/page would occupy.
   // The entrance morph below handles the very first mount, so skip this once.
   const firstRef = useRef(true);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (firstRef.current) {
       firstRef.current = false;
       return;
     }
     const body = bodyRef.current;
     if (!body) return;
+    body.style.opacity = "";
     const dir = switchDirRef.current;
     switchDirRef.current = null;
     const reduceMotion =
       window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     if (!dir || reduceMotion) return;
-    const inbound = dir === 1 ? 18 : -18;
+    const inbound = dir === 1 ? 28 : -28;
     // Clear any inline transform/transition left by an in-progress swipe so the
     // transcript layout starts from a clean slate.
     body.getAnimations().forEach((animation) => animation.cancel());
@@ -19423,10 +19429,20 @@ function SessionTitleSheet({
       if (!horizontal) return;
       const target = dx > SWIPE_COMMIT ? prevSid : dx < -SWIPE_COMMIT ? nextSid : null;
       if (target) {
-        // The crossfade effect (on sid change) starts at opacity 0, so it both
-        // resets the drag transform and fades the new session in — no spring-back
-        // needed, and no transform "snap" is visible.
-        go(target);
+        // agentbox: eerst de oude chat in de veegrichting wegschuiven en vervagen
+        // (compositor), dan pas wisselen. De dure render valt zo in een leeg vlak.
+        const w = body.clientWidth || window.innerWidth || 1;
+        const from = body.style.transform || "translateX(0px)";
+        body.style.transition = "none";
+        let door = false;
+        const wissel = () => { if (!door) { door = true; go(target); } };
+        if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return wissel();
+        const uit = body.animate(
+          [{ transform: from, opacity: 1 }, { transform: `translateX(${dx * 0.5 + (dx < 0 ? -w : w) * 0.25}px)`, opacity: 0 }],
+          { duration: 130, easing: "cubic-bezier(0.22, 1, 0.36, 1)", fill: "forwards" },
+        );
+        uit.onfinish = wissel;
+        window.setTimeout(wissel, 200);
       } else {
         release(true); // nothing committed → ease back to rest
       }
@@ -19478,13 +19494,16 @@ function SessionTitleSheet({
     };
     inAnim.onfinish = klaar;
     inAnim.oncancel = klaar;
+    // Op ~55% van de tijd staat het paneel al ~95% binnen (ease-out); vanaf daar mag de
+    // mount de main thread pakken. Eerder = berichten sneller, later = gegarandeerd vloeiend.
+    const vroeg = window.setTimeout(klaar, Math.round(SLIDE_IN_MS * 0.55));
     const vangnet = window.setTimeout(klaar, SLIDE_IN_MS + 150);
     backdrop?.animate([{ opacity: 0 }, { opacity: SHEET_DIM }], { duration: SLIDE_IN_MS, easing: SLIDE_EASE, fill: "both" });
     document.getElementById("root")?.animate(
       [{ transform: "translateX(0px)" }, { transform: `translateX(${-SHEET_PARALLAX * 100}%)` }],
       { duration: SLIDE_IN_MS, easing: SLIDE_EASE },
     );
-    return () => window.clearTimeout(vangnet);
+    return () => { window.clearTimeout(vroeg); window.clearTimeout(vangnet); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   // Chat zachtjes laten verschijnen in plaats van ineens.
