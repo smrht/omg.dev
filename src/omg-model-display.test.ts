@@ -45,7 +45,7 @@ describe("omg model display", () => {
 
   test("claude family aliases show the release they resolve to", () => {
     expect(omgModelLabel("opus")).toBe("Opus 5.5");
-    expect(omgModelLabel("fable")).toBe("Fable 5.1");
+    expect(omgModelLabel("fable")).toBe("Fable 5.2");
     expect(omgModelLabel("sonnet")).toBe("Sonnet 5");
     expect(omgModelLabel("claude-sonnet-5-5")).toBe("Sonnet 5.5");
     expect(omgModelLabel("haiku")).toBe("Haiku 4.5");
@@ -82,7 +82,7 @@ describe("claude model display", () => {
       "Opus 5.5",
       "Opus 5.5",
       "Fable 5.1",
-      "Fable 5.1",
+      "Fable 5.2",
       "Sonnet 5",
       "Haiku 4.5",
       "Opus 4.8",

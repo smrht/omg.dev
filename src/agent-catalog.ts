@@ -41,6 +41,7 @@ export type SkillCatalogItem = {
 // 2026-09-24. They only order the picker, newest first. Add a row when a new
 // pinned id joins the list; an alias takes the newest date in its family.
 const CLAUDE_RELEASES: Record<string, string> = {
+  "claude-fable-5-2": "2026-11-09",
   "claude-haiku-5-5": "2026-10-07",
   "claude-sonnet-5-5": "2026-09-28",
   "claude-opus-5-5": "2026-09-21",
@@ -52,6 +53,9 @@ const CLAUDE_RELEASES: Record<string, string> = {
   "claude-haiku-4-5-20251001": "2025-10-15",
 };
 
+// 09-11-2026: Anthropic's model catalog (provider_alias_targets, read on
+// claude 2.1.321) moves `fable` to claude-fable-5-2; not measured with a
+// prompt to save Fable usage. Earlier note:
 // What each bare alias resolves to today (measured 2026-10-07 on claude
 // 2.1.293 with `claude -p --model <alias>`: sonnet -> claude-sonnet-5-5,
 // haiku -> claude-haiku-5-5). An alias sorts on the release it
@@ -60,7 +64,7 @@ const CLAUDE_RELEASES: Record<string, string> = {
 // Opus 5.5 just because claude-sonnet-5-5 is pinned.
 const CLAUDE_ALIAS_TARGETS: Record<string, string> = {
   opus: "claude-opus-5-5",
-  fable: "claude-fable-5-1",
+  fable: "claude-fable-5-2",
   sonnet: "claude-sonnet-5-5",
   haiku: "claude-haiku-5-5",
 };

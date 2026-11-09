@@ -2473,7 +2473,8 @@ export function modelAlias(id: string | null | undefined): string | null {
   // Haiku 5.5 has its own pinned picker row (07-10-2026), like Sonnet 5.5.
   if (/haiku-5[-.]5/.test(m)) return "claude-haiku-5-5";
   if (m.includes("haiku")) return "haiku";
-  // Since claude 2.1.280 the `fable` alias lands on Fable 5.1 itself, so every
+  // Since claude 2.1.280 the `fable` alias lands on the newest Fable (5.2 since
+  // 09-11-2026, claude >= 2.1.290), so every
   // fable id (5, 5-1, and whatever comes next) collapses to the one alias.
   if (m.includes("fable")) return "fable";
   return id;

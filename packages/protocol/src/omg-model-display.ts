@@ -107,7 +107,7 @@ export function parseOmgModel(id: string | null | undefined): OmgModelInfo | nul
  */
 export const CLAUDE_ALIAS_LABELS: Record<string, string> = {
   opus: "Opus 5.5",
-  fable: "Fable 5.1",
+  fable: "Fable 5.2",
   sonnet: "Sonnet 5",
   haiku: "Haiku 4.5",
 };

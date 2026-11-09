@@ -460,7 +460,7 @@ test("omg thinking levels follow the model: effort where OpenRouter honours it, 
 test("claude pickers carry only current releases: Haiku 5.5 and Sonnet 5.5 pins, opus and fable aliases", () => {
   for (const list of [CLAUDE_MODELS, AISDK_MODELS]) {
     // Newest release first; Sonnet 5 and Haiku 4.5 are gone (07-10-2026).
-    expect(list).toEqual(["claude-haiku-5-5", "claude-sonnet-5-5", "opus", "fable"]);
+    expect(list).toEqual(["fable", "claude-haiku-5-5", "claude-sonnet-5-5", "opus"]);
     expect(list).not.toContain("sonnet");
     expect(list).not.toContain("haiku");
     expect(list.filter((m) => m.includes("fable"))).toHaveLength(1);

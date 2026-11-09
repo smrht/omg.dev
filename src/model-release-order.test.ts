@@ -3,7 +3,7 @@ import { CLAUDE_MODELS, AISDK_MODELS, sortClaudeModelsByRelease } from "./agent-
 
 test("Claude pickers list the newest release first", () => {
   // Agentbox: Haiku 5.5 and Sonnet 5.5 pins plus the opus/fable aliases, newest first.
-  expect(CLAUDE_MODELS).toEqual(["claude-haiku-5-5", "claude-sonnet-5-5", "opus", "fable"]);
+  expect(CLAUDE_MODELS).toEqual(["fable", "claude-haiku-5-5", "claude-sonnet-5-5", "opus"]);
   expect(AISDK_MODELS).toEqual(CLAUDE_MODELS);
 });
 
@@ -19,11 +19,11 @@ test("an alias sorts on the release it lands on, not on a newer pin", () => {
 
 test("an alias takes its family's newest date and ties keep list order", () => {
   expect(sortClaudeModelsByRelease(["haiku", "sonnet", "fable", "claude-fable-5-1", "opus", "claude-opus-5-5"])).toEqual([
+    "fable",
     "haiku",
     "sonnet",
     "opus",
     "claude-opus-5-5",
-    "fable",
     "claude-fable-5-1",
   ]);
 });
