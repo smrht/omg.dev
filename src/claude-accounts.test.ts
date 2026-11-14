@@ -146,6 +146,31 @@ describe("Claude account registry", () => {
     expect(picked?.id).toBe(second.id);
   });
 
+  test("a spent per-model allowance does not make an account look exhausted", async () => {
+    root = mkdtempSync(join(tmpdir(), "lfg-claude-accounts-"));
+    process.env.HOME = join(root, "home");
+    process.env.LFG_CLAUDE_ACCOUNTS_PATH = join(root, "data", "accounts.json");
+    connect(join(process.env.HOME, ".claude"), "default-token");
+    const second = createClaudeAccount();
+    connect(claudeAccountConfigDir(second.id)!, "second-token");
+
+    const picked = await pickClaudeAccountForNewSession({
+      readCapacity: async (account) =>
+        account.id === second.id
+          ? {
+              available: true,
+              windows: [
+                { label: "5 hr", pct: 10 },
+                { label: "7 day", pct: 20 },
+                { label: "7 day · Fable", pct: 100 },
+              ],
+            }
+          : { available: true, windows: [{ label: "5 hr", pct: 30 }, { label: "7 day", pct: 60 }] },
+    });
+
+    expect(picked?.id).toBe(second.id);
+  });
+
   test("explicit account pins bypass capacity routing", async () => {
     root = mkdtempSync(join(tmpdir(), "lfg-claude-accounts-"));
     process.env.HOME = join(root, "home");

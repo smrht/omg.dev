@@ -46,8 +46,13 @@ export type ClaudeAccount = {
 
 export type ClaudeAccountCapacity = {
   available: boolean;
-  windows?: { pct: number | null }[];
+  windows?: { pct: number | null; label?: string }[];
 };
+
+// A per-model weekly allowance ("7 day · Fable", see claudeScopedWindows in
+// usage.ts) is not the account's capacity: a spent Fable allowance leaves the
+// account fully usable for every other model.
+const MODEL_SCOPED_WINDOW = /^7 day · /;
 
 export type ClaudeAccountCapacityReader = (
   account: ClaudeAccount,
@@ -223,6 +228,7 @@ function rankClaudeAccount(
 ): RankedClaudeAccount {
   const percentages = capacity?.available
     ? (capacity.windows ?? [])
+        .filter((window) => !MODEL_SCOPED_WINDOW.test(window.label ?? ""))
         .map((window) => window.pct)
         .filter((pct): pct is number => typeof pct === "number" && Number.isFinite(pct))
         .map((pct) => Math.max(0, Math.min(100, pct)))
