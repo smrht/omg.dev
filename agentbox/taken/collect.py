@@ -178,8 +178,12 @@ def is_melding(van: str, onderwerp: str) -> bool:
 
 
 def mails() -> list[dict]:
-    p = subprocess.run([EXECUTOR, "call", "execute", json.dumps({"code": GMAIL_JS})],
-                       capture_output=True, text=True, timeout=240)
+    for poging in (1, 2):  # Executor geeft soms een leeg antwoord (14-11: 45 mislukte rondes in een week)
+        p = subprocess.run([EXECUTOR, "call", "execute", json.dumps({"code": GMAIL_JS})],
+                           capture_output=True, text=True, timeout=240 if poging == 1 else 120)
+        if p.stdout.strip() or poging == 2:
+            break
+        time.sleep(5)
     res = json.loads(p.stdout)["result"]["structuredContent"]
     if res.get("status") != "completed":
         raise RuntimeError("executor gaf geen completed")
@@ -257,7 +261,10 @@ def main() -> int:
         except Exception:
             prev = {}
     result = {"bijgewerkt": iso(NOW), "bronnen": {}, "items": []}
+    gedraaid = set()
     for name, fn in (("gesprek", sessions), ("mail", mails), ("bestelling", orders)):
+        if not (alleen and name not in alleen):
+            gedraaid.add(name)
         if alleen and name not in alleen:
             result["items"] += [i for i in prev.get("items", []) if i["bron"] == name]
             if name in prev.get("bronnen", {}):
@@ -280,7 +287,9 @@ def main() -> int:
     tmp.write_text(json.dumps(result, ensure_ascii=False, indent=1))
     tmp.replace(f)
     print(json.dumps(result["bronnen"], ensure_ascii=False))
-    return 0 if all(b["ok"] for b in result["bronnen"].values()) else 2
+    # Alleen de bronnen van deze ronde bepalen de exitcode: een oude mailfout liet anders elke
+    # gesprek-ronde (elke 2 min) als mislukt eindigen (14-11: 225 mislukte starts in een week).
+    return 0 if all(result["bronnen"][n]["ok"] for n in gedraaid if n in result["bronnen"]) else 2
 
 
 if __name__ == "__main__":
