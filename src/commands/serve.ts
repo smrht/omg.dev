@@ -1545,7 +1545,7 @@ function persistManagedResume(session: Session): void {
         : session.agent === "pi"
           ? "pi"
           : session.runtime === "command-file" &&
-              (session.agent === "grok" || session.agent === "cursor" || session.agent === "fx" || session.agent === "muse" || session.agent === "copilot" || session.agent === "jcode" || session.agent === "zcode")
+              (session.agent === "grok" || session.agent === "cursor" || session.agent === "fx" || session.agent === "muse" || session.agent === "antigravity" || session.agent === "copilot" || session.agent === "jcode" || session.agent === "zcode")
             ? session.agent
           : null;
   if (!backend && !session.transcriptPath) return;
@@ -1572,7 +1572,7 @@ function persistManagedResume(session: Session): void {
         ? backend
         : backend === "pi"
           ? "pi"
-          : backend === "grok" || backend === "cursor" || backend === "fx" || backend === "muse" || backend === "copilot" || backend === "jcode" || backend === "zcode"
+          : backend === "grok" || backend === "cursor" || backend === "fx" || backend === "muse" || backend === "antigravity" || backend === "copilot" || backend === "jcode" || backend === "zcode"
             ? backend
           : session.agent === "grok"
             ? "grok"
@@ -1923,6 +1923,7 @@ const STATIC_FILES: Record<string, { path: string; type: string }> = {
   "/agent-muse.svg": { path: join(WEB_DIR, "agent-muse.svg"), type: "image/svg+xml" },
   "/agent-deepseek.svg": { path: join(WEB_DIR, "agent-deepseek.svg"), type: "image/svg+xml" },
   "/agent-devin.svg": { path: join(WEB_DIR, "agent-devin.svg"), type: "image/svg+xml" },
+  "/agent-antigravity.svg": { path: join(WEB_DIR, "agent-antigravity.svg"), type: "image/svg+xml" },
   "/agent-opencode.svg": { path: join(WEB_DIR, "agent-opencode.svg"), type: "image/svg+xml" },
   "/agent-jcode.svg": { path: join(WEB_DIR, "agent-jcode.svg"), type: "image/svg+xml" },
   "/agent-omg.svg": { path: join(WEB_DIR, "agent-omg.svg"), type: "image/svg+xml" },
@@ -3009,7 +3010,7 @@ function validateBotAgent(
   }
   if (agent === "codex-aisdk" && model && !/^[A-Za-z0-9_.:-]{1,80}$/.test(model))
     return { error: "invalid codex model name" };
-  if ((agent === "cursor" || agent === "opencode" || agent === "omg" || agent === "fx" || agent === "muse") && model && !/^[A-Za-z0-9_.:\/-]{1,120}$/.test(model))
+  if ((agent === "cursor" || agent === "opencode" || agent === "omg" || agent === "fx" || agent === "muse" || agent === "antigravity") && model && !/^[A-Za-z0-9_.:\/-]{1,120}$/.test(model))
     return { error: `invalid ${agent} model name` };
   if (agent === "jcode" && model && !/^[A-Za-z0-9_.:\/\-[\],=]{1,160}$/.test(model))
     return { error: "invalid jcode model name" };
@@ -11372,7 +11373,7 @@ a{color:#60a5fa}
           if (!allowed.includes(thinkingLevel))
             return err(400, `unknown thinking level "${thinkingLevel}" for ${sess.agent} (expected one of ${allowed.join(", ")})`);
 
-          if (sess.agent === "aisdk" || sess.agent === "codex-aisdk" || sess.agent === "opencode" || sess.agent === "omg" || sess.agent === "pi" || ((sess.agent === "jcode" || sess.agent === "zcode") && sess.runtime === "command-file")) {
+          if (sess.agent === "aisdk" || sess.agent === "codex-aisdk" || sess.agent === "opencode" || sess.agent === "omg" || sess.agent === "pi" || sess.agent === "antigravity" || ((sess.agent === "jcode" || sess.agent === "zcode") && sess.runtime === "command-file")) {
             const entry = findAisdkEntryByAnyId(m[1]);
             if (!entry) return err(409, "session control process is unavailable");
             appendAisdkCmd(entry.sessionId, { type: "set_thinking_level", thinkingLevel });

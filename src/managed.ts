@@ -35,7 +35,7 @@ export type ManagedSession = {
   tmuxName: string;
   cwd: string;
   createdAt: number;
-  agent?: "claude" | "codex" | "aisdk" | "codex-aisdk" | "opencode" | "omg" | "jcode" | "grok" | "cursor" | "fx" | "muse" | "deepseek" | "devin" | "hermes" | "pi" | "copilot" | "zcode";
+  agent?: "claude" | "codex" | "aisdk" | "codex-aisdk" | "opencode" | "omg" | "jcode" | "grok" | "cursor" | "fx" | "muse" | "deepseek" | "devin" | "antigravity" | "hermes" | "pi" | "copilot" | "zcode";
   /** Explicit runtime for new rows. Missing preserves the legacy kind-based runtime. */
   runtime?: "tmux" | "command-file";
   // Stable id shown to clients for lfg-created sessions. For agents that mint a

@@ -14,6 +14,7 @@ export type CodingAgentProduct =
   | "muse"
   | "deepseek"
   | "devin"
+  | "antigravity"
   | "pi"
   | "copilot"
   | "zcode";
@@ -97,6 +98,17 @@ export const CODING_AGENT_ADAPTERS = {
     recovery: "process-bound",
     capabilities: { interrupt: "immediate", questions: true, modelChange: "none", thinkingChange: "none", scheduled: false, toolAccess: "contract-only" },
   },
+  antigravity: {
+    product: "antigravity", driver: "rpc", transport: "command-file", managedLaunch: true,
+    // Google's `agy acp` advertises session/resume, so a dead harness reopens
+    // the same Antigravity conversation without replaying it. The thinking
+    // level is an ACP session option that can change between turns. The model
+    // list belongs to the signed-in plan and is only known inside a session.
+    // Not scheduled: Google permits a personal plan here for single-user
+    // interactive use, so unattended auto agents stay off this agent.
+    recovery: "durable",
+    capabilities: { interrupt: "immediate", questions: true, modelChange: "none", thinkingChange: "live", scheduled: false, toolAccess: "mcp" },
+  },
   copilot: {
     product: "copilot", driver: "sdk", transport: "command-file", managedLaunch: true,
     recovery: "durable",
@@ -159,6 +171,7 @@ export const ACTIVE_SESSION_AGENT_KINDS = [
   "muse",
   "deepseek",
   "devin",
+  "antigravity",
   "pi",
   "copilot",
   "zcode",
@@ -260,6 +273,7 @@ export const SESSION_AGENT_KINDS = [
   "muse",
   "deepseek",
   "devin",
+  "antigravity",
   "pi",
   "copilot",
   "zcode",
@@ -282,6 +296,7 @@ export const COMMAND_FILE_AGENT_KINDS = [
   "muse",
   "deepseek",
   "devin",
+  "antigravity",
   "copilot",
   "jcode",
   "zcode",

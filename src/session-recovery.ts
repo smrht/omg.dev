@@ -24,6 +24,7 @@ import {
   spawnManagedZcodeSdkSession,
   spawnManagedCursorAcpSession,
   spawnManagedFxAcpSession,
+  spawnManagedAntigravityAcpSession,
   spawnManagedGrokAcpSession,
   spawnManagedJcodeSession,
   spawnManagedJcodeSdkSession,
@@ -135,7 +136,7 @@ export function setRecoveryEgressProxy(resolve: ((sessionId: string) => string |
 // Sandbox and egress reach only the harnesses whose first launch forwards them
 // (ACTIVE_CODING_AGENT_PROVIDERS: aisdk, codex-aisdk, opencode/omg, pi). The
 // others ran without them, and a relaunch matches the first launch.
-const AGENTS_WITHOUT_POLICY = ["grok", "cursor", "fx", "muse", "copilot", "jcode", "deepseek", "devin", "zcode"];
+const AGENTS_WITHOUT_POLICY = ["grok", "cursor", "fx", "muse", "copilot", "jcode", "deepseek", "devin", "zcode", "antigravity"];
 
 export type ContainmentLaunchPolicy = { sandbox: ManagedContainment["sandbox"]; egressProxyUrl?: string };
 
@@ -364,6 +365,15 @@ export function launchRecovered(
   if (entry.agent === "cursor") {
     if (!entry.threadId) return { ok: false, error: "cursor recovery handle missing" };
     return spawnManagedCursorAcpSession({ ...common, key: entry.sessionId, resume: entry.threadId });
+  }
+  if (entry.agent === "antigravity") {
+    if (!entry.threadId) return { ok: false, error: "antigravity recovery handle missing" };
+    return spawnManagedAntigravityAcpSession({
+      ...common,
+      key: entry.sessionId,
+      resume: entry.threadId,
+      thinkingLevel: entry.thinkingLevel ?? undefined,
+    });
   }
   if (entry.agent === "fx") {
     if (!entry.threadId) return { ok: false, error: "fx recovery handle missing" };

@@ -1534,6 +1534,7 @@ export type ManagedStructuredModule =
   | "muse-msp-session"
   | "deepseek-acp-session"
   | "devin-acp-session"
+  | "antigravity-acp-session"
   | "copilot-sdk-session"
   | "jcode-sdk-session"
   | "zcode-sdk-session";
@@ -1600,6 +1601,9 @@ export const spawnManagedDeepseekAcpSession = (opts: ManagedStructuredSessionOpt
 
 export const spawnManagedDevinAcpSession = (opts: ManagedStructuredSessionOptions) =>
   spawnManagedStructuredSession("devin-acp-session", opts);
+
+export const spawnManagedAntigravityAcpSession = (opts: ManagedStructuredSessionOptions) =>
+  spawnManagedStructuredSession("antigravity-acp-session", opts);
 
 export const spawnManagedCopilotSdkSession = (opts: ManagedStructuredSessionOptions) =>
   spawnManagedStructuredSession("copilot-sdk-session", opts);

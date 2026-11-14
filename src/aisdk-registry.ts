@@ -80,7 +80,7 @@ export type AisdkEntry = {
   createdAt: number;
   // Which AI-SDK backend this entry drives. Absent on legacy Claude entries —
   // treat a missing value as "claude" so old entries keep working unchanged.
-  agent?: "claude" | "codex" | "opencode" | "omg" | "pi" | "grok" | "cursor" | "fx" | "muse" | "deepseek" | "devin" | "copilot" | "jcode" | "zcode";
+  agent?: "claude" | "codex" | "opencode" | "omg" | "pi" | "grok" | "cursor" | "fx" | "muse" | "deepseek" | "devin" | "antigravity" | "copilot" | "jcode" | "zcode";
   // Resume-handle slot, reused by the backends that can't pick their transcript
   // id up front:
   //   - codex: the app-server-assigned thread id, which is ALSO the rollout

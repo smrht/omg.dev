@@ -183,6 +183,7 @@ const HARNESS_BINARIES = new Set([
   "cursor-agent",
   "fx",
   "muse",
+  "agy",
   "opencode",
   "copilot",
   "zcode",

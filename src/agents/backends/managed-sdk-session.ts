@@ -17,7 +17,7 @@ import { indexSessionMessagesDirect } from "../../transcript-index.ts";
 import { managedSdkStartupCmdOffset, readNewCmdLines, writeCursor } from "./cmd-tail.ts";
 import { makeDraftPublisher } from "./draft.ts";
 
-export type ManagedSdkAgent = "grok" | "cursor" | "fx" | "muse" | "deepseek" | "devin" | "copilot" | "jcode" | "zcode";
+export type ManagedSdkAgent = "grok" | "cursor" | "fx" | "muse" | "deepseek" | "devin" | "antigravity" | "copilot" | "jcode" | "zcode";
 
 export type ManagedSdkPromptOption = {
   label: string;
@@ -38,6 +38,8 @@ export type ManagedSdkEventSink = {
   toolStart(id: string, name: string, input?: unknown): void;
   toolEnd(id: string, name: string, output?: unknown, error?: boolean): void;
   ask(question: string, options: ManagedSdkPromptOption[], header?: string): Promise<number | null>;
+  /** Runtime notice that must not replace or clear an in-flight answer draft. */
+  notice?(text: string): void;
 };
 
 export type ManagedSdkRuntime = {
@@ -133,6 +135,9 @@ export async function runManagedSdkSession(options: ManagedSdkSessionOptions): P
   } catch {}
 
   const sink: ManagedSdkEventSink = {
+    notice(body) {
+      if (!closing && body.trim()) indexSessionMessagesDirect(key, [row("assistant", "text", body)]);
+    },
     draft(next) {
       draft = next;
       publishDraft(next, false, "text");

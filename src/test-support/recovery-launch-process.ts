@@ -1,5 +1,6 @@
 import {
   spawnManagedAisdkSession,
+  spawnManagedAntigravityAcpSession,
   spawnManagedCodexAisdkSession,
   spawnManagedCopilotSdkSession,
   spawnManagedCursorAcpSession,
@@ -77,6 +78,12 @@ const result = await (agent === "claude" || agent === "aisdk"
                   key: `key-${resume}`,
                   resume,
                 })
+              : agent === "antigravity"
+                ? spawnManagedAntigravityAcpSession({
+                    ...common,
+                    key: `key-${resume}`,
+                    resume,
+                  })
               : agent === "muse"
                 ? spawnManagedMuseMspSession({
                     ...common,

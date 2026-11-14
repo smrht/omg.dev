@@ -170,6 +170,11 @@ export const DEEPSEEK_MODELS: string[] = ["deepseek-v4-flash", "deepseek-v4-pro"
 // vocabulary; `devin models list --format json` can widen it later via model
 // discovery.
 export const DEVIN_MODELS: string[] = ["adaptive", "swe", "opus", "gpt", "sonnet", "gemini", "codex"];
+// Antigravity reports the models of the signed-in Google plan as an ACP session
+// option, so the real list is only known inside a session. "default" keeps the
+// account's own choice. Google offers only Gemini models to general ACP
+// clients. A typed model name is matched against the advertised option values.
+export const ANTIGRAVITY_MODELS: string[] = ["default"];
 // Static fallback until model discovery (GET api.meta.ai/muse-code/models, the
 // document the CLI itself reads) has answered; discovery is authoritative and
 // is how a newly released muse-spark shows up. The server-side default is the
@@ -285,6 +290,7 @@ const MODEL_CATALOG_KEYS: CodingAgentKind[] = [
   "muse",
   "deepseek",
   "devin",
+  "antigravity",
   "opencode",
   "omg",
   "jcode",
@@ -325,6 +331,9 @@ export const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "x
 export const JCODE_THINKING_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 // Muse's reasoningEffort vocabulary, changeable live per turn over MSP.
 export const MUSE_THINKING_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh", "ultra"] as const;
+// Antigravity's ACP "Thinking level" session option: Low, Medium, High, Extra,
+// Max. "xhigh" maps to Extra when the harness selects the option value.
+export const ANTIGRAVITY_THINKING_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type ModelCatalogItem = {
   key: CodingAgentKind;
   label: string;
@@ -360,6 +369,7 @@ const LABELS: Record<CodingAgentKind, string> = {
   muse: "muse",
   deepseek: "deepseek",
   devin: "devin",
+  antigravity: "antigravity",
   hermes: "hermes",
   pi: "pi",
   copilot: "copilot",
@@ -377,6 +387,7 @@ export const MODEL_OPTIONS: Record<CodingAgentKind, { defaultModel: string; mode
   muse: { defaultModel: "muse-spark-1.2", models: MUSE_MODELS },
   deepseek: { defaultModel: "deepseek-v4-flash", models: DEEPSEEK_MODELS },
   devin: { defaultModel: "adaptive", models: DEVIN_MODELS },
+  antigravity: { defaultModel: "default", models: ANTIGRAVITY_MODELS },
   hermes: { defaultModel: "nousresearch/hermes-4-405b", models: HERMES_MODELS },
   opencode: { defaultModel: "opencode/nemotron-3.5-lightning-free", models: OPENCODE_MODELS },
   omg: { defaultModel: OMG_DEFAULT_MODEL, models: OMG_MODELS },
@@ -882,6 +893,7 @@ export function thinkingLevelsForAgent(
   if (agent === "codex" || agent === "codex-aisdk") return CODEX_THINKING_LEVELS;
   if (agent === "cursor") return CURSOR_THINKING_LEVELS;
   if (agent === "muse") return MUSE_THINKING_LEVELS;
+  if (agent === "antigravity") return ANTIGRAVITY_THINKING_LEVELS;
   return null;
 }
 
