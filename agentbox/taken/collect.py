@@ -8,6 +8,9 @@ Bronnen:
 - mail:    Gmail-inbox (contactexpertly, primair, 7 dagen, niet aan agent@) waar het laatste
            bericht niet van ons komt. Via Executor, alleen lezen.
 - bestelling: orders in dpit met open aandachtspunt of zonder track & trace na 6 dagen.
+- routine: routines die mislukten of niet meer starten, plus stille sites op HOLD. Kant-en-klare
+           kaarten uit ~/.local/state/taken/routine.json (sites-beheer/scripts/agentbox/
+           runs_naar_taken.py, cron). Bestaat het bestand niet, dan is er geen bron.
 
 Schrijft ~/.local/state/taken/items.json. Verstuurt niets, wijzigt niets in de bronnen.
 """
@@ -245,6 +248,43 @@ def orders() -> list[dict]:
     return out
 
 
+ROUTINE_MAX_OUD = 45 * 60  # het script draait elke 10 min; ouder = het script zelf staat stil
+
+
+def routines() -> list[dict]:
+    """Kaarten over routines (Sam, 14-11-2026: mislukte runs als taak in Bezos). Het bestand is
+    het contract: id, titel, detail, link en tijd. Alles wat hier niet op lijkt valt weg, zodat
+    een kapot bestand nooit de hele ronde laat mislukken."""
+    f = STATE / "routine.json"
+    if not f.exists():
+        return []
+    out = []
+    if NOW - f.stat().st_mtime > ROUTINE_MAX_OUD:
+        out.append({"id": "routine:verzamelaar", "bron": "routine", "soort": "melding", "wie": "Routines",
+                    "titel": "Overzicht van mislukte routines wordt niet meer bijgewerkt (fout in de verzamelaar)",
+                    "detail": f"{f} is sinds {iso(f.stat().st_mtime)} niet ververst. Het script runs_naar_taken.py "
+                              "in sites-beheer hoort elke 10 minuten te draaien; de kaarten hieronder kunnen verouderd zijn.",
+                    "tijd": iso(f.stat().st_mtime)})
+    try:
+        items = json.loads(f.read_text()).get("items") or []
+    except (ValueError, AttributeError):
+        items = []
+        out.append({"id": "routine:verzamelaar-kapot", "bron": "routine", "soort": "melding", "wie": "Routines",
+                    "titel": "Overzicht van mislukte routines is onleesbaar (fout in de verzamelaar)",
+                    "detail": f"{f} is geen geldige JSON. Het script runs_naar_taken.py in sites-beheer schrijft dit bestand.",
+                    "tijd": iso(f.stat().st_mtime)})
+    for i in items[:40]:
+        if not (isinstance(i, dict) and str(i.get("id", "")).startswith("routine:") and i.get("titel")):
+            continue
+        link = str(i.get("link") or "")
+        out.append({"id": str(i["id"])[:160], "bron": "routine", "soort": "melding",
+                    "titel": one_line(str(i["titel"]), 120), "detail": str(i.get("detail") or "")[:1200],
+                    "wie": one_line(str(i.get("wie") or "Routines"), 40),
+                    **({"link": link} if link.startswith("https://") else {}),
+                    **({"tijd": str(i["tijd"])} if i.get("tijd") else {})})
+    return out
+
+
 def main() -> int:
     """`collect.py` = alle bronnen (elke 10 min); `collect.py gesprek` = alleen de omg-gesprekken
     (lokaal, goedkoop, elke 2 min), de mail- en bestelitems van de vorige ronde blijven staan."""
@@ -262,10 +302,12 @@ def main() -> int:
             prev = {}
     result = {"bijgewerkt": iso(NOW), "bronnen": {}, "items": []}
     gedraaid = set()
-    for name, fn in (("gesprek", sessions), ("mail", mails), ("bestelling", orders)):
-        if not (alleen and name not in alleen):
+    for name, fn in (("gesprek", sessions), ("mail", mails), ("bestelling", orders), ("routine", routines)):
+        # "routine" is een lokaal bestand: gaat ook in de snelle gesprek-ronde mee (elke 2 min).
+        overslaan = bool(alleen) and name not in alleen and name != "routine"
+        if not overslaan:
             gedraaid.add(name)
-        if alleen and name not in alleen:
+        if overslaan:
             result["items"] += [i for i in prev.get("items", []) if i["bron"] == name]
             if name in prev.get("bronnen", {}):
                 result["bronnen"][name] = prev["bronnen"][name]
