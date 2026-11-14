@@ -29,6 +29,7 @@ import {
   type ProviderUsage,
   type UsageProviderRef,
   type UsageWindow,
+  windowModel,
 } from "@/lib/usage";
 
 // ── public types (mirror /api/usage) ────────────────────────────────────────
@@ -225,7 +226,8 @@ function shortNote(note: string | null | undefined): string {
 
 /** Window to feature on the arc card: highest utilization, then soonest reset. */
 function headlineWindow(p: ProviderUsage): UsageWindow | null {
-  const windows = p.windows ?? [];
+  // A per-model allowance (Fable) is not the account's headline number.
+  const windows = (p.windows ?? []).filter((w) => !windowModel(w.label));
   if (!windows.length) return null;
   return (
     [...windows].sort((a, b) => {
@@ -319,6 +321,7 @@ function familyLabel(entry: ArcEntry): string {
 
 function maxUsagePct(p: ProviderUsage): number | null {
   const pcts = (p.windows ?? [])
+    .filter((w) => !windowModel(w.label))
     .map((w) => w.pct)
     .filter((n): n is number => typeof n === "number" && Number.isFinite(n));
   if (!pcts.length) return null;

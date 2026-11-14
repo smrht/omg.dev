@@ -17,6 +17,23 @@ export type UsageWindow = {
   resetsAt: number | null;
 };
 
+/**
+ * The model a window is scoped to, or null for an account-wide window. Claude
+ * reports a separate weekly allowance per premium model as "7 day · Fable".
+ * Read from the label because both usage folds rebuild windows by label.
+ */
+export function windowModel(label: string): string | null {
+  const match = /^7 day · (.+)$/i.exec(label.trim());
+  return match ? match[1]!.trim() : null;
+}
+
+/** True when a model-scoped window counts for the selected model id or label. */
+export function windowAppliesToModel(label: string, model?: string | null): boolean {
+  const scoped = windowModel(label);
+  if (!scoped) return true;
+  return Boolean(model && model.toLowerCase().includes(scoped.toLowerCase()));
+}
+
 export type UsageProviderRef = {
   /** Stable per-source id — "codex", or "claude:<accountId>". */
   id: string;

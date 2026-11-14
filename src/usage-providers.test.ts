@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claudeAccountConfigDir, createClaudeAccount } from "./claude-accounts.ts";
 import {
+  claudeScopedWindows,
   getAllUsage,
   getProviderUsage,
   listUsageProviders,
@@ -119,6 +120,48 @@ describe("usage summary", () => {
     ]);
 
     expect(summary.resetCredits).toEqual({ availableCount: 2, credits: null });
+  });
+});
+
+describe("claude model-scoped weekly limits", () => {
+  // Shape of Anthropic's /api/oauth/usage `limits[]` on 2026-11-14.
+  const limits = [
+    { kind: "weekly_all", group: "weekly", percent: 2, resets_at: "2026-11-15T15:59:59Z", scope: null, is_active: true },
+    {
+      kind: "weekly_scoped",
+      group: "weekly",
+      percent: 37,
+      resets_at: "2026-11-15T15:59:59Z",
+      scope: { model: { id: null, display_name: "Fable" }, surface: null },
+      is_active: false,
+    },
+  ];
+
+  test("a scoped row becomes its own window, also when it is not the active limit", () => {
+    expect(claudeScopedWindows(limits)).toEqual([
+      { label: "7 day · Fable", pct: 37, resetsAt: Date.parse("2026-11-15T15:59:59Z") },
+    ]);
+  });
+
+  test("the account-wide row and surface-scoped rows are left out", () => {
+    expect(
+      claudeScopedWindows([
+        limits[0],
+        { kind: "weekly_scoped", percent: 5, resets_at: null, scope: { model: null, surface: { display_name: "Cowork" } } },
+      ]),
+    ).toEqual([]);
+  });
+
+  test("a missing or malformed limits field yields no windows", () => {
+    expect(claudeScopedWindows(undefined)).toEqual([]);
+    expect(claudeScopedWindows({})).toEqual([]);
+    expect(claudeScopedWindows([null, "x", { kind: "weekly_scoped" }])).toEqual([]);
+  });
+
+  test("a row without a number keeps the window with an unknown percentage", () => {
+    expect(
+      claudeScopedWindows([{ kind: "weekly_scoped", resets_at: null, scope: { model: { display_name: "Fable" } } }]),
+    ).toEqual([{ label: "7 day · Fable", pct: null, resetsAt: null }]);
   });
 });
 

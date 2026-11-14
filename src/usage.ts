@@ -138,6 +138,42 @@ async function claudeWebResetsFor(
   }
 }
 
+/** Label prefix of a model-scoped weekly window, e.g. "7 day · Fable". */
+export const CLAUDE_SCOPED_WEEK_PREFIX = "7 day · ";
+
+/**
+ * Model-scoped weekly limits from the usage endpoint's `limits[]` rows, such as
+ * the separate Fable allowance. Classified on `kind`, as the Claude CLI does,
+ * and not filtered on `is_active`: an allowance that is not the binding limit
+ * right now is still a limit the user wants to see. Exported for tests.
+ */
+export function claudeScopedWindows(limits: unknown): UsageWindow[] {
+  if (!Array.isArray(limits)) return [];
+  const windows: UsageWindow[] = [];
+  const seen = new Set<string>();
+  for (const row of limits) {
+    if (!row || typeof row !== "object") continue;
+    const limit = row as {
+      kind?: unknown;
+      percent?: unknown;
+      resets_at?: unknown;
+      scope?: { model?: { display_name?: unknown } | null } | null;
+    };
+    if (limit.kind !== "weekly_scoped") continue;
+    const name = limit.scope?.model?.display_name;
+    if (typeof name !== "string" || !name.trim()) continue;
+    const label = `${CLAUDE_SCOPED_WEEK_PREFIX}${name.trim()}`;
+    if (seen.has(label)) continue;
+    seen.add(label);
+    windows.push({
+      label,
+      pct: typeof limit.percent === "number" && Number.isFinite(limit.percent) ? limit.percent : null,
+      resetsAt: isoToMs(limit.resets_at),
+    });
+  }
+  return windows;
+}
+
 async function claudeUsage(ref: UsageProviderRef, force = false): Promise<ProviderUsage> {
   const base = { ...ref, plan: null as string | null };
   try {
@@ -160,6 +196,7 @@ async function claudeUsage(ref: UsageProviderRef, force = false): Promise<Provid
     const u = (await r.json()) as {
       five_hour?: { utilization?: number; resets_at?: string | null };
       seven_day?: { utilization?: number; resets_at?: string | null };
+      limits?: unknown;
     };
     const resets = await claudeWebResetsFor(token, force);
     return {
@@ -176,6 +213,7 @@ async function claudeUsage(ref: UsageProviderRef, force = false): Promise<Provid
           pct: u.seven_day?.utilization ?? null,
           resetsAt: isoToMs(u.seven_day?.resets_at),
         },
+        ...claudeScopedWindows(u.limits),
       ],
       ...resets,
     };

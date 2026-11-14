@@ -2,7 +2,7 @@ import { beforeEach, expect, setSystemTime, test, afterEach } from "bun:test";
 import type { ProviderUsage } from "@/lib/usage";
 import "../test-support/render"; // installeert happy-dom (localStorage)
 
-const { metLaatsteStand, leftPct, tightestWindow } = await import("./usage-meters");
+const { metLaatsteStand, leftPct, tightestWindow, windowName } = await import("./usage-meters");
 
 const goed: ProviderUsage = {
   id: "claude",
@@ -60,4 +60,23 @@ test("a source that never reported keeps its dash", () => {
   const shown = metLaatsteStand(kapot);
   expect(shown.standVan).toBeUndefined();
   expect(tightestWindow(shown.windows)).toBeNull();
+});
+
+const metFable = [
+  { label: "5 hr", pct: 10, resetsAt: null },
+  { label: "7 day", pct: 30, resetsAt: null },
+  { label: "7 day · Fable", pct: 90, resetsAt: null },
+];
+
+test("a per-model weekly limit gets its own name, not a second 'week'", () => {
+  expect(windowName("7 day")).toBe("week");
+  expect(windowName("7 day · Fable")).toBe("Fable week");
+});
+
+test("the Fable limit only decides the tightest window when Fable is the chosen model", () => {
+  expect(tightestWindow(metFable)?.label).toBe("7 day");
+  expect(tightestWindow(metFable, "opus")?.label).toBe("7 day");
+  expect(tightestWindow(metFable, "claude-opus-5-5")?.label).toBe("7 day");
+  expect(tightestWindow(metFable, "fable")?.label).toBe("7 day · Fable");
+  expect(tightestWindow(metFable, "claude-fable-5-2")?.label).toBe("7 day · Fable");
 });

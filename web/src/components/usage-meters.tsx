@@ -9,7 +9,7 @@
 import { cn } from "@/lib/utils";
 import { agentIconSrc } from "@/lib/session-ui";
 import { useState } from "react";
-import { useUsageFeed, type ProviderUsage, type UsageWindow } from "@/lib/usage";
+import { useUsageFeed, windowAppliesToModel, windowModel, type ProviderUsage, type UsageWindow } from "@/lib/usage";
 
 /**
  * Laatste goede stand per bron. Anthropic's usage-endpoint geeft geregeld 429;
@@ -48,6 +48,9 @@ export function leftPct(w: UsageWindow): number | null {
 }
 
 export function windowName(label: string): string {
+  // Een limiet per model ("7 day · Fable") is geen tweede weekregel.
+  const model = windowModel(label);
+  if (model) return `${model} week`;
   const l = label.toLowerCase();
   if (/^5\s*h|5 hr|5-hour|session/.test(l)) return "5 uur";
   if (/7\s*d|week/.test(l)) return "week";
@@ -72,10 +75,15 @@ export function resetText(ms: number | null): string {
   return `reset ${DAGEN[d.getDay()]} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
-/** The window that runs out first: the one that decides whether you can work. */
-export function tightestWindow(windows: UsageWindow[] | undefined): UsageWindow | null {
+/**
+ * The window that runs out first: the one that decides whether you can work.
+ * A limit for one model (Fable) only counts when that model is the one chosen;
+ * with Opus selected a spent Fable allowance stops nothing.
+ */
+export function tightestWindow(windows: UsageWindow[] | undefined, model?: string | null): UsageWindow | null {
   let best: UsageWindow | null = null;
   for (const w of windows ?? []) {
+    if (!windowAppliesToModel(w.label, model)) continue;
     const left = leftPct(w);
     if (left == null) continue;
     if (!best || left < (leftPct(best) ?? 101)) best = w;

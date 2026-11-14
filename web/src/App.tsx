@@ -724,6 +724,7 @@ import {
   invalidateUsageProviders,
   useProviderUsage,
   useUsageFeed,
+  windowModel,
   type ProviderUsage,
   type UsageWindow,
 } from "./lib/usage";
@@ -10648,6 +10649,7 @@ const USAGE_RING_COLORS = ["#fb923c", "#38bdf8", "#a78bfa", "#34d399"];
 function activityRingOrder(windows: UsageWindow[]): UsageWindow[] {
   const rank = (label: string) => {
     const l = label.toLowerCase();
+    if (windowModel(label)) return 3; // per-model allowance goes last
     if (l.includes("week") || l.includes("7 day")) return 0;
     if (l.includes("5") && (l.includes("hr") || l.includes("hour"))) return 1;
     return 2;
@@ -25748,7 +25750,8 @@ export function NewSessionDialog({
     if (!usage) return "Gebruiksgegevens niet beschikbaar";
     // agentbox: wat er nog OVER is van het venster dat het eerst op is.
     const shown = metLaatsteStand(usage);
-    const tight = tightestWindow(shown.windows);
+    // Een limiet per model (Fable) telt alleen mee als dat model gekozen is.
+    const tight = tightestWindow(shown.windows, agent === "aisdk" ? model : null);
     const left = tight ? leftPct(tight) : null;
     if (left == null || !tight) return "Limiet niet beschikbaar";
     return `${Math.round(left)}% over (${windowName(tight.label)})${shown.standVan ? `, stand van ${standTijd(shown.standVan)}` : ""}`;
