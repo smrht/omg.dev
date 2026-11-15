@@ -778,7 +778,7 @@ export type CodingAgentInfo = {
     setupProgress?: { percent: number; label: string };
     canAutoSetup: boolean;
     canLoginInTerminal: boolean;
-    checks: { label: string; ok: boolean; detail?: string }[];
+    checks: { label: string; ok: boolean; detail?: string; actionUrl?: string; actionLabel?: string }[];
     instructions: string[];
     installCommand?: string;
     loginCommand?: string;
