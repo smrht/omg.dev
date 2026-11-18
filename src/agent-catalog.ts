@@ -893,8 +893,34 @@ export function thinkingLevelsForAgent(
   if (agent === "codex" || agent === "codex-aisdk") return CODEX_THINKING_LEVELS;
   if (agent === "cursor") return CURSOR_THINKING_LEVELS;
   if (agent === "muse") return MUSE_THINKING_LEVELS;
-  if (agent === "antigravity") return ANTIGRAVITY_THINKING_LEVELS;
+  if (agent === "antigravity") {
+    // Discovery (`agy models`) lists the level each model's plan actually
+    // offers. Offering the full Google vocabulary made the picker hand out
+    // Extra and Max to plans whose models stop at High, which agy then refuses
+    // to apply and the session silently runs on the account default.
+    const variants = readModelDiscoveryCacheSync()?.providers?.antigravity?.variants;
+    if (variants) return antigravityLevelsFor(variants, model);
+    return ANTIGRAVITY_THINKING_LEVELS;
+  }
   return null;
+}
+
+/**
+ * The levels one Antigravity model offers, from discovery's per-model `variants`.
+ * "default" carries the plan-default family's levels for the model that names no
+ * family yet. A model id outside the cache offers no knob rather than one that
+ * never applies; an empty union still offers something the agent can take.
+ */
+export function antigravityLevelsFor(
+  variants: Record<string, string[]>,
+  model?: string,
+): readonly string[] | null {
+  if (model) {
+    const levels = variants[model];
+    return levels?.length ? levels : null;
+  }
+  const union = [...new Set(Object.values(variants).flat())];
+  return union.length ? union : null;
 }
 
 /**
@@ -1079,7 +1105,7 @@ export function listModelCatalog(codingAgents: CodingAgentInfo[] = []): ModelCat
       ? readModelDiscoveryCacheSync()?.providers?.devin?.thinkingLevelsByModel
       : undefined;
     // Hosted omg models carry their own per-model vocabulary (0.6.82).
-    const perModelLevels = key === "opencode" || key === "omg" || key === "grok";
+    const perModelLevels = key === "opencode" || key === "omg" || key === "grok" || key === "antigravity";
     const thinkingLevelsByModel = perModelLevels
       ? Object.fromEntries(
           models.flatMap((model) => {
