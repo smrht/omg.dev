@@ -1627,6 +1627,7 @@ const AGENT_DEFAULT_MODEL: Record<AgentKind, string> = {
   muse: "muse-spark-1.2",
   deepseek: "deepseek-v4-flash",
   devin: "adaptive",
+  antigravity: "default",
   opencode: "opencode/nemotron-3.5-lightning-free",
   omg: OMG_DEFAULT_MODEL,
   jcode: "auto",

@@ -14,7 +14,8 @@ export type AgentKind =
   | "devin"
   | "antigravity"
   | "pi"
-  | "copilot";
+  | "copilot"
+  | "zcode";
 
 export type AgentCatalogEntry = {
   key: AgentKind;
