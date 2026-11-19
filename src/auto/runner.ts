@@ -346,6 +346,17 @@ export async function runSelectedBackendUncontained(
       }),
     );
   }
+  if (backend === "antigravity") {
+    onLog(`[auto] antigravity run (${prompt.length} chars) in ${cwd} [model: ${agent.model ?? "default"}]`);
+    const { pipeToAntigravityAcp } = await import("../agents/backends/antigravity-oneshot.ts");
+    return await runInCwd(cwd, () =>
+      pipeToAntigravityAcp(prompt, onLog, {
+        cwd,
+        model: agent.model,
+        thinkingLevel: agent.thinkingLevel,
+      }),
+    );
+  }
   if (backend === "hermes") {
     throw new Error("Hermes has been removed. Select another auto-agent backend.");
   }

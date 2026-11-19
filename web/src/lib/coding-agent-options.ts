@@ -50,7 +50,7 @@ export const AGENT_CATALOG: readonly AgentCatalogEntry[] = [
   { key: "muse", label: "muse", scheduled: true },
   { key: "deepseek", label: "deepseek" },
   { key: "devin", label: "devin" },
-  { key: "antigravity", label: "antigravity" },
+  { key: "antigravity", label: "antigravity", scheduled: true },
   { key: "jcode", label: "jcode" },
   { key: "pi", label: "pi" },
   { key: "copilot", label: "copilot" },

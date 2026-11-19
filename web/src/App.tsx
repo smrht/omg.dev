@@ -1564,7 +1564,7 @@ const FX_MODELS = [
 const MUSE_MODELS = ["muse-spark-1.2"];
 const THINKING_LEVELS = ["low", "medium", "high", "xhigh"] as const;
 type ThinkingLevel = string;
-type AutoAgentBackend = "omg" | "aisdk" | "codex-aisdk" | "grok" | "cursor" | "fx" | "muse" | "opencode";
+type AutoAgentBackend = "omg" | "aisdk" | "codex-aisdk" | "grok" | "cursor" | "fx" | "muse" | "opencode" | "antigravity";
 function savedThinkingLevel(): ThinkingLevel {
   const value = localStorage.getItem("lfg_thinking_level");
   return value && (THINKING_LEVELS as readonly string[]).includes(value) ? value : "medium";

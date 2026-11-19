@@ -3926,6 +3926,8 @@ export function resolveAutoAgentRuntime(
     return { ok: false, status: 400, error: "invalid fx model name" };
   if (autoBackend === "muse" && model && !/^[A-Za-z0-9_.:\/-]{1,120}$/.test(model))
     return { ok: false, status: 400, error: "invalid muse model name" };
+  if (autoBackend === "antigravity" && model && !/^[A-Za-z0-9_.:\/-]{1,80}$/.test(model))
+    return { ok: false, status: 400, error: "invalid antigravity model name" };
   if ((autoBackend === "opencode" || autoBackend === "omg") && model && !/^[A-Za-z0-9_.:\/-]{1,80}$/.test(model))
     return { ok: false, status: 400, error: "invalid opencode model name" };
   const thinkingLevel = b.thinkingLevel?.trim() || undefined;

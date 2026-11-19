@@ -276,6 +276,7 @@ export const AUTO_AGENT_BACKENDS = [
   "fx",
   "muse",
   "opencode",
+  "antigravity",
   "omg",
 ] as const;
 export type AutoAgentBackend = (typeof AUTO_AGENT_BACKENDS)[number];
