@@ -86,6 +86,7 @@ const AGENT_NAMES: Record<ManagedSdkAgent, string> = {
   antigravity: "Antigravity",
   copilot: "Copilot",
   jcode: "jcode",
+  zcode: "ZCode",
 };
 
 export function managedRestartResumedNotice(agent: ManagedSdkAgent): string {
