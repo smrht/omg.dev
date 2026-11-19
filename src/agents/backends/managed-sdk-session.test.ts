@@ -259,8 +259,6 @@ describe("managed SDK startup journaling and first-launch commands", () => {
     }));
   });
 });
-<<<<<<< HEAD
-=======
 
 describe("managed SDK questions answered by a typed message", () => {
   async function run(reply: string) {
@@ -468,4 +466,3 @@ describe("managed SDK runtime whose agent process ended between turns", () => {
     }
   });
 });
->>>>>>> 57adcb72 (fix(agents): restart a managed ACP agent that ended between turns)
