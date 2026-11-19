@@ -53,12 +53,12 @@ describe("ModelOptionList", () => {
         input.dispatchEvent(new Event("input", { bubbles: true }));
       });
     type("deepseek v4");
-    expect(ui.queryAll("button").length).toBe(2);
+    expect(ui.queryAll("button").filter((b) => b.getAttribute("aria-label") !== "Zoekveld wissen").length).toBe(2);
     type("z-ai");
-    expect(ui.queryAll("button").length).toBe(2);
+    expect(ui.queryAll("button").filter((b) => b.getAttribute("aria-label") !== "Zoekveld wissen").length).toBe(2);
     expect(ui.text()).toContain("GLM 5.2");
     type("nothing-here");
-    expect(ui.text()).toContain("No matching models");
+    expect(ui.text()).toContain("Geen passende modellen");
   });
 
   test("Codex ids show their display name, without a mark", () => {
@@ -128,11 +128,31 @@ describe("ModelOptionList favorites", () => {
         input.dispatchEvent(new Event("input", { bubbles: true }));
       });
     type("glm 5.2");
-    const chooseRows = ui.queryAll("button").filter((b) => !b.hasAttribute("aria-pressed"));
+    const chooseRows = ui.queryAll("button").filter((b) => !b.hasAttribute("aria-pressed") && b.getAttribute("aria-label") !== "Zoekveld wissen");
     const starRows = ui.queryAll("button[aria-pressed]");
     expect(chooseRows.length).toBe(starRows.length);
     expect(chooseRows.length).toBeGreaterThan(0);
     expect(ui.text()).toContain("GLM 5.2");
+  });
+
+  test("favorites are grouped first above Alle modellen without duplicating rows", () => {
+    ui.render(
+      <ModelOptionList
+        value="gemini-4-neon"
+        models={["gemini-4-neon", "gemini-4-carbon", "gemini-4-hydrogen"]}
+        onChoose={() => {}}
+        favorites={["gemini-4-hydrogen"]}
+        onToggleFavorite={() => {}}
+      />,
+    );
+    expect(ui.text()).toContain("Favorieten");
+    expect(ui.text()).toContain("Alle modellen");
+    const chooseRows = ui.queryAll("button").filter((b) => !b.hasAttribute("aria-pressed"));
+    expect(chooseRows.map((b) => b.textContent?.trim())).toEqual([
+      "Gemini 4 Hydrogen",
+      "Gemini 4 Neon",
+      "Gemini 4 Carbon",
+    ]);
   });
 });
 

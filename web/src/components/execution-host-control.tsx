@@ -25,6 +25,7 @@ export function ExecutionHostChoice({
   options,
   onPick,
   onRefresh,
+  compact = false,
   className,
 }: {
   label?: string;
@@ -33,17 +34,29 @@ export function ExecutionHostChoice({
   /** Re-reads the host status for the current agent. Absent on surfaces
    * that have no live composer behind them (fork/continue). */
   onRefresh?: () => void;
+  /** Tighter desktop footer layout; mobile keeps 44px touch targets. */
+  compact?: boolean;
   className?: string;
 }) {
   const blockedNotes = options.filter((option) => option.disabled && option.note);
   return (
     <div className={cn("min-w-0", className)} data-testid="execution-host-choice">
-      <div className="flex min-h-11 items-center gap-2">
-        <span className="shrink-0 text-[13px] font-medium">{label}</span>
+      <div className={cn("flex items-center gap-2", compact ? "min-h-7" : "min-h-11")}>
+        <span
+          className={cn(
+            "shrink-0 font-medium",
+            compact ? "w-20 text-xs text-muted-foreground" : "text-[13px]",
+          )}
+        >
+          {label}
+        </span>
         <div
           role="radiogroup"
           aria-label="Uitvoeren op"
-          className="flex min-w-0 flex-1 gap-0.5 rounded-xl bg-muted p-0.5"
+          className={cn(
+            "flex min-w-0 flex-1 gap-0.5 bg-muted p-0.5",
+            compact ? "rounded-lg" : "rounded-xl",
+          )}
         >
           {options.map((option) => (
             <button
@@ -60,11 +73,16 @@ export function ExecutionHostChoice({
                 onPick(option.id);
               }}
               className={cn(
-                "min-h-10 min-w-0 flex-1 rounded-[10px] px-1 text-xs font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
+                "min-w-0 flex-1 px-2 font-medium outline-none transition-colors duration-100 motion-reduce:transition-none focus-visible:ring-2 focus-visible:ring-ring",
+                compact
+                  ? "h-6 rounded-[6px] text-[11px]"
+                  : "min-h-10 rounded-[10px] text-xs",
                 option.selected
-                  ? "bg-primary text-primary-foreground"
-                  : "text-muted-foreground",
-                option.disabled && !option.selected && "opacity-55",
+                  ? compact
+                    ? "bg-background text-foreground shadow-xs ring-1 ring-border/70"
+                    : "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:text-foreground",
+                option.disabled && !option.selected && "opacity-50 hover:text-muted-foreground",
               )}
             >
               {option.label}
@@ -78,14 +96,19 @@ export function ExecutionHostChoice({
             aria-label="Uitvoerstatus verversen"
             title="Uitvoerstatus verversen"
             data-testid="execution-host-refresh"
-            className="flex size-7 shrink-0 items-center justify-center rounded-full text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+            className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
           >
             <RefreshCw className="size-3.5" />
           </button>
         ) : null}
       </div>
       {blockedNotes.length ? (
-        <p className="pb-1 text-xs leading-snug text-muted-foreground">
+        <p
+          className={cn(
+            "leading-snug text-muted-foreground",
+            compact ? "mt-1 text-[11px]" : "pb-1 text-xs",
+          )}
+        >
           {blockedNotes.map((option) => (
             <span key={option.id} className="block break-words">
               {option.label}: {option.note}

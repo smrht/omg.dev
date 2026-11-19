@@ -405,3 +405,16 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
   .bezos-rij, .bezos-knop-hoofd, .bezos-knop-neven, .bezos-voorstel, .bezos-speel { transition: none; }
   .bezos-verstuurd { animation: none; }
 }
+
+/* Model-picker lijsten: slanke scrollbalk zonder pijltjesknoppen. */
+.ab-picker-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+.ab-picker-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.ab-picker-scroll::-webkit-scrollbar-track { background: transparent; }
+.ab-picker-scroll::-webkit-scrollbar-thumb {
+  background-color: var(--border-strong);
+  border-radius: 999px;
+}
+.ab-picker-scroll::-webkit-scrollbar-button { display: none; }

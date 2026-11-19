@@ -23,7 +23,7 @@ import {
 } from "./components/compact-model-picker-sheet";
 import { MODEL_FAVORITES_VISIBLE } from "./lib/model-favorites";
 import { useModelFavorites } from "./lib/use-model-favorites";
-import { pickerModelDisplay, pickerThinkingLabel } from "./lib/model-picker-display";
+import { pickerAgentLabel, pickerModelDisplay, pickerThinkingLabel } from "./lib/model-picker-display";
 import { ThinkingBar } from "./components/thinking-bar";
 import { activeMachine } from "./lib/machines";
 import { useHeaderProfile } from "./lib/header-profile";
@@ -25537,13 +25537,13 @@ export function NewSessionDialog({
           }}
           footer={
             variant === "stage" && !tiboModeActive && agentSupportsThinking(agent) && thinkingLevels.length > 0 ? (
-              <div className="space-y-2">
-                <span className="text-xs font-medium text-muted-foreground">Thinking</span>
+              <div className="flex items-center gap-2">
+                <span className="w-20 shrink-0 text-xs font-medium text-muted-foreground">Denkwerk</span>
                 <ThinkingBar
                   compact
                   options={thinkingLevels.map((level) => ({
                     id: level,
-                    label: thinkingLevelLabel(level),
+                    label: pickerThinkingLabel(thinkingLevelLabel(level)),
                     selected: level === thinkingLevel,
                   }))}
                   onPick={(level) => changeComposerThinkingLevel(level as ThinkingLevel)}
@@ -27616,23 +27616,140 @@ export function ModelOptionList({
   onToggleFavorite?: (model: string) => void;
 }) {
   const [query, setQuery] = useState("");
+  const trimmedQuery = query.trim().toLowerCase();
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return models;
-    // Hosted omg ids match on the router id AND the short name, so "flash"
-    // and "deepseek v4" both find omg/deepseek/deepseek-v4-flash-0731.
-    return models.filter((item) => `${omgModelSearchText(item)} ${pickerModelDisplay(item).label.toLowerCase()}`.includes(q));
-  }, [models, query]);
+    if (!trimmedQuery) return models;
+    // Match on router id, clean display label, and provider label.
+    return models.filter((item) => {
+      const display = pickerModelDisplay(item);
+      const haystack = `${omgModelSearchText(item)} ${display.label.toLowerCase()} ${display.provider?.toLowerCase() ?? ""}`;
+      return haystack.includes(trimmedQuery);
+    });
+  }, [models, trimmedQuery]);
+
+  // Show subtle provider tags when a non-hosted list mixes providers (e.g.
+  // OpenCode mixing OpenAI, Z.ai and Gratis models).
+  const showProviderBadge = useMemo(() => {
+    const nonHostedProviders = new Set<string>();
+    for (const item of models) {
+      if (parseOmgModel(item)) continue;
+      const provider = pickerModelDisplay(item).provider;
+      if (provider && provider !== "Fusion") nonHostedProviders.add(provider);
+    }
+    return nonHostedProviders.size > 1;
+  }, [models]);
+
+  const sections = useMemo(() => {
+    if (trimmedQuery) {
+      return [{ id: "results", heading: null as string | null, items: filtered }];
+    }
+    const favSet = favorites?.length ? new Set(favorites) : null;
+    const favItems = favSet ? filtered.filter((item) => favSet.has(item)) : [];
+    const restItems = favSet ? filtered.filter((item) => !favSet.has(item)) : filtered;
+    const regularItems = restItems.filter((item) => !item.startsWith("fusion:"));
+    const fusionItems = restItems.filter((item) => item.startsWith("fusion:"));
+
+    const result: { id: string; heading: string | null; items: string[] }[] = [];
+    if (favItems.length) {
+      result.push({ id: "favorites", heading: "Favorieten", items: favItems });
+    }
+    if (regularItems.length) {
+      result.push({
+        id: "all",
+        heading: favItems.length || fusionItems.length ? "Alle modellen" : null,
+        items: regularItems,
+      });
+    }
+    if (fusionItems.length) {
+      result.push({ id: "fusion", heading: "Fusion", items: fusionItems });
+    }
+    return result;
+  }, [favorites, filtered, trimmedQuery]);
+
+  const renderRow = (item: string) => {
+    const selected = value === item;
+    const hosted = parseOmgModel(item);
+    const display = pickerModelDisplay(item);
+    const label = hosted ? hosted.label : display.label || omgModelLabel(item);
+    const providerTag = !hosted && showProviderBadge ? display.provider : undefined;
+    const starred = favorites?.includes(item) ?? false;
+    const chooseRow = (
+      <button
+        type="button"
+        onClick={() => onChoose(item)}
+        title={hosted ? `${hosted.providerLabel} · ${item}` : label !== item ? item : undefined}
+        className={cn(
+          "flex min-w-0 flex-1 items-center text-left outline-none transition-colors duration-100 motion-reduce:transition-none",
+          onToggleFavorite ? "w-auto" : "w-full",
+          large ? "h-12 gap-3 rounded-xl px-3 text-sm" : "h-[30px] gap-2 rounded-lg px-2 text-[13px]",
+          selected
+            ? "bg-primary/10 font-medium text-foreground"
+            : cn("text-foreground focus-visible:bg-muted", !large && "hover:bg-muted/80"),
+        )}
+      >
+        <Check
+          className={cn(
+            "shrink-0 text-primary",
+            large ? "size-4" : "size-3.5",
+            selected ? "opacity-100" : "opacity-0",
+          )}
+        />
+        {hosted ? (
+          <ModelProviderIcon
+            provider={hosted.provider}
+            className={cn("size-4 shrink-0", selected ? "text-foreground" : "text-muted-foreground")}
+          />
+        ) : null}
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        {providerTag ? (
+          <span className="shrink-0 text-[11px] font-normal text-muted-foreground">
+            {providerTag}
+          </span>
+        ) : null}
+      </button>
+    );
+    if (!onToggleFavorite) return <div key={item}>{chooseRow}</div>;
+    return (
+      <div key={item} className="group flex items-center gap-0.5">
+        {chooseRow}
+        <button
+          type="button"
+          aria-pressed={starred}
+          aria-label={starred ? `Remove ${label} from favorites` : `Favorite ${label}`}
+          title={starred ? `${label} uit favorieten halen` : `${label} als favoriet markeren`}
+          onClick={() => onToggleFavorite(item)}
+          className={cn(
+            "flex shrink-0 items-center justify-center rounded-md outline-none transition-opacity duration-100 motion-reduce:transition-none focus-visible:bg-muted focus-visible:opacity-100",
+            large ? "size-11 rounded-full" : "size-7 hover:bg-muted",
+            !starred && !large && "opacity-30 group-hover:opacity-100",
+          )}
+        >
+          <Star
+            className={cn(
+              large ? "size-4" : "size-3.5",
+              starred ? "fill-primary text-primary" : "text-muted-foreground",
+            )}
+          />
+        </button>
+      </div>
+    );
+  };
+
   return (
     <div
       className={cn(
-        large ? "min-h-0 space-y-3" : "space-y-2",
-        fill && "flex min-h-0 flex-1 flex-col gap-2 space-y-0",
+        large ? "min-h-0 space-y-3" : "space-y-1.5",
+        fill && "flex min-h-0 flex-1 flex-col gap-1.5 space-y-0",
       )}
     >
       {modelListSearchable(models) ? (
-        <div className="relative">
-          <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+        <div className="relative shrink-0">
+          <Search
+            className={cn(
+              "pointer-events-none absolute top-1/2 -translate-y-1/2 text-muted-foreground",
+              large ? "left-3 size-4" : "left-2.5 size-3.5",
+            )}
+          />
           <input
             ref={inputRef}
             value={query}
@@ -27642,76 +27759,51 @@ export function ModelOptionList({
               if (event.key === "Escape") onEscape?.();
               if (event.key === "Enter" && filtered[0]) onChoose(filtered[0]);
             }}
-            placeholder="Filter models"
-            className="h-10 w-full rounded-xl border border-border bg-background pl-9 pr-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus:border-foreground/30"
+            placeholder="Zoek model…"
+            className={cn(
+              "w-full border border-border bg-background outline-none transition-colors placeholder:text-muted-foreground focus:border-foreground/30",
+              large
+                ? "h-10 rounded-xl pl-9 pr-3 text-sm"
+                : "h-8 rounded-lg pl-8 pr-7 text-[13px]",
+            )}
           />
+          {query ? (
+            <button
+              type="button"
+              onClick={() => {
+                setQuery("");
+                inputRef?.current?.focus();
+              }}
+              aria-label="Zoekveld wissen"
+              className="absolute right-1.5 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+            >
+              <X className="size-3" />
+            </button>
+          ) : null}
         </div>
       ) : null}
       <div
         className={cn(
-          "overflow-y-auto pr-1",
+          "ab-picker-scroll overflow-y-auto pr-0.5",
           fill ? "min-h-0 flex-1" : large ? "max-h-[52dvh]" : "max-h-72",
         )}
       >
         {filtered.length ? (
-          filtered.map((item) => {
-            const selected = value === item;
-            // A hosted omg id reads as the lab's mark plus the short model
-            // name; the full router id stays in the tooltip. Other agents'
-            // ids are already short and stay as they are.
-            const hosted = parseOmgModel(item);
-            const label = onToggleFavorite ? pickerModelDisplay(item).label : hosted ? hosted.label : omgModelLabel(item);
-            const starred = favorites?.includes(item) ?? false;
-            const chooseRow = (
-              <button
-                type="button"
-                onClick={() => onChoose(item)}
-                title={hosted ? `${hosted.providerLabel} · ${item}` : omgModelLabel(item) !== item ? item : undefined}
-                className={cn(
-                  "flex min-w-0 flex-1 items-center gap-3 rounded-xl px-3 text-left text-sm outline-none transition-colors",
-                  onToggleFavorite ? "w-auto" : "w-full",
-                  large ? "h-12" : "h-10",
-                  selected
-                    ? "bg-primary/12 text-foreground ring-1 ring-inset ring-primary/20"
-                    : cn("text-foreground focus-visible:bg-muted", !large && "hover:bg-muted"),
-                )}
-              >
-                <Check className={cn("size-4 shrink-0 text-primary", selected ? "opacity-100" : "opacity-0")} />
-                {hosted ? (
-                  <ModelProviderIcon
-                    provider={hosted.provider}
-                    className={cn("size-4 shrink-0", selected ? "text-foreground" : "text-muted-foreground")}
-                  />
+          <div className="space-y-1.5">
+            {sections.map((section) => (
+              <div key={section.id} className="space-y-0.5">
+                {section.heading ? (
+                  <div className="px-2 pb-0.5 pt-1 text-[11px] font-medium text-muted-foreground">
+                    {section.heading}
+                  </div>
                 ) : null}
-                <span className="min-w-0 flex-1 truncate">{label}</span>
-              </button>
-            );
-            // A star button cannot sit inside the choose button (nested
-            // buttons are invalid), so a favoritable row is a wrapper with
-            // the choose button and the star side by side.
-            if (!onToggleFavorite) return <div key={item}>{chooseRow}</div>;
-            return (
-              <div key={item} className="flex items-center gap-1">
-                {chooseRow}
-                <button
-                  type="button"
-                  aria-pressed={starred}
-                  aria-label={starred ? `Remove ${label} from favorites` : `Favorite ${label}`}
-                  title={starred ? `Remove ${label} from favorites` : `Favorite ${label}`}
-                  onClick={() => onToggleFavorite(item)}
-                  className={cn(
-                    "flex size-11 shrink-0 items-center justify-center rounded-full outline-none transition-colors focus-visible:bg-muted",
-                    large ? "" : "hover:bg-muted",
-                  )}
-                >
-                  <Star className={cn("size-4", starred ? "fill-primary text-primary" : "text-muted-foreground")} />
-                </button>
+                {section.items.map(renderRow)}
               </div>
-            );
-          })
+            ))}
+          </div>
         ) : (
           <div className="px-3 py-8 text-center text-sm text-muted-foreground">
-            No matching models
+            Geen passende modellen
           </div>
         )}
       </div>
@@ -27720,10 +27812,11 @@ export function ModelOptionList({
 }
 
 /**
- * Desktop composer pill: agent AND model behind one trigger. The popover holds
- * the same AgentIconStrip the other surfaces use, with the model list for the
- * chosen agent under it. Picking an agent keeps the popover open (the model
- * list changes with it); picking a model closes it.
+ * Desktop composer pill: agent AND model behind one trigger. Two-pane popover
+ * when both agents and models are shown (named agent list on the left, model
+ * list with favorites first on the right, thinking + execution host tucked
+ * cleanly into the footer). Picking an agent keeps the popover open; picking a
+ * model closes it.
  */
 export function AgentModelPicker<K extends AgentKind>({
   options,
@@ -27790,17 +27883,32 @@ export function AgentModelPicker<K extends AgentKind>({
   footer?: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  const [showLocked, setShowLocked] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!open) setShowLocked(false);
+  }, [open]);
   // Nothing to choose: the pill would open an empty popover.
   if (!showAgents && !showModels && !footer) return null;
   // A hosted omg model makes the pill wear the lab's mark, with a small omg
   // mark in the corner so the agent is still readable at a glance.
   const hostedModel = showModels && agent === "omg" ? parseOmgModel(model) : null;
+  const liveOptions = options.filter((option) => !option.locked);
+  const lockedOptions = options.filter((option) => option.locked);
+  const hasMultipleClaudeAccounts = liveOptions.filter((option) => option.key === "aisdk").length > 1;
+  const twoPane = showAgents && showModels && options.length > 0;
+
+  const pillText = showModels
+    ? model
+      ? pickerModelDisplay(model).label
+      : "Model"
+    : pickerAgentLabel(agentLabel, hasMultipleClaudeAccounts);
+
   const trigger = (
     <button
       type="button"
       aria-label={`Agent ${agentLabel}, model ${model ? pickerModelDisplay(model).label : "not set"}. Change agent or model`}
-      title={`${agentLabel} · ${model || "model"}${host ? ` · ${executionHostLabel(host.value)}` : ""}`}
+      title={`${pickerAgentLabel(agentLabel, hasMultipleClaudeAccounts)} · ${model ? pickerModelDisplay(model).label : "model"}${host ? ` · ${executionHostLabel(host.value)}` : ""}`}
       aria-haspopup="dialog"
       aria-expanded={open}
       className="inline-flex h-8 min-w-0 cursor-pointer items-center gap-1.5 rounded-full bg-muted pl-1 pr-2.5 text-foreground transition active:scale-[0.98]"
@@ -27825,14 +27933,77 @@ export function AgentModelPicker<K extends AgentKind>({
           </span>
         ) : null}
       </span>
-      <span className="max-w-32 truncate text-xs font-medium">
-        {showModels ? (model ? pickerModelDisplay(model).label : "model") : agentLabel}
-      </span>
+      <span className="max-w-44 truncate text-xs font-medium">{pillText}</span>
       <ChevronDown className="size-3 shrink-0 text-muted-foreground/70" />
     </button>
   );
+
+  const renderAgentButton = (option: (typeof options)[number]) => {
+    const { key, label, selectorId, accountId, badge, locked } = option;
+    const selected = !locked && (selectedId ? selectedId === (selectorId ?? key) : agent === key);
+    const displayLabel = pickerAgentLabel(label, hasMultipleClaudeAccounts);
+    return (
+      <button
+        key={selectorId ?? key}
+        type="button"
+        title={locked ? `${displayLabel} koppelen` : displayLabel}
+        aria-label={locked ? `Connect ${label}` : label}
+        aria-pressed={locked ? undefined : selected}
+        onClick={() => {
+          if (locked) {
+            setOpen(false);
+            onLocked?.(key);
+          } else {
+            onSelectAgent(key, { accountId, selectorId });
+          }
+        }}
+        className={cn(
+          "flex h-7 shrink-0 items-center gap-2 rounded-lg px-2 text-left text-[13px] outline-none transition-colors duration-100 motion-reduce:transition-none focus-visible:ring-2 focus-visible:ring-ring sm:w-full",
+          selected
+            ? "bg-background font-medium text-foreground shadow-2xs ring-1 ring-border/70"
+            : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
+          locked && "opacity-75",
+        )}
+      >
+        <span className="relative flex size-4 shrink-0 items-center justify-center">
+          <img
+            src={agentIconSrc(key)}
+            alt=""
+            className={cn("size-4", locked && "opacity-45 grayscale")}
+          />
+          {badge != null ? (
+            <span className="absolute -bottom-1 -right-1 flex size-3 items-center justify-center rounded-full bg-foreground text-[7px] font-bold leading-none text-background ring-1 ring-background">
+              {badge}
+            </span>
+          ) : null}
+        </span>
+        <span className="min-w-0 flex-1 truncate">{displayLabel}</span>
+        {locked ? (
+          <Plus className="size-3 shrink-0 text-muted-foreground" />
+        ) : selected ? (
+          <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-primary" />
+        ) : null}
+      </button>
+    );
+  };
+
   return (
-    <Popover.Root open={open} onOpenChange={setOpen}>
+    <Popover.Root
+      open={open}
+      onOpenChange={(next, details) => {
+        // An off-screen iOS haptic switch ticks via input.click() on document.body;
+        // never let a synthetic haptic tick dismiss the open picker.
+        const target = details?.event?.target as Element | null;
+        if (
+          !next &&
+          details?.reason === "outside-press" &&
+          target?.matches?.('input[type="checkbox"][switch][aria-hidden="true"]')
+        ) {
+          return;
+        }
+        setOpen(next);
+      }}
+    >
       <Popover.Trigger render={trigger} />
       <Popover.Portal>
         <Popover.Positioner
@@ -27846,57 +28017,87 @@ export function AgentModelPicker<K extends AgentKind>({
         >
           <Popover.Popup
             initialFocus={showModels && modelListSearchable(models) ? inputRef : true}
-            // Clamped to the room below the trigger, like the model pill's
-            // own popover. It is pinned under the composer on purpose
-            // (collisionAvoidance above), so without a cap the list ran off
-            // the bottom of the screen and its last models could not be
-            // reached at all — reported on an iPad, where the composer sits
-            // low and the agent strip eats the space above the list.
-            className="flex max-h-[var(--available-height)] w-80 max-w-[calc(100vw-1rem)] flex-col overflow-hidden rounded-2xl border border-border bg-popover p-2 text-popover-foreground shadow-2xl ring-1 ring-foreground/5 outline-none"
+            className={cn(
+              "flex max-h-[min(var(--available-height),520px)] max-w-[calc(100vw-1rem)] flex-col overflow-hidden rounded-xl border border-border bg-popover text-popover-foreground shadow-xl ring-1 ring-foreground/5 outline-none",
+              twoPane ? "w-[min(520px,calc(100vw-1rem))]" : showAgents && !showModels ? "w-60" : "w-80",
+            )}
           >
-            {/* No section labels. The icon strip is obviously the agent
-                row and the list under it is obviously models; the words
-                only added height. Each agent button still carries its name
-                as a title/aria-label. */}
-            {host ? (
-              <ExecutionHostChoice
-                className="mb-1.5 border-b border-border pb-1"
-                options={executionHostOptions(host.hosts, host.value)}
-                onPick={(id) => host.onChange(id as ExecutionHostId)}
-                onRefresh={host.refresh}
-              />
-            ) : null}
-            {showAgents ? (
-              <AgentIconStrip
-                options={options}
-                value={agent}
-                selectedId={selectedId}
-                onSelect={onSelectAgent}
-                onLocked={(key) => {
-                  setOpen(false);
-                  onLocked?.(key);
-                }}
-                className={cn("h-auto max-w-full flex-wrap", showModels && "mb-1.5")}
-              />
-            ) : null}
-            {showModels ? (
-              <ModelOptionList
-                value={model}
-                models={models}
-                onChoose={(next) => {
-                  onModelChange(next);
-                  setOpen(false);
-                }}
-                onEscape={() => setOpen(false)}
-                inputRef={inputRef}
-                fill
-                favorites={favorites}
-                onToggleFavorite={onToggleFavorite}
-              />
-            ) : null}
-            {footer ? (
-              <div className="mt-2 shrink-0 border-t border-border px-1 pb-1 pt-3">
-                {footer}
+            <div
+              className={cn(
+                "flex min-h-0 flex-1 overflow-hidden",
+                twoPane ? "flex-col sm:flex-row" : "flex-col",
+              )}
+            >
+              {showAgents && options.length > 0 ? (
+                <div
+                  className={cn(
+                    "flex shrink-0 flex-col bg-muted/35 p-1.5",
+                    twoPane
+                      ? "border-b border-border sm:w-[172px] sm:border-b-0 sm:border-r"
+                      : "min-h-0 flex-1",
+                  )}
+                >
+                  <div className="hidden px-2 pb-1 pt-0.5 text-[11px] font-medium text-muted-foreground sm:block">
+                    Agents
+                  </div>
+                  <div
+                    role="group"
+                    aria-label="Agents"
+                    className={cn(
+                      "ab-picker-scroll flex gap-0.5 overflow-x-auto sm:flex-col sm:overflow-y-auto sm:overflow-x-hidden",
+                      twoPane && "sm:min-h-0 sm:flex-1",
+                    )}
+                  >
+                    {liveOptions.map(renderAgentButton)}
+                    {showLocked ? lockedOptions.map(renderAgentButton) : null}
+                  </div>
+                  {lockedOptions.length > 0 ? (
+                    <button
+                      type="button"
+                      onClick={() => setShowLocked((value) => !value)}
+                      className="mt-1 hidden items-center gap-1.5 border-t border-border/70 px-2 pb-0.5 pt-1 text-left text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground sm:flex"
+                    >
+                      <Plus className={cn("size-3 transition-transform duration-100 motion-reduce:transition-none", showLocked && "rotate-45")} />
+                      <span>
+                        {showLocked
+                          ? "Verberg niet gekoppeld"
+                          : `Koppelen (${lockedOptions.length})`}
+                      </span>
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {showModels ? (
+                <div className="flex min-h-0 min-w-0 flex-1 flex-col p-1.5">
+                  <ModelOptionList
+                    value={model}
+                    models={models}
+                    onChoose={(next) => {
+                      onModelChange(next);
+                      setOpen(false);
+                    }}
+                    onEscape={() => setOpen(false)}
+                    inputRef={inputRef}
+                    fill
+                    favorites={favorites}
+                    onToggleFavorite={onToggleFavorite}
+                  />
+                </div>
+              ) : null}
+            </div>
+
+            {footer || host ? (
+              <div className="shrink-0 space-y-1.5 border-t border-border bg-muted/20 px-2.5 py-2">
+                {footer ? <div>{footer}</div> : null}
+                {host ? (
+                  <ExecutionHostChoice
+                    compact
+                    options={executionHostOptions(host.hosts, host.value)}
+                    onPick={(id) => host.onChange(id as ExecutionHostId)}
+                    onRefresh={host.refresh}
+                  />
+                ) : null}
               </div>
             ) : null}
           </Popover.Popup>

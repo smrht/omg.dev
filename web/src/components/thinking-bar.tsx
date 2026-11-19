@@ -1,7 +1,8 @@
 /**
- * ThinkingBar, lifted out of upstream's agent-setup-sheet.tsx (0.6.176).
- * Agentbox replaced the setup sheet with the compact model picker, but the
- * desktop model dropdown footer (upstream c70f47ae) still wants the bar.
+ * Segmented thinking-level slider for the desktop model picker footer.
+ * Replaces the upstream blue-purple gradient + blind dots with readable
+ * labels per segment in the agentbox neutral palette, while keeping slider
+ * keyboard/drag accessibility intact.
  */
 import { useRef, useState } from "react";
 import { cn } from "@/lib/utils";
@@ -13,12 +14,8 @@ export type ThinkingBarChoice = {
   disabled?: boolean;
 };
 
-/** The iOS thinking gradient, darkened for white label contrast. */
-const THINKING_GRADIENT = "linear-gradient(90deg, #2169BD 0%, #595CBE 34%, #914BAD 68%, #AF49B3 100%)";
-
 /**
- * The whole bar owns the gesture: press, drag across, release to pick. The
- * fill always spans the full bar, so its width is the only thing that moves.
+ * The whole bar owns the gesture: press, click or drag across, release to pick.
  */
 export function ThinkingBar({ options, onPick, compact = false }: {
   options: ThinkingBarChoice[];
@@ -79,36 +76,31 @@ export function ThinkingBar({ options, onPick, compact = false }: {
       }}
       onPointerCancel={() => setDragIndex(null)}
       className={cn(
-        "relative flex select-none overflow-hidden bg-muted outline-none focus-visible:ring-2 focus-visible:ring-ring",
-        compact ? "h-7 rounded-lg" : "h-[52px] rounded-[14px]",
+        "relative flex flex-1 select-none items-center gap-0.5 bg-muted p-0.5 outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        compact ? "h-7 rounded-lg" : "h-10 rounded-xl",
       )}
     >
-      <div
-        aria-hidden
-        className={cn(
-          "pointer-events-none absolute inset-y-0 left-0 overflow-hidden transition-[width] duration-150 ease-out motion-reduce:transition-none",
-          compact ? "rounded-lg" : "rounded-[14px]",
-        )}
-        style={{ width: `${((active + 1) / options.length) * 100}%` }}
-      >
-        <div className="h-full" style={{ width: `${(options.length / (active + 1)) * 100}%`, background: THINKING_GRADIENT }} />
-      </div>
-      {options.map((option, index) => (
-        <div
-          key={option.id}
-          aria-hidden
-          className={cn(
-            "pointer-events-none relative flex flex-1 items-center justify-center",
-            option.disabled && "opacity-35",
-          )}
-        >
-          {index === active ? (
-            <span className={cn("truncate px-1 font-semibold text-white", compact ? "text-[11px]" : "text-[13px]")}>{option.label}</span>
-          ) : (
-            <span className={cn("size-1 rounded-full", index < active ? "bg-white" : "bg-muted-foreground")} />
-          )}
-        </div>
-      ))}
+      {options.map((option, index) => {
+        const isActive = index === active;
+        return (
+          <div
+            key={option.id}
+            aria-hidden
+            className={cn(
+              "pointer-events-none flex h-full min-w-0 flex-1 items-center justify-center rounded-[6px] px-1.5 transition-colors duration-100 motion-reduce:transition-none",
+              !compact && "rounded-[9px]",
+              isActive
+                ? "bg-background font-medium text-foreground shadow-xs ring-1 ring-border/70"
+                : "text-muted-foreground",
+              option.disabled && "opacity-35",
+            )}
+          >
+            <span className={cn("truncate", compact ? "text-[11px]" : "text-xs")}>
+              {option.label}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }
