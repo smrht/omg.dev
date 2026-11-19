@@ -207,7 +207,12 @@ export async function createAntigravityRuntime(
   async function open(resume: string | undefined, quiet: boolean): Promise<AntigravityLink> {
     const child = spawn(antigravityHarnessPath(), antigravityHarnessArgv(), {
       cwd,
-      env: antigravityEnv(),
+      // The session id reaches agy's own shell commands too, as it does for
+      // Claude and ZCode, so scripts that read OMG_SESSION_ID work here.
+      env: antigravityEnv({
+        ...process.env,
+        OMG_SESSION_ID: process.env.OMG_SESSION_ID ?? process.env.LFG_SESSION_ID ?? key,
+      }),
       stdio: ["pipe", "pipe", "inherit"],
     });
     if (!child.stdin || !child.stdout) throw new Error("Antigravity ACP stdio was not available");
