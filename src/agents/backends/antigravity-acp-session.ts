@@ -262,7 +262,7 @@ export async function createAntigravityRuntime(
       opened = await bindAcpConversation({
         context: connection.agent,
         cwd,
-        mcpServers: omgAcpMcpServers(key),
+        mcpServers: omgAcpMcpServers(key, { compactTools: true }),
         resume,
         state,
         sink,

@@ -10,6 +10,7 @@
 // HTTP call to this same process), so the serve process can answer every agent
 // itself. Agents whose CLI can register an HTTP MCP server are pointed here
 // instead, and the per-session processes disappear.
+import { compactToolsListBody } from "./mcp-compact.ts";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { aliasLegacyToolNames, buildOmgMcpServer, withCallerSession } from "./commands/mcp.ts";
@@ -56,8 +57,9 @@ export async function serveOmgMcpRequest(
   // resolves the same session the agent is running as. serve.ts passes the
   // session it verified (src/policy/caller.ts); the default keeps the raw
   // query-string behaviour for callers that bypass that layer, such as tests.
+  const compact = new URL(req.url).searchParams.get("tools") === "compact";
   return await withCallerSession(sessionId, () =>
-    answerOne(req, buildOmgMcpServer, true),
+    answerOne(req, buildOmgMcpServer, true, compact),
   );
 }
 
@@ -87,6 +89,7 @@ async function answerOne(
   req: Request,
   build: () => McpServer,
   aliasLegacy: boolean,
+  compact = false,
 ): Promise<Response> {
   const server = build();
   const transport = new WebStandardStreamableHTTPServerTransport({
@@ -123,6 +126,15 @@ async function answerOne(
   const body = await response.arrayBuffer();
   void transport.close().catch(() => {});
   void server.close().catch(() => {});
+  if (compact && response.headers.get("content-type")?.includes("application/json")) {
+    // Antigravity hides large tools from ACP-supplied servers (src/mcp-compact.ts).
+    // omg_ship stays full size on purpose: lazy means unreachable, which is right
+    // on a box where the Shipped feed is off.
+    const text = compactToolsListBody(new TextDecoder().decode(body), (name) => name === "omg_ship");
+    const headers = new Headers(response.headers);
+    headers.delete("content-length");
+    return new Response(text, { status: response.status, statusText: response.statusText, headers });
+  }
   return new Response(body, {
     status: response.status,
     statusText: response.statusText,
