@@ -270,3 +270,59 @@ describe("bindAcpConversation", () => {
     expect(tools).toEqual([]);
   });
 });
+
+describe("ACP tool output and step reasoning (Antigravity shape)", () => {
+  test("a tool end without rawOutput takes its text from the content blocks", () => {
+    const ends: unknown[] = [];
+    const { sink } = sinkRecorder();
+    sink.toolEnd = (_id, name, output) => ends.push([name, output]);
+    const state: AcpUpdateState = { draft: "", thought: "", replaying: false };
+    applyAcpSessionUpdate({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "c1",
+      status: "completed",
+      title: "ls | head -3",
+      name: "run_command",
+      content: [{ type: "content", content: { type: "text", text: "Created At: 2026-11-19T19:53:23+01:00\nCompleted At: 2026-11-19T19:53:23+01:00\nCommand exited with code 0.\n\nCommand output:\na0.txt\n" } }],
+    } as acp.SessionUpdate, sink, state);
+    expect(ends).toEqual([["run_command", "Command exited with code 0.\n\nCommand output:\na0.txt"]]);
+  });
+
+  test("rawOutput still wins when an agent sends it", () => {
+    const ends: unknown[] = [];
+    const { sink } = sinkRecorder();
+    sink.toolEnd = (_id, _name, output) => ends.push(output);
+    const state: AcpUpdateState = { draft: "", thought: "", replaying: false };
+    applyAcpSessionUpdate({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "c2",
+      status: "completed",
+      rawOutput: { ok: true },
+      content: [{ type: "content", content: { type: "text", text: "ignored" } }],
+    } as acp.SessionUpdate, sink, state);
+    expect(ends).toEqual([{ ok: true }]);
+  });
+
+  test("reasoning before a tool is committed as its own step", () => {
+    const order: string[] = [];
+    const { sink } = sinkRecorder();
+    sink.commitThinking = (text) => order.push(`think:${text}`);
+    sink.commitText = (text) => order.push(`text:${text}`);
+    sink.toolStart = (id) => order.push(`tool:${id}`);
+    const state: AcpUpdateState = { draft: "", thought: "", replaying: false };
+    applyAcpSessionUpdate({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "plan A" } }, sink, state);
+    applyAcpSessionUpdate({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "I will list it." } }, sink, state);
+    applyAcpSessionUpdate({ sessionUpdate: "tool_call", toolCallId: "t1", title: "ls", status: "in_progress" } as acp.SessionUpdate, sink, state);
+    applyAcpSessionUpdate({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "plan B" } }, sink, state);
+    expect(order).toEqual(["think:plan A", "text:I will list it.", "tool:t1"]);
+    expect(state.thought).toBe("plan B");
+  });
+
+  test("a sink without commitThinking keeps the whole turn's reasoning for the turn end", () => {
+    const { sink } = sinkRecorder();
+    const state: AcpUpdateState = { draft: "", thought: "", replaying: false };
+    applyAcpSessionUpdate({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "plan A" } }, sink, state);
+    applyAcpSessionUpdate({ sessionUpdate: "tool_call", toolCallId: "t1", title: "ls", status: "in_progress" } as acp.SessionUpdate, sink, state);
+    expect(state.thought).toBe("plan A");
+  });
+});

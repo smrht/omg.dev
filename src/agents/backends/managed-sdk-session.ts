@@ -35,6 +35,12 @@ export type ManagedSdkEventSink = {
    * at turn end (e.g. "codebase.This is the vibes repo").
    */
   commitText(text: string): void;
+  /**
+   * Commit streamed reasoning as its own thinking row at a mid-turn boundary
+   * (before a tool), so a long turn shows its steps instead of one thought
+   * blob at turn end. Optional: a sink without it keeps the turn-end commit.
+   */
+  commitThinking?(text: string): void;
   toolStart(id: string, name: string, input?: unknown): void;
   toolEnd(id: string, name: string, output?: unknown, error?: boolean): void;
   ask(question: string, options: ManagedSdkPromptOption[], header?: string): Promise<number | null>;
@@ -225,6 +231,14 @@ export async function runManagedSdkSession(options: ManagedSdkSessionOptions): P
       publishDraft("", true);
       if (!body) return;
       indexSessionMessagesDirect(key, [row("assistant", "text", body)]);
+    },
+    commitThinking(next) {
+      const body = next.trim();
+      thought = "";
+      if (!draft) publishDraft("", true);
+      if (!body) return;
+      noteBackgroundActivity();
+      indexSessionMessagesDirect(key, [row("assistant", "thinking", clipped(body))]);
     },
     toolStart(id, name, input) {
       noteBackgroundActivity({ start: id });

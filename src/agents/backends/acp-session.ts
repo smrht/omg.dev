@@ -60,6 +60,39 @@ export function acpResumeStrategy(
   return "new";
 }
 
+/**
+ * What a finished tool returned. `rawOutput` is optional in ACP; Antigravity
+ * (agy) leaves it out and puts the result in `content` blocks instead, and the
+ * session drops a tool end without output. Fall back to the text of those
+ * blocks (and the path of a diff), minus agy's "Created At/Completed At"
+ * timestamp preamble, so the result row exists like it does for Claude.
+ */
+export function acpToolOutput(update: {
+  rawOutput?: unknown;
+  content?: ReadonlyArray<acp.ToolCallContent> | null;
+}): unknown {
+  if (update.rawOutput !== undefined && update.rawOutput !== null) return update.rawOutput;
+  const parts: string[] = [];
+  for (const block of update.content ?? []) {
+    if (block.type === "content") parts.push(contentText(block.content));
+    else if (block.type === "diff") parts.push(`edited ${block.path}`);
+  }
+  const body = parts.join("\n").replace(/^(?:(?:Created|Completed) At: [^\n]*\n)+/, "").trim();
+  return body || undefined;
+}
+
+/**
+ * Commit the reasoning streamed before a tool as its own thinking row. Without
+ * it a long turn keeps every thought in one draft and the transcript shows one
+ * blob at turn end, so a running agent reads as a silent wall of tools.
+ */
+function flushAcpThought(sink: ManagedSdkEventSink, state: AcpUpdateState): void {
+  if (!sink.commitThinking || !state.thought.trim()) return;
+  const body = state.thought;
+  state.thought = "";
+  sink.commitThinking(body);
+}
+
 function flushAcpDraft(sink: ManagedSdkEventSink, state: AcpUpdateState): void {
   const body = state.draft;
   if (!body.trim()) return;
@@ -91,15 +124,17 @@ export function applyAcpSessionUpdate(
       // Cursor (and other ACP agents) stream short narrations between tools.
       // Commit each segment before the tool so the transcript keeps message
       // boundaries instead of one glued wall of text at turn end.
+      flushAcpThought(sink, state);
       flushAcpDraft(sink, state);
       sink.toolStart(update.toolCallId, update.name ?? update.title, update.rawInput);
       if (update.status === "completed" || update.status === "failed") {
-        sink.toolEnd(update.toolCallId, update.name ?? update.title, update.rawOutput, update.status === "failed");
+        sink.toolEnd(update.toolCallId, update.name ?? update.title, acpToolOutput(update), update.status === "failed");
       }
       break;
     case "tool_call_update":
       if (update.status === "completed" || update.status === "failed") {
-        sink.toolEnd(update.toolCallId, update.title ?? "tool", update.rawOutput, update.status === "failed");
+        const name = (update as { name?: string | null }).name ?? update.title ?? "tool";
+        sink.toolEnd(update.toolCallId, name, acpToolOutput(update), update.status === "failed");
       }
       break;
     default:
