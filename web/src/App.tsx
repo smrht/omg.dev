@@ -291,7 +291,6 @@ export function prefetchChatEngine(): void {
   // unhandled rejection and a phantom finding.
   const run = () => {
     void import("./lib/chat-engine").catch(() => {});
-    void preloadMessageResponse();
   };
   const ric = (globalThis as { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number })
     .requestIdleCallback;
@@ -15770,7 +15769,7 @@ const RailItem = memo(function RailItem({
               animation that Firefox and reduced motion leave standing still.
               A bot keeps state in its own posture. */}
           <SessionStatusDot
-            busy={busy && !drivingBot}
+            busy={busy && !drivingBot && collapsed}
             paused={session.status === "blocked"}
             variant="avatar"
           />
@@ -15805,10 +15804,15 @@ const RailItem = memo(function RailItem({
               <span aria-hidden="true" className="mr-1 inline-block size-1.5 -translate-y-px rounded-full bg-current align-middle" />
               Bezig
             </span>
+            {session.parentSessionId && session.project ? (
+              <span className="font-medium text-foreground/75">{" · " + shortProject(session.project)}</span>
+            ) : null}
             {" · " + (latest || "Agent werkt aan je opdracht")}
           </span>
         ) : (
-          <span className={questions.length || session.status === "blocked" ? "text-amber-700 dark:text-amber-400" : undefined}>{overviewPreview}</span>
+          <span className={questions.length || session.status === "blocked" ? "text-amber-700 dark:text-amber-400" : undefined}>
+            {session.parentSessionId && session.project && !questions.length ? `${shortProject(session.project)} · ${overviewPreview}` : overviewPreview}
+          </span>
         )
       }
       metadata={workspace ? <span className="workspace-row-metadata">

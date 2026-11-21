@@ -19,7 +19,7 @@ const CALLOUT_DISMISSED_KEY = "lfg_pwa_install_callout_dismissed";
 
 function initiallyDismissed() {
   try {
-    return sessionStorage.getItem(CALLOUT_DISMISSED_KEY) === "1";
+    return localStorage.getItem(CALLOUT_DISMISSED_KEY) === "1" || sessionStorage.getItem(CALLOUT_DISMISSED_KEY) === "1";
   } catch {
     return false;
   }
@@ -106,6 +106,7 @@ export function PwaInstallCallout() {
   const dismiss = () => {
     setDismissed(true);
     try {
+      localStorage.setItem(CALLOUT_DISMISSED_KEY, "1");
       sessionStorage.setItem(CALLOUT_DISMISSED_KEY, "1");
     } catch {
       // Storage can be disabled; dismissing for this render is still enough.
@@ -114,19 +115,16 @@ export function PwaInstallCallout() {
 
   return (
     <>
-      <aside className="mx-3 mt-2 flex items-center gap-3 rounded-2xl border border-primary/20 bg-card/90 px-3 py-2.5 shadow-sm backdrop-blur-xl">
-        <OmgBrandMark className="size-10 text-muted-foreground" />
-        <div className="min-w-0 flex-1">
-          <div className="text-sm font-semibold">Installeer agentbox</div>
-          <div className="truncate text-xs text-muted-foreground">
-            Sneller open, eigen venster en een icoon op je beginscherm.
-          </div>
-        </div>
-        <Button size="sm" onClick={() => void action.act()} disabled={action.busy}>
-          <Download className="size-4" />
+      <aside className="mx-2 mt-1.5 flex items-center gap-2 rounded-xl border border-border bg-card px-2.5 py-1.5">
+        <OmgBrandMark className="size-6 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground">
+          Zet agentbox op je scherm
+        </span>
+        <Button size="xs" onClick={() => void action.act()} disabled={action.busy}>
+          <Download className="size-3.5" />
           {mode === "native" ? "Installeren" : "Hoe"}
         </Button>
-        <Button size="icon-xs" variant="ghost" onClick={dismiss} aria-label="Dismiss install suggestion">
+        <Button size="icon-xs" variant="ghost" onClick={dismiss} aria-label="Installatiemelding sluiten">
           <X className="size-3.5" />
         </Button>
       </aside>

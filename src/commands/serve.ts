@@ -1896,6 +1896,9 @@ function subscribeAgentRun(runId: string, cb: (event: { type: "log"; line: strin
 const WEB_DIR = join(import.meta.dir, "..", "..", "web", "dist");
 const INDEX_PATH = join(WEB_DIR, "index.html");
 
+const PROJECT_FAVICON_TTL_MS = 10 * 60_000;
+const PROJECT_FAVICON_CACHE = new Map<string, { at: number; path: string | null }>();
+
 const STATIC_FILES: Record<string, { path: string; type: string }> = {
   "/manifest.webmanifest": {
     path: join(WEB_DIR, "manifest.webmanifest"),
@@ -8791,13 +8794,25 @@ a{color:#60a5fa}
       if (path === "/api/repos/favicon" && req.method === "GET") {
         const project = url.searchParams.get("project")?.trim();
         if (!project) return err(400, "project is required");
-        // Resolve the project through the configured repository list. The
-        // request never supplies a filesystem path, so this image endpoint
-        // cannot become a local-file reader for arbitrary paths.
-        const repo = (await listRepos()).find((entry) => entry.project === project);
-        if (!repo) return err(404, "project not found");
-        const favicon = await findProjectFavicon(repo.cwd);
-        if (!favicon) return err(404, "project favicon not found");
+        const now = Date.now();
+        const cached = PROJECT_FAVICON_CACHE.get(project);
+        let favicon: string | null;
+        if (cached && now - cached.at < PROJECT_FAVICON_TTL_MS) {
+          favicon = cached.path;
+        } else {
+          // Resolve the project through the configured repository list. The
+          // request never supplies a filesystem path, so this image endpoint
+          // cannot become a local-file reader for arbitrary paths.
+          const repo = (await listRepos()).find((entry) => entry.project === project);
+          favicon = repo ? await findProjectFavicon(repo.cwd) : null;
+          PROJECT_FAVICON_CACHE.set(project, { at: now, path: favicon });
+        }
+        if (!favicon) {
+          return new Response("project favicon not found", {
+            status: 404,
+            headers: { "Cache-Control": "public, max-age=3600" },
+          });
+        }
         return staticAssetResponse(req, url, favicon, projectFaviconMime(favicon));
       }
 

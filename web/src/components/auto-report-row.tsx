@@ -15,11 +15,11 @@ export const SEV_LABEL: Record<GroupableFinding["severity"], string> = {
 };
 export function relTime(ts: number): string {
   const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
-  if (s < 60) return "now";
+  if (s < 60) return "nu";
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m`;
   const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h`;
+  if (h < 24) return `${h}u`;
   return `${Math.floor(h / 24)}d`;
 }
 

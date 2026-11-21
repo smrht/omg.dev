@@ -1422,15 +1422,36 @@ export function invalidateProviderUsage(id: string): void {
   cache.delete(id);
 }
 
+const STALE_REVALIDATE_MAX_MS = 30 * 60_000;
+
 function loadProvider(ref: UsageProviderRef, force: boolean): Promise<ProviderUsage> {
   const slow = SLOW_SOURCE_TTL_MS[ref.kind];
+  const ttl = slow?.ttl ?? CACHE_TTL_MS;
   if (force && slow) {
     const hit = cache.get(ref.id);
     if (hit && Date.now() - hit.at < slow.forceMin) force = false;
   }
   if (!force) {
     const hit = cache.get(ref.id);
-    if (hit && Date.now() - hit.at < (slow?.ttl ?? CACHE_TTL_MS)) return Promise.resolve(hit.data);
+    const age = hit ? Date.now() - hit.at : Infinity;
+    if (hit && age < ttl) return Promise.resolve(hit.data);
+    // Stale-while-revalidate: geef een recente cached waarde (<30m) direct terug
+    // (<1ms) en ververs stil op de achtergrond zodat de UI nooit 2s wacht.
+    if (hit && age < STALE_REVALIDATE_MAX_MS) {
+      if (!inflight.has(ref.id)) {
+        const bg = collect(ref, false)
+          .then((data) => {
+            cache.set(ref.id, { at: Date.now(), data });
+            return data;
+          })
+          .catch(() => hit.data)
+          .finally(() => {
+            if (inflight.get(ref.id) === bg) inflight.delete(ref.id);
+          });
+        inflight.set(ref.id, bg);
+      }
+      return Promise.resolve(hit.data);
+    }
     // Two clients opening the campfire at once should share one round-trip.
     const pending = inflight.get(ref.id);
     if (pending) return pending;

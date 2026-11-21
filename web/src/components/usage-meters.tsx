@@ -155,12 +155,13 @@ export function RailUsageMeters({ collapsed }: { collapsed?: boolean }) {
   // Claude en Codex blijven altijd staan: nog bezig = "…", geen cijfer = "—".
   // Een bron die stil wegvalt leest als "niks aan de hand".
   const byId = new Map(providers.map((p) => [p.id, p]));
-  const KERN = new Set(["claude", "codex"]);
+  const KERN = new Set(["claude", "codex", "antigravity"]);
   const rows: ProviderUsage[] = [];
   for (const ref of refs ?? []) {
+    if (ref.kind === "muse") continue;
     const raw = byId.get(ref.id);
     const p = raw ? metLaatsteStand(raw) : undefined;
-    if (p && p.available && (p.windows ?? []).length) rows.push(p);
+    if (p && p.available && tightestWindow(p.windows) != null) rows.push(p);
     else if (KERN.has(ref.kind)) rows.push(p ?? { ...ref, available: false, note: "laden" });
   }
   if (!rows.length) {

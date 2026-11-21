@@ -149,12 +149,30 @@ function providerPath(id: string, force: boolean): string {
   return `/api/usage/${encodeURIComponent(id)}${force ? "?force=1" : ""}`;
 }
 
+const PROVIDER_CACHE_TTL_MS = 30_000;
+const providerCache = new Map<string, { at: number; data: ProviderUsage }>();
+const providerInflight = new Map<string, Promise<ProviderUsage>>();
+
 export async function fetchProviderUsage(
   id: string,
   force = false,
 ): Promise<ProviderUsage> {
-  const payload = await api<{ provider: ProviderUsage }>(providerPath(id, force));
-  return payload.provider;
+  if (!force) {
+    const hit = providerCache.get(id);
+    if (hit && Date.now() - hit.at < PROVIDER_CACHE_TTL_MS) return hit.data;
+    const pending = providerInflight.get(id);
+    if (pending) return pending;
+  }
+  const run = api<{ provider: ProviderUsage }>(providerPath(id, force))
+    .then((payload) => {
+      providerCache.set(id, { at: Date.now(), data: payload.provider });
+      return payload.provider;
+    })
+    .finally(() => {
+      if (providerInflight.get(id) === run) providerInflight.delete(id);
+    });
+  providerInflight.set(id, run);
+  return run;
 }
 
 export type ResetConsumeOutcome =
@@ -289,7 +307,8 @@ export function useUsageFeed({
       const gen = ++generation.current;
       setPending((n) => n + 1);
       try {
-        const directory = await fetchUsageProviders(force);
+        // agentbox: verboden Muse en niet-gebruikte Grok niet onnodig op elke boot pollen (~3,6 s winst).
+        const directory = (await fetchUsageProviders(force)).filter((ref) => ref.kind !== "muse");
         if (generation.current !== gen) return;
         setRefs(directory);
         setError(null);
