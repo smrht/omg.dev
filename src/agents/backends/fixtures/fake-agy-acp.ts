@@ -15,6 +15,17 @@ const send = (message: Record<string, unknown>): void => void
 const configOptions = [
   {
     type: "select",
+    id: "model",
+    name: "Model",
+    category: "model",
+    currentValue: "gemini-4-neon",
+    options: [
+      { value: "gemini-4-neon", name: "Gemini 4 Neon" },
+      { value: "claude-opus-5-5", name: "Claude Opus 5.5" },
+    ],
+  },
+  {
+    type: "select",
     id: "thinking",
     name: "Thinking level",
     category: "thought_level",

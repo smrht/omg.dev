@@ -11320,6 +11320,17 @@ a{color:#60a5fa}
             if (sess.tmuxName) patchManaged(sess.tmuxName, { model });
             return json({ ok: true, model });
           }
+          if (sess.runtime === "command-file" && sess.agent === "antigravity") {
+            // The plan decides which models exist; the runtime matches the id
+            // against what agy offered and refuses one it does not offer.
+            if (!/^[A-Za-z0-9_.:\/-]{1,80}$/.test(model))
+              return err(400, "invalid antigravity model name");
+            const entry = findAisdkEntryByAnyId(m[1]);
+            if (!entry) return err(409, "session control process is unavailable");
+            appendAisdkCmd(entry.sessionId, { type: "set_model", model });
+            if (sess.tmuxName) patchManaged(sess.tmuxName, { model });
+            return json({ ok: true, model });
+          }
           if (sess.agent === "opencode" || sess.agent === "omg") {
             if (sess.agent === "omg" && !modelsForAgent("omg").includes(model))
               return err(400, `unknown omg model "${model}"`);

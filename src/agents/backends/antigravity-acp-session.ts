@@ -334,6 +334,9 @@ export async function createAntigravityRuntime(
 
   const link = await open(options.resume, options.quiet === true);
   const sessionId = link.sessionId;
+  // The level in force now. A model change re-applies it, because the new
+  // model can offer a different set of Thinking values.
+  let currentThinking = thinkingLevel;
 
   return {
     nativeSessionId: sessionId,
@@ -368,7 +371,28 @@ export async function createAntigravityRuntime(
     async setThinkingLevel(level) {
       // With `agy` gone there is nothing to set. runManagedSdkSession still
       // records the level and hands it to the replacement runtime.
+      currentThinking = level;
       if (link.alive) await applyThinking(link, level);
+    },
+    async setModel(next) {
+      // Same ACP option the launch sets, on the live conversation, so the
+      // context stays. Used to move a session off a model whose quota pool is
+      // exhausted (Gemini and Claude/GPT are separate Ultra pools). With `agy`
+      // gone, runManagedSdkSession hands the new model to the replacement.
+      if (!link.alive) return;
+      const choice = resolveAcpConfigChoice(link.configOptions, "model", next);
+      if (!choice) {
+        sink.notice?.(`Antigravity does not offer model "${next}" for this account. It keeps its current model.`);
+        throw new Error(`antigravity does not offer model ${next}`);
+      }
+      const response = (await link.connection.agent.request(acp.methods.agent.session.setConfigOption, {
+        sessionId: link.sessionId,
+        configId: choice.configId,
+        value: choice.value,
+      })) as { configOptions?: acp.SessionConfigOption[] } | undefined;
+      if (Array.isArray(response?.configOptions)) link.configOptions = response.configOptions;
+      if (currentThinking) await applyThinking(link, currentThinking, true);
+      void recordLevels(next, antigravityOfferedLevels(link.configOptions)).catch(() => {});
     },
     async close() {
       if (link.alive && link.canClose) {

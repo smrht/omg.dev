@@ -20614,8 +20614,8 @@ const onTouchStart = (e: ReactTouchEvent) => {
             model mid-conversation is a session action — both belong to the
             session view of this same session, not to the chat. */}
         {!collapsedView && !headerBot && (
-          (session.agent === "claude" || session.agent === "opencode" || session.agent === "omg") &&
-          (session.tmuxTarget || session.agent === "opencode" || session.agent === "omg") &&
+          (session.agent === "claude" || session.agent === "opencode" || session.agent === "omg" || session.agent === "antigravity") &&
+          (session.tmuxTarget || session.agent === "opencode" || session.agent === "omg" || session.agent === "antigravity") &&
           sid ? (
           <DropdownMenu>
             <DropdownMenuTrigger

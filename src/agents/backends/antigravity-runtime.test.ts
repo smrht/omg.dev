@@ -174,6 +174,40 @@ describe("managed Antigravity session when agy ends between turns", () => {
   });
 });
 
+describe("managed Antigravity session model change", () => {
+  test("switches a live agy to another model in the same conversation and keeps the thinking level", async () => {
+    start("high");
+    await waitForPrompt();
+    const pid = logged()[0]!.pid;
+    await waitForText(`reply from ${pid}`);
+
+    command({ type: "set_model", model: "claude-opus-5-5" });
+    for (let i = 0; i < 150 && readEntry(KEY)?.model !== "claude-opus-5-5"; i++) await Bun.sleep(20);
+    expect(readEntry(KEY)?.model).toBe("claude-opus-5-5");
+
+    const set = logged().filter((entry) => entry.method === "session/set_config_option");
+    // Launch: thinking high. Switch: model, then thinking re-applied.
+    expect(set.slice(1).map((entry) => entry.params)).toEqual([
+      { sessionId: "fake-conversation", configId: "model", value: "claude-opus-5-5" },
+      { sessionId: "fake-conversation", configId: "thinking", value: "high" },
+    ]);
+    // Same agy, no restart: the conversation and its context stay.
+    expect(new Set(logged().map((entry) => entry.pid)).size).toBe(1);
+  });
+
+  test("refuses a model the plan does not offer and keeps the current one", async () => {
+    start("high");
+    await waitForPrompt();
+    const pid = logged()[0]!.pid;
+    await waitForText(`reply from ${pid}`);
+
+    command({ type: "set_model", model: "no-such-model" });
+    await waitForText('Antigravity does not offer model "no-such-model" for this account. It keeps its current model.');
+    expect(readEntry(KEY)?.model).toBe("default");
+    expect(logged().filter((entry) => entry.method === "session/set_config_option" && entry.params?.configId === "model")).toEqual([]);
+  });
+});
+
 describe("managed Antigravity session when agy continues after a turn", () => {
   test("reads as working until the continuation ends, and keeps its text once", async () => {
     start("medium", "start the background build");
