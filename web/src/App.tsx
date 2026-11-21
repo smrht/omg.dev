@@ -284,18 +284,26 @@ import {
 // no stack, no recovery. See lazy-with-reload.ts.
 const OmgChatEngine = lazyWithReload("OmgChatEngine", () => import("./lib/chat-engine"));
 
-/** Warm the chat chunk once the app is idle, so opening a session never waits on it. */
+let chatEnginePrefetchStarted = false;
+
+/** Start loading the chat chunk immediately (idempotent). */
+export function warmChatEngineNow(): void {
+  if (chatEnginePrefetchStarted) return;
+  chatEnginePrefetchStarted = true;
+  void import("./lib/chat-engine").catch(() => {
+    chatEnginePrefetchStarted = false;
+  });
+}
+
+/** Warm the chat chunk shortly after mount so opening a session never waits on it. */
 export function prefetchChatEngine(): void {
-  // Swallow the rejection: a warm-up is best-effort, and OmgChatEngine re-imports
-  // (and recovers) on render. Left floating, a failed prefetch became an
-  // unhandled rejection and a phantom finding.
-  const run = () => {
-    void import("./lib/chat-engine").catch(() => {});
-  };
+  const run = () => warmChatEngineNow();
   const ric = (globalThis as { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number })
     .requestIdleCallback;
-  if (typeof ric === "function") ric(run, { timeout: 3000 });
-  else setTimeout(run, 1500);
+  // Safari/iOS has no requestIdleCallback (or fires late); keep fallback short
+  // so tapping a chat right after open never stalls behind a 1.5s timer.
+  if (typeof ric === "function") ric(run, { timeout: 350 });
+  else setTimeout(run, 100);
 }
 import {
   DEFAULT_GLOBAL_SETTINGS,
@@ -15514,6 +15522,7 @@ const RailRow = memo(function RailRow({
         tabIndex={0}
         aria-label={ariaLabel}
         onPointerDown={(e) => {
+          warmChatEngineNow();
           // agentbox: fetch the transcript while the press is still down.
           // Mouse only: on touch every scroll through the list starts with a
           // pointerdown on some row, and opening is render-bound anyway.
@@ -17301,9 +17310,36 @@ function SessionChat(rawProps: SessionChatProps) {
 }
 
 function SessionChatSkeleton() {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSlow(true), 5000);
+    return () => window.clearTimeout(timer);
+  }, []);
   return (
-    <div className="flex flex-1 items-center justify-center py-10 text-sm text-muted-foreground">
-      Loading chat…
+    <div
+      className="flex flex-1 flex-col items-center justify-center gap-3 px-6 py-10 text-center text-sm text-muted-foreground"
+      role="status"
+      aria-live="polite"
+    >
+      <div className="flex w-full max-w-md flex-col gap-2.5 opacity-60" aria-hidden="true">
+        <div className="ml-auto h-8 w-2/5 animate-pulse rounded-2xl bg-muted" />
+        <div className="h-14 w-4/5 animate-pulse rounded-2xl bg-muted" />
+        <div className="h-10 w-3/5 animate-pulse rounded-2xl bg-muted" />
+      </div>
+      <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+        <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+        <span>{slow ? "Laden duurt langer dan normaal…" : "Gesprek laden…"}</span>
+      </div>
+      {slow ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={() => window.location.reload()}
+        >
+          Opnieuw laden
+        </Button>
+      ) : null}
     </div>
   );
 }
@@ -22020,10 +22056,10 @@ const ChatStream = memo(function ChatStream({
       ) : loading ? (
         <ConversationEmptyState
           icon={<Loader2 className="size-5 animate-spin" />}
-          title="Loading transcript"
+          title="Gesprek laden…"
         >
           <Loader2 className="size-5 animate-spin" />
-          <span>Loading transcript</span>
+          <span>Gesprek laden…</span>
         </ConversationEmptyState>
       ) : (
         <ConversationEmptyState

@@ -1794,8 +1794,11 @@ async function codexThreads(opts?: { sinceMs?: number }): Promise<CodexThread[]>
 // Only tags observed in real rollouts (and in the codex binary's own strings)
 // are listed; this is deliberately not a catch-all for "starts with a tag",
 // because a genuine prompt may well open with markup.
+// Codex also injects `# AGENTS.md instructions for <cwd> <INSTRUCTIONS>...</INSTRUCTIONS>`
+// (74-96 KB on this box) as a synthetic role "user" response_item. Skipping it here keeps
+// resume-cache.sqlite from bloating to multi-GB and freezing the event loop on roster queries.
 const CODEX_SYNTHETIC_USER_BLOCK =
-  /^<(?:recommended_plugins|environment_context|user_instructions|plugins|skill)[\s>]/;
+  /^(?:<(?:recommended_plugins|environment_context|user_instructions|plugins|skill|INSTRUCTIONS|permissions instructions|collaboration_mode)[\s>]|# AGENTS\.md instructions for\b)/;
 
 /**
  * The prompt a codex rollout was started with, read from its head.

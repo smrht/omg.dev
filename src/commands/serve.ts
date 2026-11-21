@@ -1346,8 +1346,26 @@ function renderReportHtml(raw: string): string {
     .replace(/<\/table>/g, "</table></div>");
 }
 
-async function listRepos() {
-  return listConfiguredRepos({ reposRoot: REPOS_ROOT, selfRepo: SELF_REPO });
+const REPOS_CACHE_TTL_MS = 15_000;
+let reposCache: { at: number; data: Awaited<ReturnType<typeof listConfiguredRepos>> } | null = null;
+let reposInFlight: Promise<Awaited<ReturnType<typeof listConfiguredRepos>>> | null = null;
+
+async function listRepos(opts?: { refresh?: boolean }) {
+  const now = Date.now();
+  if (!opts?.refresh && reposCache && now - reposCache.at < REPOS_CACHE_TTL_MS) {
+    return reposCache.data;
+  }
+  if (!opts?.refresh && reposInFlight) return reposInFlight;
+  const run = listConfiguredRepos({ reposRoot: REPOS_ROOT, selfRepo: SELF_REPO })
+    .then((data) => {
+      reposCache = { at: Date.now(), data };
+      return data;
+    })
+    .finally(() => {
+      if (reposInFlight === run) reposInFlight = null;
+    });
+  reposInFlight = run;
+  return run;
 }
 
 type RepoEntry = Awaited<ReturnType<typeof listRepos>>[number];
@@ -5620,7 +5638,7 @@ a{color:#60a5fa}
         try {
           const repo = await cloneRepo(b.url, REPOS_ROOT, b.name);
           await patchOnboarding({ steps: { repo: true } });
-          return json({ repo, repos: await listRepos() });
+          return json({ repo, repos: await listRepos({ refresh: true }) });
         } catch (e) {
           return err(400, e instanceof Error ? e.message : "clone failed");
         }
@@ -8649,7 +8667,7 @@ a{color:#60a5fa}
         }
         try {
           const repo = await createProjectFolder(b.parent, b.name, b.template ?? "blank");
-          return json({ repo, repos: await listRepos() });
+          return json({ repo, repos: await listRepos({ refresh: true }) });
         } catch (e) {
           return err(400, e instanceof Error ? e.message : String(e));
         }
@@ -8707,7 +8725,7 @@ a{color:#60a5fa}
           // worse, silently suppress a NEW project later created at the same
           // path (deleting and recreating "scratch" is an ordinary thing to do).
           await unhideRepo(plan.path);
-          return json({ ok: true, path: plan.path, name: plan.name, repos: await listRepos() });
+          return json({ ok: true, path: plan.path, name: plan.name, repos: await listRepos({ refresh: true }) });
         } catch (e) {
           if (e instanceof FolderDeleteError) return err(e.status, e.message);
           return err(400, e instanceof Error ? e.message : String(e));
@@ -8767,7 +8785,7 @@ a{color:#60a5fa}
           } catch (e) {
             return err(400, e instanceof Error ? e.message : String(e));
           }
-          return json({ repos: await listRepos() });
+          return json({ repos: await listRepos({ refresh: true }) });
         }
         if (req.method === "DELETE") {
           const b = (await req.json().catch(() => null)) as { cwd?: unknown } | null;
@@ -8786,7 +8804,7 @@ a{color:#60a5fa}
             return err(400, "that's your last project — add another before removing it");
           }
           await unlinkRepo(cwd);
-          return json({ repos: await listRepos() });
+          return json({ repos: await listRepos({ refresh: true }) });
         }
         return json({ repos: await listRepos() });
       }

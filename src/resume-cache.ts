@@ -283,6 +283,12 @@ function init(): Database {
   if (!d.query<{ name: string }, []>("PRAGMA table_info(resumable_sessions)").all().some(c => c.name === "cyber_access_program")) {
     d.exec("ALTER TABLE resumable_sessions ADD COLUMN cyber_access_program TEXT");
   }
+  // Covering index for the roster/picker facet and count queries so they never
+  // fall back to full-table scans over title/last_user_text.
+  d.exec(`
+    CREATE INDEX IF NOT EXISTS resumable_sessions_roster_facets
+      ON resumable_sessions(resumable, roster_hidden, scheduled, agent, project);
+  `);
   initialized = true;
   return d;
 }
@@ -367,6 +373,24 @@ function isScratchCwd(cwd: string | undefined | null): boolean {
   return ["/tmp", "/var/tmp"].some((root) => cwd === root || cwd.startsWith(`${root}/`));
 }
 
+// Defensive storage caps: a resume picker title/preview never needs a 96 KB
+// system envelope or pasted dump. Keeping rows bounded prevents resume-cache.sqlite
+// from ballooning into GBs and stalling synchronous SQLite reads on the main thread.
+const MAX_CACHED_TITLE_CHARS = 400;
+const MAX_CACHED_LAST_USER_TEXT_CHARS = 4000;
+
+function clampCachedTitle(value: string | null | undefined): string {
+  const s = value || "";
+  return s.length > MAX_CACHED_TITLE_CHARS ? s.slice(0, MAX_CACHED_TITLE_CHARS) : s;
+}
+
+function clampCachedLastUserText(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  return value.length > MAX_CACHED_LAST_USER_TEXT_CHARS
+    ? value.slice(0, MAX_CACHED_LAST_USER_TEXT_CHARS)
+    : value;
+}
+
 export function upsertResumableRows(rows: ResumableCacheRow[]): void {
   if (!rows.length) return;
   const d = init();
@@ -430,8 +454,8 @@ export function upsertResumableRows(rows: ResumableCacheRow[]): void {
         r.sessionId,
         r.cwd,
         r.project || "",
-        r.title || "",
-        r.lastUserText,
+        clampCachedTitle(r.title),
+        clampCachedLastUserText(r.lastUserText),
         r.lastActivityAt,
         r.agent,
         r.path,

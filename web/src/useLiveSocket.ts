@@ -1095,18 +1095,22 @@ export function useLiveSocket(
     if (!ids.length) return;
     const active = new Set(ids);
     const timeout = window.setTimeout(() => {
-      evlog("ws_client_loading_fallback", { ids });
+      const stillLoading: string[] = [];
       setLoadingBySid((prev) => {
         let changed = false;
         const next = { ...prev };
         for (const sid of active) {
           if (next[sid] && !(messagesRef.current[sid]?.some((message) => !message.seed))) {
+            stillLoading.push(sid);
             next[sid] = false;
             changed = true;
           }
         }
         return changed ? next : prev;
       });
+      if (stillLoading.length) {
+        evlog("ws_client_loading_fallback", { ids: stillLoading });
+      }
     }, 8000);
     return () => window.clearTimeout(timeout);
   }, [streamKey, ids]);
