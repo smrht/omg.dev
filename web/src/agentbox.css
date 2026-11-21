@@ -11,58 +11,60 @@
   --radius: 0.5rem;
 }
 :root:not(.dark) {
-  --background: #f5f5f3;
-  --shell-surface: #f5f5f3;
-  --foreground: #17171a;
+  --background: #eceef2;
+  --shell-surface: #eceef2;
+  --foreground: #09090b;
   --card: #ffffff;
-  --card-foreground: #17171a;
+  --card-foreground: #09090b;
   --stage-surface: #ffffff;
   --stage-field: #ffffff;
   --lfg-field-fill: #ffffff;
   --popover: #ffffff;
-  --popover-foreground: #17171a;
-  --primary: #c2410c;
+  --popover-foreground: #09090b;
+  --primary: #b53806;
   --primary-foreground: #ffffff;
-  --secondary: #efefed;
-  --secondary-foreground: #17171a;
-  --muted: #efefed;
-  --muted-foreground: #66666c;
-  --accent: rgba(23, 23, 26, 0.06);
-  --accent-foreground: #17171a;
-  --destructive: #c0262d;
-  --brand: #c2410c;
-  --ring: #c2410c;
-  --info: #2f5f8a;
-  --border: rgba(23, 23, 26, 0.09);
-  --input: rgba(23, 23, 26, 0.12);
-  --border-strong: rgba(23, 23, 26, 0.2);
-  --text-2: #3b3b40;
-  --code-bg: rgba(23, 23, 26, 0.05);
+  --secondary: #dfe3ea;
+  --secondary-foreground: #09090b;
+  --muted: #e3e6ed;
+  --muted-foreground: #474a54;
+  --accent: rgba(15, 23, 42, 0.10);
+  --accent-foreground: #09090b;
+  --destructive: #b91c1c;
+  --brand: #b53806;
+  --ring: #b53806;
+  --info: #1d4ed8;
+  --border: rgba(15, 23, 42, 0.18);
+  --input: rgba(15, 23, 42, 0.28);
+  --border-strong: rgba(15, 23, 42, 0.40);
+  --text-2: #22242a;
+  --code-bg: #eef0f4;
 }
 .dark {
-  --background: #0d0d0f;
-  --shell-surface: #0d0d0f;
-  --foreground: #ececee;
-  --card: #18181b;
-  --card-foreground: #ececee;
-  --stage-surface: #141416;
-  --stage-field: #1b1b1e;
-  --lfg-field-fill: #1b1b1e;
-  --popover: #1b1b1e;
-  --popover-foreground: #ececee;
-  --primary: #f0884e;
-  --primary-foreground: #17171a;
-  --secondary: #1f1f22;
-  --muted: #1f1f22;
-  --muted-foreground: #9b9ba2;
-  --accent: rgba(255, 255, 255, 0.06);
-  --brand: #f0884e;
-  --ring: #f0884e;
-  --info: #7fa7cc;
-  --border: rgba(255, 255, 255, 0.08);
-  --input: rgba(255, 255, 255, 0.1);
-  --border-strong: rgba(255, 255, 255, 0.18);
-  --code-bg: rgba(255, 255, 255, 0.06);
+  --background: #08090c;
+  --shell-surface: #08090c;
+  --foreground: #f7f8fa;
+  --card: #1a1d25;
+  --card-foreground: #f7f8fa;
+  --stage-surface: #12141a;
+  --stage-field: #1d212b;
+  --lfg-field-fill: #1d212b;
+  --popover: #1d212b;
+  --popover-foreground: #f7f8fa;
+  --primary: #ff9659;
+  --primary-foreground: #09090b;
+  --secondary: #232733;
+  --muted: #232733;
+  --muted-foreground: #b4bac8;
+  --accent: rgba(255, 255, 255, 0.12);
+  --brand: #ff9659;
+  --ring: #ff9659;
+  --info: #8ec0ff;
+  --destructive: #ff645a;
+  --border: rgba(255, 255, 255, 0.18);
+  --input: rgba(255, 255, 255, 0.26);
+  --border-strong: rgba(255, 255, 255, 0.38);
+  --text-2: #d8dce5;
+  --code-bg: #1b1f29;
 }
 /* Sam 07-11: "niet bold maar wel iets dikker". Alle vier de fonts zijn
    variabel (systeem = SF Pro, ook variabel), dus 450/540 rendert echt
@@ -281,7 +283,7 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
 
 /* "Gewerkt 3m": een stille regel, geen mono-ruis. Het bewegende lijntje
    gebruikt het accent in plaats van de blauw-paarse gradient. */
-.tool-call-row { font-size: 12px; color: color-mix(in oklab, var(--muted-foreground) 85%, transparent); }
+.tool-call-row { font-size: 12px; color: var(--muted-foreground); }
 .tool-call-row .font-mono { font-family: var(--font-sans); letter-spacing: 0; }
 .tool-call-row--live::after {
   background-image: linear-gradient(90deg, transparent, var(--primary), transparent) !important;
@@ -335,7 +337,7 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
 .taken .taak-knoppen { opacity: 1 !important; }
 .taken .taak-knop {
   display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 8px;
-  border-radius: 6px; font-size: 12px; font-weight: 540; color: var(--muted-foreground);
+  border-radius: 6px; font-size: 12px; font-weight: 540; color: var(--text-2);
   transition: background-color 150ms ease, color 150ms ease;
 }
 .taken .taak-knop svg { width: 13px; height: 13px; }
@@ -379,8 +381,8 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
 
 /* Bezos (07-11-2026): rijen zonder kaders, haarlijn ertussen. Een beantwoorde rij
    toont kort "Verstuurd" en vouwt dan dicht, zodat je ziet dat de keuze aankwam. */
-.bezos-lijst { border-top: 1px solid color-mix(in oklab, var(--border) 70%, transparent); }
-.bezos-rij { display: grid; grid-template-rows: 1fr; border-bottom: 1px solid color-mix(in oklab, var(--border) 70%, transparent); transition: grid-template-rows 260ms cubic-bezier(.2, 0, 0, 1), opacity 200ms ease; }
+.bezos-lijst { border-top: 1px solid var(--border); }
+.bezos-rij { display: grid; grid-template-rows: 1fr; border-bottom: 1px solid var(--border); transition: grid-template-rows 260ms cubic-bezier(.2, 0, 0, 1), opacity 200ms ease; }
 .bezos-rij > .bezos-rij-binnen { overflow: hidden; min-height: 0; }
 .bezos-rij.bezos-rij-lijst { border-bottom: 0; }
 .bezos-rij[data-dicht] { grid-template-rows: 0fr; opacity: 0; }
@@ -418,3 +420,54 @@ code, kbd, pre, .font-mono { font-family: var(--font-mono); }
   border-radius: 999px;
 }
 .ab-picker-scroll::-webkit-scrollbar-button { display: none; }
+
+/* ── Hoog contrast (Sam, 21-11-2026) ───────────────────────────────────
+   Voorkomt dubbele vervaging (muted-foreground x 50-80% opacity) in zijbalk,
+   timestamps, placeholders, scheidingslijnen en invoervelden in licht én donker. */
+.text-muted-foreground\/50,
+.text-muted-foreground\/60,
+.text-muted-foreground\/70,
+.text-muted-foreground\/80 {
+  color: var(--muted-foreground);
+}
+.border-border\/40,
+.border-border\/50,
+.border-border\/60,
+.border-border\/70 {
+  border-color: var(--border);
+}
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted-foreground);
+  opacity: 0.9;
+}
+[data-agentbox-rail] .ab-search {
+  background: var(--card);
+  border: 1px solid var(--input);
+  color: var(--foreground);
+}
+[data-agentbox-rail] .ab-search:focus {
+  border-color: var(--ring);
+}
+.session-overview[data-overview-density] [data-overview-row] .rail-preview,
+.session-overview[data-overview-density] [data-overview-row] .tabular-nums {
+  color: var(--muted-foreground);
+}
+.session-overview[data-overview-density] > div > div > button[aria-expanded] {
+  color: var(--text-2);
+  font-weight: 600;
+}
+[data-testid="new-session-stage"] form,
+[data-agentbox-composer] {
+  border-color: var(--input);
+}
+.ab-meter {
+  background: color-mix(in srgb, var(--foreground) 18%, transparent);
+}
+.ab-meter-fill.bg-foreground\/55 {
+  background: var(--text-2);
+}
+[data-agentbox-usage] .w-16 {
+  color: var(--text-2);
+  font-weight: 500;
+}
