@@ -717,6 +717,9 @@ import {
 } from "./components/update-drawer";
 import { UsageCampfireHost, useUsageRingLongPress, openUsageCampfire } from "./components/UsageCampfire";
 import { RailUsageMeters, UsageWindowRow, MeterBar, tightestWindow, leftPct, windowName, resetText, metLaatsteStand, standTijd, type ShownUsage } from "./components/usage-meters";
+import { RailThemeToggle } from "./components/rail-theme-toggle";
+import { RuntimeReconnectBanner } from "./components/runtime-reconnect-banner";
+import { QuickSwitcher } from "./components/quick-switcher";
 import { BankedResetCredits } from "./components/BankedResetCredits";
 import {
   consumeBankedReset,
@@ -9285,6 +9288,7 @@ export function App() {
         />
         {/* A host that owns the toast stack draws every toast; see host-toast.ts. */}
         {hasHostToast() ? null : <Toaster position={isMobile ? "top-center" : "bottom-center"} />}
+        <RuntimeReconnectBanner />
       </>
     );
   }
@@ -10555,6 +10559,7 @@ export function App() {
       />
       {/* A host that owns the toast stack draws every toast; see host-toast.ts. */}
       {hasHostToast() ? null : <Toaster position={isMobile ? "top-center" : "bottom-center"} />}
+      <RuntimeReconnectBanner />
     </div>
     {loading && bare ? <AppStartupStatus /> : null}
     {terminalSid ? (
@@ -13887,6 +13892,44 @@ function RailStage({
   );
 
   const openTerminal = useContext(SessionTerminalContext);
+  const [railWidth, setRailWidth] = useState<number>(() => {
+    try {
+      const saved = Number(window.localStorage.getItem("agentbox:rail-width"));
+      if (Number.isFinite(saved) && saved >= 256 && saved <= 420) return saved;
+    } catch { /* privé */ }
+    return typeof window !== "undefined" && window.innerWidth >= 1280 ? 312 : 288;
+  });
+  const startRailResize = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (railCollapsed) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = railWidth;
+    const onMove = (ev: PointerEvent) => {
+      const next = Math.max(256, Math.min(420, Math.round(startW + (ev.clientX - startX))));
+      setRailWidth(next);
+    };
+    const onUp = (ev: PointerEvent) => {
+      const finalW = Math.max(256, Math.min(420, Math.round(startW + (ev.clientX - startX))));
+      setRailWidth(finalW);
+      try { window.localStorage.setItem("agentbox:rail-width", String(finalW)); } catch { /* privé */ }
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }, [railCollapsed, railWidth]);
+  const quickSessions = useMemo(
+    () => orderedSids.map((id) => {
+      const s = bySid.get(id);
+      return {
+        id,
+        title: s ? titleForSession(s) : id.slice(0, 8),
+        project: s?.project ? shortProject(s.project) : null,
+        busy: !!busyBySid[id],
+      };
+    }),
+    [orderedSids, bySid, busyBySid],
+  );
 
   // Latest values for the global key handler, so it binds once but never reads
   // stale state.
@@ -14499,6 +14542,12 @@ function RailStage({
 
   return (
     <div ref={workspaceRef} className="flex h-full min-h-0">
+      <QuickSwitcher
+        sessions={quickSessions}
+        onSelectSession={(sid) => activate(sid, false)}
+        onNewSession={startNew}
+        onOpenTaken={() => overviewPrefs.setView("taken")}
+      />
       {/* The session rail and stage are the desktop entry surface. */}
       {!workspaceUp && <div className="flex h-full min-h-0 min-w-0 flex-1">
       <aside
@@ -14506,12 +14555,8 @@ function RailStage({
         // raised, rounded panel (STAGE_PANEL), so the edge of that panel is
         // the separation. A rule here drew a second line next to it.
         className="flex h-full min-h-0 shrink-0 flex-col overflow-hidden transition-[width] duration-200 ease-ios"
-        // 320, not 280. The rows carry the roster's 16px title now, and at 280
-        // that truncated to about two words — "operation fix om…" — which is
-        // not a title, it is a prefix. The type size is the shared thing; the
-        // rail is what has to make room for it.
         data-agentbox-rail
-        style={{ width: railCollapsed ? 56 : 288, overscrollBehaviorX: "contain" }}
+        style={{ width: railCollapsed ? 56 : railWidth, overscrollBehaviorX: "contain" }}
       >
         {/* Everything above the footer. The menu covers exactly this, so the
             machine switcher under it stays in view either way. */}
@@ -14717,10 +14762,11 @@ function RailStage({
           <div
             className={cn(
               "flex h-12 shrink-0 items-center",
-              railCollapsed ? "justify-center" : "px-3",
+              railCollapsed ? "flex-col justify-center gap-1 py-1 h-auto" : "px-3 gap-2",
             )}
           >
             <ProductBrand hosted={hosted} compact={railCollapsed} />
+            <RailThemeToggle compact={railCollapsed} />
           </div>
         ) : null}
         {hosted ? (
@@ -14742,7 +14788,19 @@ function RailStage({
           hover line is the panel's own left border, drawn with the panel's
           radius so it curves round the corners instead of running straight
           down the gap. */}
-      <div className="group/rail-edge relative z-40 ml-3 w-0 shrink-0">
+      <div
+        className={cn("group/rail-edge relative z-40 ml-3 w-0 shrink-0", !railCollapsed && "cursor-col-resize")}
+        onPointerDown={(e) => {
+          if ((e.target as HTMLElement)?.closest("button")) return;
+          startRailResize(e);
+        }}
+        onDoubleClick={() => {
+          if (railCollapsed) return;
+          setRailWidth(312);
+          try { window.localStorage.setItem("agentbox:rail-width", "312"); } catch { /* privé */ }
+        }}
+        title={railCollapsed ? undefined : "Sleep om zijbalkbreedte aan te passen (dubbelklik voor standaard)"}
+      >
         <span
           aria-hidden="true"
           className="pointer-events-none absolute inset-y-0 left-0 w-5 rounded-l-2xl border-l-2 border-transparent transition-colors group-hover/rail-edge:border-foreground/25"
@@ -15643,9 +15701,13 @@ const RailItem = memo(function RailItem({
   const { showSidebarAgentIcons: showAgentIcons, showSidebarFavicons: showFavicons } =
     useContext(ViewPrefsContext);
   const questions = useSessionQuestions([session.sessionId, session.nativeSessionId]);
+  const busyFallback = [
+    session.model ? pickerModelDisplay(session.model).label : "",
+    !session.parentSessionId && session.project ? shortProject(session.project) : "",
+  ].filter(Boolean).join(" · ") || "Aan het werk";
   const overviewPreview = questions[0]?.question || (session.status === "blocked"
     ? ({ model_unavailable: "Model niet beschikbaar", out_of_credits: "Gebruikslimiet bereikt", provider_auth: "Opnieuw inloggen nodig", provider_error: "Providerfout · open om te hervatten", restart_recovered: "Onderbroken · open om te hervatten", interrupted: "Onderbroken · open om te hervatten", out_of_memory: "Geheugenlimiet bereikt · open om te hervatten" }[session.statusReason || "provider_error"])
-    : busy ? "Bezig · " + (latest || "Agent werkt aan je opdracht") : latest);
+    : busy ? "Bezig · " + (latest || busyFallback) : latest);
   const botDirectory = useContext(BotDirectoryContext);
   const drivingBotId = productBotId(session);
   const drivingBot = drivingBotId ? botDirectory.get(drivingBotId) : undefined;
@@ -15807,7 +15869,7 @@ const RailItem = memo(function RailItem({
             {session.parentSessionId && session.project ? (
               <span className="font-medium text-foreground/75">{" · " + shortProject(session.project)}</span>
             ) : null}
-            {" · " + (latest || "Agent werkt aan je opdracht")}
+            {" · " + (latest || busyFallback)}
           </span>
         ) : (
           <span className={questions.length || session.status === "blocked" ? "text-amber-700 dark:text-amber-400" : undefined}>
@@ -18130,16 +18192,16 @@ function SessionChatBody({
               }}
               placeholder={
                 attachments.length
-                  ? "Add a note"
+                  ? "Notitie toevoegen…"
                   : bot
-                    ? `Message ${bot.name}…`
+                    ? `Bericht aan ${bot.name}…`
                     : reviewingShipped
-                    ? "Message to resume"
+                    ? "Bericht om te hervatten…"
                     : // One question, one input: the composer says it is the
                       // reply box so the card above does not need its own.
                       sessionQuestions.length
-                      ? "Reply to the question"
-                      : "Message"
+                      ? "Beantwoord de vraag…"
+                      : "Bericht…"
               }
               disabled={sending}
               rows={1}
@@ -22636,6 +22698,24 @@ function UserBubble({
     return () => ro.disconnect();
   }, [html, expanded]);
 
+  const isSystemResume = /This session is being continued from a previous conversation|&lt;system-reminder&gt;|&lt;CONTEXT_SUMMARY&gt;/i.test(html);
+
+  if (isSystemResume && !expanded) {
+    return (
+      <div className="my-1 flex justify-end">
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          aria-expanded={false}
+          className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground"
+        >
+          <span>Sessie hervat · contextsamenvatting ingeklapt</span>
+          <span className="text-primary">Toon</span>
+        </button>
+      </div>
+    );
+  }
+
   return (
     <MessageContent
       className={cn(
@@ -22666,14 +22746,14 @@ function UserBubble({
         )}
         dangerouslySetInnerHTML={{ __html: html }}
       />
-      {overflowing && (
+      {(overflowing || (isSystemResume && expanded)) && (
         <button
           type="button"
           className="user-bubble-toggle relative z-[1]"
           onClick={() => setExpanded((v) => !v)}
           aria-expanded={expanded}
         >
-          {expanded ? "Show less" : "Show more"}
+          {expanded ? "Toon minder" : "Toon meer"}
         </button>
       )}
     </MessageContent>

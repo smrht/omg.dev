@@ -41,21 +41,21 @@ export function InstallInstructions({ mode, open, onOpenChange }: {
           <DialogTitle>{ios ? "Zet agentbox op je beginscherm" : "Installeer agentbox op je Mac"}</DialogTitle>
           <DialogDescription>
             {ios
-              ? "Open omg like an app, without browser controls."
-              : "Add omg to your Dock and open it in its own window."}
+              ? "Open agentbox als eigen app, zonder browserbalken."
+              : "Zet agentbox in je Dock en open hem in een eigen venster."}
           </DialogDescription>
         </DialogHeader>
         <ol className="space-y-3">
           {(ios
             ? [
-                <>Tap the <strong>Share</strong> button in your browser.</>,
-                <>Choose <strong>Add to Home Screen</strong>.</>,
-                <>Keep <strong>Open as Web App</strong> on, then tap <strong>Add</strong>.</>,
+                <>Tik op de knop <strong>Deel</strong> in je browser.</>,
+                <>Kies <strong>Zet op beginscherm</strong>.</>,
+                <>Laat <strong>Open als webapp</strong> aanstaan en tik op <strong>Voeg toe</strong>.</>,
               ]
             : [
-                <>Open the <strong>File</strong> menu in Safari.</>,
-                <>Choose <strong>Add to Dock…</strong>.</>,
-                <>Confirm the name, then click <strong>Add</strong>.</>,
+                <>Open het menu <strong>Archief</strong> in Safari.</>,
+                <>Kies <strong>Zet in Dock…</strong>.</>,
+                <>Bevestig de naam en klik op <strong>Voeg toe</strong>.</>,
               ]
           ).map((step, index) => (
             <li key={index} className="flex items-start gap-3 text-sm">
@@ -66,7 +66,7 @@ export function InstallInstructions({ mode, open, onOpenChange }: {
             </li>
           ))}
         </ol>
-        <Button onClick={() => onOpenChange(false)}>Got it</Button>
+        <Button onClick={() => onOpenChange(false)}>Begrepen</Button>
       </DialogContent>
     </Dialog>
   );
@@ -160,7 +160,7 @@ export function PwaInstallSettingsSection() {
               </span>
               <span>
                 <span className="block text-sm font-medium">Installeer agentbox</span>
-                <span className="block text-xs text-muted-foreground">Open it from your desktop or Home Screen</span>
+                <span className="block text-xs text-muted-foreground">Open direct vanaf je beginscherm of Dock</span>
               </span>
             </div>
           </button>

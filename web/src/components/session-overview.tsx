@@ -87,7 +87,7 @@ export function OverviewToolbar({ prefs, count, project, onClearProject, folderM
     <div className="flex items-center gap-0.5">
       <div className="relative min-w-0 flex-1">
         <Search aria-hidden="true" className="ab-search-icon pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-        <input type="search" aria-label={taken ? "Zoek in taken" : "Zoek een gesprek"} placeholder={taken ? "Zoek in taken" : `Zoek in ${count} gesprekken`} value={prefs.query} onChange={e => prefs.setQuery(e.target.value)} className="ab-search h-8 w-full rounded-md border border-transparent bg-muted/70 pl-8 pr-7 text-[13px] outline-none placeholder:text-muted-foreground focus:border-border focus:bg-background" />
+        <input type="search" aria-label={taken ? "Zoek in taken" : "Zoek een gesprek"} placeholder={taken ? "Zoek in taken…" : `Zoek (${count})…`} title="Zoeken (⌘K voor snelkiezer)" value={prefs.query} onChange={e => prefs.setQuery(e.target.value)} className="ab-search h-8 w-full rounded-md border border-transparent bg-muted/70 pl-8 pr-7 text-[13px] outline-none placeholder:text-muted-foreground focus:border-border focus:bg-background" />
         {prefs.query && <button type="button" aria-label="Zoekopdracht wissen" onClick={() => prefs.setQuery("")} className="ab-icon-btn absolute right-0 top-1/2 flex size-8 -translate-y-1/2 items-center justify-center text-muted-foreground"><X className="size-3.5" /></button>}
       </div>
       <div className={cn("flex items-center", taken && "invisible")}>

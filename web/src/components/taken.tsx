@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExtern
 import { agentboxConfig, beslisNaam } from "@/lib/agentbox-config";
 import { Check, ChevronDown, Clock, CornerDownRight, ExternalLink, Eye, Loader2, MessageSquare, Pause, Play, RotateCcw, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { toast } from "@/lib/notify";
 import { useAskOptional, stripMd, type Question } from "@/components/ask-center";
 
 // Taken: wat er voor Sam ligt, automatisch verzameld uit mail, gesprekken en
@@ -61,11 +62,33 @@ async function laad(): Promise<TakenData> {
   return cache;
 }
 
+/** Verwijdert rauwe mailtaak-UUID's uit labels zoals "Mailtaak agent-mail-mi-3dc33... – Fwd: ..." */
+function schoonLabel(s?: string | null): string {
+  if (!s) return "";
+  return s
+    .replace(/\bMailtaak\s+agent-mail-[a-z0-9-]{12,}\s*[–—-]\s*/gi, "Mail · ")
+    .replace(/\bagent-mail-[a-z0-9-]{12,}\b/gi, "Mail")
+    .trim();
+}
+
 /** Status zetten buiten de hook om (ook vanuit de composer na een opdracht). */
-export async function zetTaak(id: string, status: Taak["status"]) {
+export async function zetTaak(id: string, status: Taak["status"], opts?: { stil?: boolean }) {
+  const gevonden = cache?.items.find(i => i.id === id);
+  const vorigeStatus = gevonden?.status;
   if (cache) {
     cache = { ...cache, items: cache.items.map(i => i.id === id ? { ...i, status, afgevinkt: status === "open" ? null : new Date().toISOString() } : i) };
     window.dispatchEvent(new Event(EVENT));
+  }
+  if (!opts?.stil && (status === "gedaan" || status === "later") && vorigeStatus === "open") {
+    const label = status === "later" ? "Verplaatst naar morgen" : "Afgevinkt als gedaan";
+    toast(label, {
+      description: gevonden?.titel ? gevonden.titel.slice(0, 72) : undefined,
+      duration: 5000,
+      action: {
+        label: "Ongedaan maken",
+        onClick: () => { void zetTaak(id, "open", { stil: true }); },
+      },
+    });
   }
   await fetch(`/api/taken/item/${encodeURIComponent(id)}`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }),
@@ -252,12 +275,12 @@ function TaakRij({ taak, onOpenSession, zet, klein }: {
       <div className="min-w-0 flex-1">
         <button type="button" onClick={open} disabled={!kanOpenen}
           className="block w-full min-w-0 text-left focus-visible:outline-2 focus-visible:outline-primary disabled:cursor-default">
-          <span className={cn("taak-titel block font-medium leading-snug text-foreground", klein ? "text-[13px]" : "text-sm", klaar && "text-muted-foreground")}>{taak.titel}</span>
+          <span className={cn("taak-titel block font-medium leading-snug text-foreground", klein ? "text-[13px]" : "text-sm", klaar && "text-muted-foreground")}>{schoonLabel(taak.titel)}</span>
           <span className="mt-0.5 block truncate text-xs text-muted-foreground">
             <span className="taak-soort font-medium">{LABEL[taak.soort]}</span>
             {" · "}<span className="tabular-nums">{wanneer(taak.afgevinkt && taak.status === "gedaan" ? taak.afgevinkt : taak.tijd)}</span>
-            {taak.wie ? <> · {taak.wie}</> : null}
-            {taak.detail ? <> · {taak.detail}</> : null}
+            {taak.wie ? <> · {schoonLabel(taak.wie)}</> : null}
+            {taak.detail ? <> · {schoonLabel(taak.detail)}</> : null}
             {taak.link && !taak.sessie ? <ExternalLink aria-hidden="true" className="ml-1 inline size-3 align-[-2px]" /> : null}
           </span>
         </button>
