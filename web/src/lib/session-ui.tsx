@@ -128,16 +128,25 @@ export const ArtifactViewerContext = createContext<(artifact: ViewerArtifact) =>
 export const FEED_PAGE = 15;
 export const GALLERY_PAGE = 24;
 
+/** Verwijdert rauwe mailtaak-UUID's uit sessietitels zoals "Mailtaak agent-mail-mi-87e8d21b... – Fwd: ..." */
+function cleanSessionTitle(raw: string): string {
+  return raw
+    .replace(/\bMailtaak\s+agent-mail-[a-z0-9-]{12,}\s*[–—-]\s*/gi, "Mail · ")
+    .replace(/\bMailtaak\s+agent-mail-[a-z0-9-]{12,}\b/gi, "Mailtaak")
+    .replace(/\bagent-mail-[a-z0-9-]{12,}\b/gi, "Mail")
+    .trim();
+}
+
 /** The name a session shows in every surface that has to label one. */
 export function titleForSession(session: Session): string {
-  return (
+  const raw =
     session.title ||
     session.lastUserText ||
     session.tmuxName ||
     session.project ||
     session.sessionId?.slice(0, 8) ||
-    "session"
-  );
+    "session";
+  return cleanSessionTitle(raw) || raw;
 }
 
 /**

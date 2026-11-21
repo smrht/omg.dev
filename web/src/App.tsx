@@ -715,7 +715,7 @@ import {
   UpdateProvider,
   UpdateSettingsRow,
 } from "./components/update-drawer";
-import { UsageCampfireHost, useUsageRingLongPress, openUsageCampfire } from "./components/UsageCampfire";
+import { UsageCampfireHost, useUsageRingLongPress, openUsageCampfire } from "./components/usage-campfire-lazy";
 import { RailUsageMeters, UsageWindowRow, MeterBar, tightestWindow, leftPct, windowName, resetText, metLaatsteStand, standTijd, type ShownUsage } from "./components/usage-meters";
 import { RailThemeToggle } from "./components/rail-theme-toggle";
 import { RuntimeReconnectBanner } from "./components/runtime-reconnect-banner";
@@ -22698,7 +22698,8 @@ function UserBubble({
     return () => ro.disconnect();
   }, [html, expanded]);
 
-  const isSystemResume = /This session is being continued from a previous conversation|&lt;system-reminder&gt;|&lt;CONTEXT_SUMMARY&gt;/i.test(html);
+  const isRestartResume = /Hervat deze bestaande chat na de Agentbox-herstart/i.test(html);
+  const isSystemResume = isRestartResume || /This session is being continued from a previous conversation|&lt;system-reminder&gt;|&lt;CONTEXT_SUMMARY&gt;/i.test(html);
 
   if (isSystemResume && !expanded) {
     return (
@@ -22709,7 +22710,7 @@ function UserBubble({
           aria-expanded={false}
           className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground"
         >
-          <span>Sessie hervat · contextsamenvatting ingeklapt</span>
+          <span>{isRestartResume ? "Sessie hervat na Agentbox-herstart" : "Sessie hervat · contextsamenvatting ingeklapt"}</span>
           <span className="text-primary">Toon</span>
         </button>
       </div>
