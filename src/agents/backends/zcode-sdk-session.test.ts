@@ -119,3 +119,13 @@ describe("zcode usage", () => {
     expect(zaiUsageFromQuota(null).windows).toEqual([]);
   });
 });
+
+describe("zcode GLM-5.4 (23-11-2026)", () => {
+  test("catalog offers glm-5.4 and the session config selects it", async () => {
+    const { ZCODE_MODELS } = await import("../../agent-catalog");
+    expect(ZCODE_MODELS).toContain("zaiplan/glm-5.4");
+    const shared = { config: { defaultModelSelection: { providerId: "zaiplan", modelId: "glm-5.3-flash" } } };
+    const out = zcodeProviderConfig(shared, "zaiplan/glm-5.4", "high") as any;
+    expect(out.config.defaultModelSelection).toEqual({ providerId: "zaiplan", modelId: "glm-5.4", options: { reasoningLevel: "high" } });
+  });
+});

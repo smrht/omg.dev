@@ -303,7 +303,7 @@ const MODEL_CATALOG_KEYS: CodingAgentKind[] = [
 // ZCode on the agentbox runs Sam's Z.ai Coding Plan through the personal
 // provider "zaiplan" (~/.zcode/v2/provider_config.json); the harness selects
 // the model per session. Levels map to ZCode's reasoningLevel option.
-export const ZCODE_MODELS = ["zaiplan/glm-5.3-flash", "zaiplan/glm-5.3"] as const;
+export const ZCODE_MODELS = ["zaiplan/glm-5.3-flash", "zaiplan/glm-5.4", "zaiplan/glm-5.3"] as const;
 export const ZCODE_THINKING_LEVELS = ["low", "high", "max"] as const;
 
 export const CODEX_THINKING_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh"] as const;

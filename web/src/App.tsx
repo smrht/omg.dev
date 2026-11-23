@@ -1550,7 +1550,7 @@ const ANTIGRAVITY_MODELS = ["default"];
 // Kept in sync with COPILOT_MODELS in src/agent-catalog.ts (the server catalog
 // overrides this fallback at bootstrap).
 const COPILOT_MODELS = ["claude-sonnet-4.5", "claude-sonnet-4", "gpt-5", "grok-4.7"];
-const ZCODE_MODELS = ["zaiplan/glm-5.3-flash", "zaiplan/glm-5.3"];
+const ZCODE_MODELS = ["zaiplan/glm-5.3-flash", "zaiplan/glm-5.4", "zaiplan/glm-5.3"];
 // The project a new chat starts in on this box when the view is "All projects".
 const COMPOSER_DEFAULT_PROJECT = agentboxConfig().defaultProject;
 const JCODE_MODELS = ["auto"];
