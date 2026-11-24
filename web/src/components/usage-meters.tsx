@@ -8,8 +8,139 @@
  */
 import { cn } from "@/lib/utils";
 import { agentIconSrc } from "@/lib/session-ui";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useUsageFeed, windowAppliesToModel, windowModel, type ProviderUsage, type UsageWindow } from "@/lib/usage";
+
+export type GpuSessionSummary = {
+  name: string;
+  gpu: string;
+  shape?: string;
+};
+
+export type GpuStatus = {
+  checked_at: string | null;
+  balance: number | null;
+  rate_per_hr: number;
+  active_count: number;
+  sessions: GpuSessionSummary[];
+  hours_left_current?: number | null;
+  hours_left_l4?: number | null;
+  hours_left_t4?: number | null;
+  today_sessions?: number;
+  today_duration_s?: number;
+  today_estimated_units?: number;
+  today_measured_units?: number | null;
+};
+
+const GPU_STAND_KEY = "agentbox:gpu-status-stand";
+const GPU_REF_UNITS = 3000;
+
+export function gpuBalancePct(balance: number | null): number | null {
+  if (balance == null || !Number.isFinite(balance)) return null;
+  return Math.max(0, Math.min(100, (balance / GPU_REF_UNITS) * 100));
+}
+
+function leesGpuStand(): { data: GpuStatus; at: number } | null {
+  try {
+    const raw = JSON.parse(localStorage.getItem(GPU_STAND_KEY) || "null") as { data?: GpuStatus; at?: number } | null;
+    if (raw?.data && typeof raw.at === "number" && Date.now() - raw.at < STAND_MAX_MS) {
+      return { data: raw.data, at: raw.at };
+    }
+  } catch { /* privé */ }
+  return null;
+}
+
+function normalizeGpuPayload(raw: Record<string, unknown>): GpuStatus | null {
+  if (raw && typeof raw === "object" && "live" in raw && raw.live && typeof raw.live === "object") {
+    const live = raw.live as Record<string, unknown>;
+    const today = (raw.today as Record<string, unknown> | undefined) ?? {};
+    return {
+      checked_at: typeof live.checked_at === "string" ? live.checked_at : null,
+      balance: typeof live.balance === "number" ? live.balance : null,
+      rate_per_hr: typeof live.rate_per_hr === "number" ? live.rate_per_hr : 0,
+      active_count: typeof live.active_count === "number" ? live.active_count : 0,
+      sessions: Array.isArray(live.sessions) ? (live.sessions as GpuSessionSummary[]) : [],
+      hours_left_current: typeof live.hours_left_current === "number" ? live.hours_left_current : null,
+      hours_left_l4: typeof live.hours_left_l4 === "number" ? live.hours_left_l4 : null,
+      hours_left_t4: typeof live.hours_left_t4 === "number" ? live.hours_left_t4 : null,
+      today_sessions: typeof today.sessions === "number" ? today.sessions : undefined,
+      today_duration_s: typeof today.duration_s === "number" ? today.duration_s : undefined,
+      today_estimated_units: typeof today.estimated_units === "number" ? today.estimated_units : undefined,
+      today_measured_units: typeof today.measured_units === "number" ? today.measured_units : null,
+    };
+  }
+  if (raw && typeof raw === "object" && "balance" in raw) {
+    return {
+      checked_at: typeof raw.checked_at === "string" ? raw.checked_at : null,
+      balance: typeof raw.balance === "number" ? raw.balance : null,
+      rate_per_hr: typeof raw.rate_per_hr === "number" ? raw.rate_per_hr : 0,
+      active_count: typeof raw.active_count === "number" ? raw.active_count : 0,
+      sessions: Array.isArray(raw.sessions) ? (raw.sessions as GpuSessionSummary[]) : [],
+      hours_left_current: typeof raw.hours_left_current === "number" ? raw.hours_left_current : null,
+      hours_left_l4: typeof raw.hours_left_l4 === "number" ? raw.hours_left_l4 : null,
+      hours_left_t4: typeof raw.hours_left_t4 === "number" ? raw.hours_left_t4 : null,
+      today_sessions: typeof raw.today_sessions === "number" ? raw.today_sessions : undefined,
+      today_duration_s: typeof raw.today_duration_s === "number" ? raw.today_duration_s : undefined,
+      today_estimated_units: typeof raw.today_estimated_units === "number" ? raw.today_estimated_units : undefined,
+      today_measured_units: typeof raw.today_measured_units === "number" ? raw.today_measured_units : null,
+    };
+  }
+  return null;
+}
+
+function useGpuStatus(enabled: boolean): GpuStatus | null {
+  const [gpu, setGpu] = useState<GpuStatus | null>(() => leesGpuStand()?.data ?? null);
+  useEffect(() => {
+    if (!enabled) return;
+    let alive = true;
+    async function load() {
+      for (const url of ["/_ext/agentbox-runs/links/gpu-status.json", "/gpu-usage/api/usage"]) {
+        try {
+          const res = await fetch(url, { cache: "no-store" });
+          if (!res.ok) continue;
+          const json = (await res.json()) as Record<string, unknown>;
+          const parsed = normalizeGpuPayload(json);
+          if (parsed && parsed.balance != null) {
+            if (alive) setGpu(parsed);
+            try { localStorage.setItem(GPU_STAND_KEY, JSON.stringify({ data: parsed, at: Date.now() })); } catch { /* privé */ }
+            return;
+          }
+        } catch { /* probeer volgende bron */ }
+      }
+    }
+    void load();
+    const timer = window.setInterval(() => { if (!document.hidden) void load(); }, 60_000);
+    return () => { alive = false; window.clearInterval(timer); };
+  }, [enabled]);
+  return gpu;
+}
+
+function GpuChipIcon({ active, className }: { active?: boolean; className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className={cn(active ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground", className)}
+    >
+      <rect x="6" y="6" width="12" height="12" rx="2" />
+      <rect x="9.5" y="9.5" width="5" height="5" rx="0.5" fill="currentColor" stroke="none" />
+      <path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" />
+    </svg>
+  );
+}
+
+function formatUnitsCompact(v: number): string {
+  return Math.round(v).toLocaleString("nl-NL");
+}
+
+function formatUnitsDecimal(v: number): string {
+  return v.toLocaleString("nl-NL", { minimumFractionDigits: 1, maximumFractionDigits: 2 });
+}
 
 /**
  * Laatste goede stand per bron. Anthropic's usage-endpoint geeft geregeld 429;
@@ -148,9 +279,10 @@ export function UsageWindowRow({ w }: { w: UsageWindow }) {
  * Rail footer: every agent with a limit on one line. The number is what is left
  * of the window that runs out first; the full breakdown opens on click.
  */
-export function RailUsageMeters({ collapsed }: { collapsed?: boolean }) {
+export function RailUsageMeters({ collapsed, onOpenGpu }: { collapsed?: boolean; onOpenGpu?: () => void }) {
   const [open, setOpen] = useState(false);
   const { refs, providers, loading } = useUsageFeed({ enabled: !collapsed, refreshMs: 5 * 60_000 });
+  const gpu = useGpuStatus(!collapsed);
   if (collapsed) return null;
   // Claude en Codex blijven altijd staan: nog bezig = "…", geen cijfer = "—".
   // Een bron die stil wegvalt leest als "niks aan de hand".
@@ -164,7 +296,9 @@ export function RailUsageMeters({ collapsed }: { collapsed?: boolean }) {
     if (p && p.available && tightestWindow(p.windows) != null) rows.push(p);
     else if (KERN.has(ref.kind)) rows.push(p ?? { ...ref, available: false, note: "laden" });
   }
-  if (!rows.length) {
+  const gpuPct = gpu ? gpuBalancePct(gpu.balance) : null;
+  const gpuActive = (gpu?.active_count ?? 0) > 0;
+  if (!rows.length && !gpu) {
     return loading ? (
       <div className="ab-usage-voet px-3 py-2 text-[11px] text-muted-foreground">Limieten laden…</div>
     ) : null;
@@ -199,9 +333,39 @@ export function RailUsageMeters({ collapsed }: { collapsed?: boolean }) {
           </span>
         );
       })}
+      {gpu ? (
+        <span className="block" data-agentbox-gpu-usage>
+          <span
+            className="flex items-center gap-2 text-xs"
+            title={
+              `Colab GPU: ${gpu.balance != null ? `${formatUnitsDecimal(gpu.balance)} u` : "onbekend"}` +
+              (gpuActive ? ` · ${gpu.active_count} actief (${formatUnitsDecimal(gpu.rate_per_hr)} u/u)` : " · stil") +
+              (gpu.hours_left_l4 != null ? ` · ~${formatUnitsCompact(gpu.hours_left_l4)} u L4 over` : "")
+            }
+          >
+            <GpuChipIcon active={gpuActive} className="size-3.5 shrink-0" />
+            <span className="w-16 shrink-0 truncate text-muted-foreground">Colab GPU</span>
+            <span className="ab-meter block h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-foreground/[0.09]">
+              <span
+                className={cn(
+                  "ab-meter-fill block h-full rounded-full",
+                  gpuActive ? "bg-emerald-600 dark:bg-emerald-400" : leftTone(gpuPct),
+                )}
+                style={{ width: `${gpuPct ?? 0}%` }}
+              />
+            </span>
+            <span className={cn("w-[4.5rem] shrink-0 text-right tabular-nums", gpuActive ? "text-emerald-700 dark:text-emerald-400 font-medium" : leftTextTone(gpuPct))}>
+              {gpu.balance == null ? "—" : formatUnitsCompact(gpu.balance)}
+              <span className={cn("ml-1 text-[10px]", gpuActive ? "text-emerald-700/90 dark:text-emerald-400/90" : "text-muted-foreground")}>
+                {gpuActive ? `${gpu.active_count} GPU` : "u"}
+              </span>
+            </span>
+          </span>
+        </span>
+      ) : null}
     </button>
     {open ? (
-      <div className="max-h-60 space-y-3 overflow-y-auto px-3 pb-3 [scrollbar-width:thin]">
+      <div className="max-h-72 space-y-3 overflow-y-auto px-3 pb-3 [scrollbar-width:thin]">
         {rows.filter((p) => (p.windows ?? []).length).map((p) => (
           <div key={p.id} className={cn("space-y-2", (p as ShownUsage).standVan && "opacity-75")}>
             <div className="flex items-center gap-1.5 text-[11px] font-medium text-foreground">
@@ -212,6 +376,65 @@ export function RailUsageMeters({ collapsed }: { collapsed?: boolean }) {
             {(p.windows ?? []).map((x) => <UsageWindowRow key={x.label} w={x} />)}
           </div>
         ))}
+        {gpu ? (
+          <div className="space-y-1.5 border-t border-border/50 pt-2.5">
+            <div className="flex items-center justify-between gap-2 text-[11px] font-medium text-foreground">
+              <span className="flex items-center gap-1.5">
+                <GpuChipIcon active={gpuActive} className="size-3" />
+                Colab GPU
+              </span>
+              {onOpenGpu ? (
+                <button
+                  type="button"
+                  onClick={() => { setOpen(false); onOpenGpu(); }}
+                  className="text-[11px] font-normal text-muted-foreground hover:text-foreground hover:underline"
+                >
+                  Overzicht ↗
+                </button>
+              ) : (
+                <a
+                  href="/gpu-usage/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[11px] font-normal text-muted-foreground hover:text-foreground hover:underline"
+                >
+                  Overzicht ↗
+                </a>
+              )}
+            </div>
+            <div className="space-y-1 text-xs">
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="text-muted-foreground">Saldo</span>
+                <span className="tabular-nums font-medium text-foreground">
+                  {gpu.balance != null ? `${formatUnitsDecimal(gpu.balance)} u` : "—"}
+                  {gpu.hours_left_l4 != null ? <span className="ml-1 text-[10px] font-normal text-muted-foreground">(~{formatUnitsCompact(gpu.hours_left_l4)} u L4)</span> : null}
+                </span>
+              </div>
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="text-muted-foreground">Actief</span>
+                <span className={cn("tabular-nums font-medium", gpuActive ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground")}>
+                  {gpuActive ? `${gpu.active_count} GPU · ${formatUnitsDecimal(gpu.rate_per_hr)} u/u` : "Stil"}
+                </span>
+              </div>
+              {gpuActive && gpu.sessions.length ? (
+                <div className="truncate text-[11px] text-muted-foreground">
+                  {gpu.sessions.map((s) => `${s.name} (${s.gpu})`).join(", ")}
+                </div>
+              ) : null}
+              {typeof gpu.today_sessions === "number" ? (
+                <div className="flex items-baseline justify-between gap-2 text-[11px] text-muted-foreground">
+                  <span>Vandaag</span>
+                  <span className="tabular-nums">
+                    {gpu.today_measured_units && gpu.today_measured_units > 0
+                      ? `${formatUnitsDecimal(gpu.today_measured_units)} u gemeten`
+                      : `~${formatUnitsDecimal(gpu.today_estimated_units ?? 0)} u`}
+                    {` · ${gpu.today_sessions} sessies`}
+                  </span>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
       </div>
     ) : null}
     </div>

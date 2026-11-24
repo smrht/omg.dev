@@ -10392,25 +10392,35 @@ export function App() {
             !embedded || hostMachines ? <MachineSwitcher variant="nav" /> : null
           }
           footer={
-            embedded || (hostSettingsInMenu && onOpenHostSettings) ? (
-              <>
-              {/* Host rows first (for example Upgrade), then Settings. */}
-              {embedded ? <HostDrawerSlot onClose={closeNav} /> : null}
-              {hostSettingsInMenu && onOpenHostSettings ? (
-              <button
-                type="button"
-                onClick={() => {
-                  onOpenHostSettings();
-                  setNavOpen(false);
-                }}
-                className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-left text-[15px] text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
-              >
-                <Settings className="size-[18px] shrink-0" />
-                <span className="min-w-0 flex-1 truncate">Settings</span>
-              </button>
+            <>
+              <div className="-mx-3">
+                <RailUsageMeters
+                  onOpenGpu={() => {
+                    setTab("link-gpu-usage");
+                    setNavOpen(false);
+                  }}
+                />
+              </div>
+              {embedded || (hostSettingsInMenu && onOpenHostSettings) ? (
+                <>
+                  {/* Host rows first (for example Upgrade), then Settings. */}
+                  {embedded ? <HostDrawerSlot onClose={closeNav} /> : null}
+                  {hostSettingsInMenu && onOpenHostSettings ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onOpenHostSettings();
+                        setNavOpen(false);
+                      }}
+                      className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-left text-[15px] text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+                    >
+                      <Settings className="size-[18px] shrink-0" />
+                      <span className="min-w-0 flex-1 truncate">Settings</span>
+                    </button>
+                  ) : null}
+                </>
               ) : null}
-              </>
-            ) : null
+            </>
           }
         />
       ) : null}
@@ -14764,8 +14774,8 @@ function RailStage({
             header carries the status line instead. Without a status line
             (no shell headline), the header keeps the mark and this stays
             empty. */}
-        {/* agentbox: limieten per agent, onderaan de zijbalk. */}
-        <RailUsageMeters collapsed={railCollapsed} />
+        {/* agentbox: limieten per agent + Colab GPU, onderaan de zijbalk. */}
+        <RailUsageMeters collapsed={railCollapsed} onOpenGpu={sideNav ? () => sideNav.onNavigate("link-gpu-usage") : undefined} />
         {railHeadline ? (
           <div
             className={cn(
